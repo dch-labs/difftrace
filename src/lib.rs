@@ -10,6 +10,7 @@
 //! `findings` (the model-output contracts), `tools` (the agent's
 //! loopctl `Tool` surface), `review` (the runner that drives batches).
 
+pub mod cli;
 pub mod config;
 pub mod diff;
 pub mod error;

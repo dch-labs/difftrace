@@ -51,4 +51,7 @@ pub enum DifftraceError {
     Summary {
         source: loopctl::structured::StructuredError,
     },
+
+    #[error("{0}")]
+    Cli(String),
 }

@@ -103,11 +103,10 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
             summary: outcome.render_markdown(),
-            comments: std::mem::take(&mut outcome.comments),
+            comments: outcome.comments.clone(),
         };
         self.submit(submission).await?;
         outcome.posted = true;
-        outcome.comments = Vec::new();
         Ok(outcome)
     }
 }

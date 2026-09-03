@@ -21,6 +21,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
 loopctl = { git = "https://github.com/dch-labs/loopctl", features = ["anthropic", "openai", "testing"] }
@@ -28,10 +29,11 @@ octocrab = "0.54"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1.52.3", features = ["rt-multi-thread"] }
 toml = "0.8"
 
 [dev-dependencies]
-tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

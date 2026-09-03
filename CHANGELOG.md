@@ -79,6 +79,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `review::batch::tests` suite (batch planning, a full two-batch dry run
   with grounding drops in the render, and the posted submission asserted
   identical to the dry-run content).
+- CLI: `difftrace review --repo owner/repo --pr N [--dry-run] [--config
+  PATH]` wiring the whole pipeline — config load, `GITHUB_TOKEN`-backed
+  gateway, diff fetch and parse, provider client, trajectory capture to
+  `~/.difftrace/trajectories`, and the orchestrated review. Dry run
+  renders the review to stdout; posting prints a findings receipt; exit
+  is non-zero only on error, never on findings. An explicit `--config`
+  path that does not exist is an error, the provider client is built
+  before any network call, and disabled trajectory capture says so on
+  stderr. Pinned by the `cli::tests` suite (argument parsing,
+  `--version`, owner/repo parsing and rejection of malformed forms) and
+  binary verification (config guard, flag-form e2e); `make e2e` runs a
+  live dry-run review behind
+  `GITHUB_TOKEN`/`DIFFTRACE_TEST_REPO`/`DIFFTRACE_TEST_PR`.
 - Findings schema: `Findings` and `ReviewSummary` as loopctl
   `StructuredOutput` types with strict JSON Schemas and a closed four-level
   severity set. Pinned by the `findings::tests` suite (schema/serde mirror,
