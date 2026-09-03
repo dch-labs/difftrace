@@ -55,6 +55,37 @@ fn summary_prompt(findings: &Findings) -> Result<String, DifftraceError> {
 }
 
 impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
+    pub(crate) fn file_names(&self) -> Vec<String> {
+        self.scope
+            .index
+            .file_names()
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    pub(crate) fn index(&self) -> &crate::diff::DiffIndex {
+        &self.scope.index
+    }
+
+    pub(crate) fn head_sha(&self) -> &str {
+        &self.scope.head_sha
+    }
+
+    pub(crate) fn settings(&self) -> &ReviewSettings {
+        &self.settings
+    }
+
+    pub(crate) async fn submit(
+        &self,
+        submission: crate::github::ReviewSubmission,
+    ) -> Result<(), DifftraceError> {
+        self.scope
+            .gateway
+            .submit_review(self.scope.pr, submission)
+            .await
+    }
+
     #[must_use]
     pub fn new(
         client: Arc<C>,

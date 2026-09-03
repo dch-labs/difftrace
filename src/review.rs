@@ -4,10 +4,12 @@
 //! trajectory, and summarizes the aggregated findings with structured
 //! output.
 
+pub mod batch;
 pub mod record;
 pub mod rubric;
 pub mod runner;
 
+pub use batch::ReviewOutcome;
 pub use record::RecordFindingsTool;
 pub use rubric::ReviewRubric;
 pub use runner::ReviewRunner;

@@ -40,13 +40,71 @@ struct SubmitInput {
     findings: Vec<Finding>,
 }
 
-struct Dropped {
-    file: String,
-    line: usize,
-    reason: &'static str,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedFinding {
+    pub file: String,
+    pub line: usize,
+    pub reason: &'static str,
 }
 
-fn render_receipt(posted: usize, dropped: &[Dropped]) -> String {
+pub(crate) struct Grounded {
+    pub(crate) findings: Vec<Finding>,
+    pub(crate) comments: Vec<CommentPosition>,
+    pub(crate) dropped: Vec<DroppedFinding>,
+}
+
+pub(crate) fn ground_findings(
+    index: &crate::diff::DiffIndex,
+    findings: Vec<Finding>,
+    max_per_file: usize,
+) -> Grounded {
+    let mut accepted = Vec::new();
+    let mut comments = Vec::new();
+    let mut dropped = Vec::new();
+    let mut per_file_counts = std::collections::BTreeMap::new();
+    for finding in findings {
+        let grounded = index.clamp_to_hunk(&finding.file, finding.line);
+        let Some(line) = grounded else {
+            dropped.push(DroppedFinding {
+                file: finding.file,
+                line: finding.line,
+                reason: "line outside the changed hunks",
+            });
+            continue;
+        };
+        let count = per_file_counts
+            .entry(finding.file.clone())
+            .or_insert(0usize);
+        if *count >= max_per_file {
+            dropped.push(DroppedFinding {
+                file: finding.file,
+                line: finding.line,
+                reason: "per-file finding cap reached",
+            });
+            continue;
+        }
+        *count = (*count).saturating_add(1);
+        comments.push(CommentPosition {
+            path: finding.file.clone(),
+            line: line as u64,
+            side: Side::Right,
+            body: format!(
+                "**[{}] {}**\n\n{}",
+                finding.severity.as_str(),
+                finding.title,
+                finding.body
+            ),
+        });
+        accepted.push(finding);
+    }
+    Grounded {
+        findings: accepted,
+        comments,
+        dropped,
+    }
+}
+
+fn render_receipt(posted: usize, dropped: &[DroppedFinding]) -> String {
     let mut text = format!("Review posted: summary plus {posted} inline findings.");
     if dropped.is_empty() {
         return text;
@@ -71,45 +129,8 @@ impl SubmitReviewTool {
         }
     }
 
-    fn ground(&self, findings: Vec<Finding>) -> (Vec<CommentPosition>, Vec<Dropped>) {
-        let mut accepted = Vec::new();
-        let mut dropped = Vec::new();
-        let mut per_file_counts = std::collections::BTreeMap::new();
-        for finding in findings {
-            let grounded = self.scope.index.clamp_to_hunk(&finding.file, finding.line);
-            let Some(line) = grounded else {
-                dropped.push(Dropped {
-                    file: finding.file,
-                    line: finding.line,
-                    reason: "line outside the changed hunks",
-                });
-                continue;
-            };
-            let count = per_file_counts
-                .entry(finding.file.clone())
-                .or_insert(0usize);
-            if *count >= self.max_per_file {
-                dropped.push(Dropped {
-                    file: finding.file,
-                    line: finding.line,
-                    reason: "per-file finding cap reached",
-                });
-                continue;
-            }
-            *count = (*count).saturating_add(1);
-            accepted.push(CommentPosition {
-                path: finding.file,
-                line: line as u64,
-                side: Side::Right,
-                body: format!(
-                    "**[{}] {}**\n\n{}",
-                    finding.severity.as_str(),
-                    finding.title,
-                    finding.body
-                ),
-            });
-        }
-        (accepted, dropped)
+    fn ground(&self, findings: Vec<Finding>) -> Grounded {
+        ground_findings(&self.scope.index, findings, self.max_per_file)
     }
 }
 
@@ -170,7 +191,9 @@ impl Tool for SubmitReviewTool {
                     "The review was already submitted; this run posts exactly one review.",
                 ));
             }
-            let (comments, dropped) = self.ground(parsed.findings);
+            let grounded = self.ground(parsed.findings);
+            let comments = grounded.comments;
+            let dropped = grounded.dropped;
             let posted = comments.len();
             let submission = ReviewSubmission {
                 head_sha: self.scope.head_sha.clone(),
@@ -231,6 +254,16 @@ diff --git a/src/lib.rs b/src/lib.rs
         json!({ "summary": summary, "findings": findings })
     }
 
+    fn finding(file: &str, line: usize) -> Finding {
+        Finding {
+            file: file.to_owned(),
+            line,
+            severity: crate::findings::Severity::Warning,
+            title: "Title".to_owned(),
+            body: "Body".to_owned(),
+        }
+    }
+
     fn finding_json(file: &str, line: usize) -> Value {
         json!({
             "file": file,
@@ -239,6 +272,28 @@ diff --git a/src/lib.rs b/src/lib.rs
             "title": "Title",
             "body": "Body"
         })
+    }
+
+    #[test]
+    fn grounding_returns_only_the_accepted_findings() -> Result<(), Box<dyn std::error::Error>> {
+        let index = diff_index()?;
+        let grounded = ground_findings(
+            &index,
+            vec![
+                finding("src/lib.rs", 2),
+                finding("src/lib.rs", 99),
+                finding("absent.rs", 1),
+            ],
+            5,
+        );
+        assert_eq!(grounded.findings.len(), 1);
+        assert_eq!(
+            grounded.findings.first().ok_or("expected a finding")?.line,
+            2
+        );
+        assert_eq!(grounded.comments.len(), 1);
+        assert_eq!(grounded.dropped.len(), 2);
+        Ok(())
     }
 
     #[tokio::test]

@@ -69,6 +69,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record-tool contracts, record-time cap receipt, zero-line rejection,
   and the output limit proven by an oversized tool payload carrying the
   `[truncated]` marker in the trajectory).
+- Orchestration: `ReviewRunner::review_all` batches the diff's changed
+  files (sorted, `batch_files` per batch, size 0 treated as 1), runs each
+  batch, aggregates and grounds the findings through the shared
+  `ground_findings` (also now the submit tool's engine), summarizes, and
+  either posts the review or returns it for a dry run — the posted body
+  and the dry-run render are the same `ReviewOutcome::render_markdown`
+  output, with dropped findings recorded in both. Pinned by the
+  `review::batch::tests` suite (batch planning, a full two-batch dry run
+  with grounding drops in the render, and the posted submission asserted
+  identical to the dry-run content).
 - Findings schema: `Findings` and `ReviewSummary` as loopctl
   `StructuredOutput` types with strict JSON Schemas and a closed four-level
   severity set. Pinned by the `findings::tests` suite (schema/serde mirror,
