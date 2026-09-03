@@ -40,7 +40,7 @@ fn main() -> ExitCode {
 
 async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceError> {
     let repo = parse_repo(&args.repo).map_err(DifftraceError::Cli)?;
-    let config = match &args.config {
+    let mut config = match &args.config {
         Some(path) if !path.is_file() => {
             return Err(DifftraceError::Cli(format!(
                 "config file not found: {}",
@@ -50,6 +50,7 @@ async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceErro
         Some(path) => DifftraceConfig::load_from(path)?,
         None => DifftraceConfig::load()?,
     };
+    config.apply_env_overrides()?;
     let client = std::sync::Arc::new(build_client(&config)?);
     let token = std::env::var("GITHUB_TOKEN")
         .ok()

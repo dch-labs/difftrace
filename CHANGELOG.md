@@ -31,7 +31,8 @@ reaches crates.io; the switch is a drop-in once it does.
   empty strings counting as missing. The `zai` profile rides loopctl's
   Anthropic-compatible client at `https://api.z.ai/api/anthropic`
   (default model `glm-4.7`, key from `ZAI_API_KEY` or its
-  `ZHIPUAI_API_KEY` alias). Pinned by the `provider::tests` suite
+  `ZHIPUAI_API_KEY` alias, empty strings counting as missing on either
+  side of the fallback). Pinned by the `provider::tests` suite
   (per-profile construction, missing/empty key errors naming the variable,
   base-URL overrides on both profiles, Ollama model requirement; the zai
   suite pins the endpoint, default model, alias fallback, and model
@@ -96,7 +97,11 @@ reaches crates.io; the switch is a drop-in once it does.
   gateway, diff fetch and parse, provider client, trajectory capture to
   `~/.difftrace/trajectories`, and the orchestrated review. Dry run
   renders the review to stdout; posting prints a findings receipt; exit
-  is non-zero only on error, never on findings. An explicit `--config`
+  is non-zero only on error, never on findings. The
+  `DIFFTRACE_PROFILE` environment variable overrides the configured
+  profile without a config file (pinned by the `config::tests` override
+  suite alongside profile-string parsing and rejection). An explicit
+  `--config`
   path that does not exist is an error, the provider client is built
   before any network call, and disabled trajectory capture says so on
   stderr. Pinned by the `cli::tests` suite (argument parsing,

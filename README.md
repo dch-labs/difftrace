@@ -35,6 +35,11 @@ difftrace review --repo owner/repo --pr 42 [--dry-run] [--config PATH]
 - `--config PATH` — explicit config file; default `~/.difftrace/config.toml`
   (a missing file there means defaults; a missing explicit path is an error)
 
+The `DIFFTRACE_PROFILE` environment variable overrides
+`provider.profile` without a config file — the natural mechanism in CI,
+where no `~/.difftrace/config.toml` exists (e.g. `DIFFTRACE_PROFILE=zai`
+in a GitHub Action).
+
 Progress goes to stderr; the rendered review (dry run) and the posting
 receipt go to stdout. Exit status is non-zero only on error — a review
 full of findings still exits `0`.

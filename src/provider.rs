@@ -183,10 +183,9 @@ fn env_key_with_alias(
     primary: &'static str,
     alias: &'static str,
 ) -> Result<String, DifftraceError> {
-    std::env::var(primary)
-        .or_else(|_| std::env::var(alias))
-        .ok()
-        .filter(|value| !value.is_empty())
+    let non_empty = |var: &'static str| std::env::var(var).ok().filter(|v| !v.is_empty());
+    non_empty(primary)
+        .or_else(|| non_empty(alias))
         .ok_or(DifftraceError::MissingApiKey { env_var: primary })
 }
 
@@ -351,6 +350,31 @@ mod tests {
         env.set("ZHIPUAI_API_KEY", "alias-key");
         let client = build_client(&cfg(ProviderProfile::Zai))?;
         assert_eq!(client.base_url(), "https://api.z.ai/api/anthropic");
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_primary_key_falls_through_to_the_alias() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.set("ZAI_API_KEY", "");
+        env.set("ZHIPUAI_API_KEY", "alias-key");
+        let client = build_client(&cfg(ProviderProfile::Zai))?;
+        assert_eq!(client.base_url(), "https://api.z.ai/api/anthropic");
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_alias_key_still_falls_back_to_missing() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.set("ZAI_API_KEY", "");
+        env.set("ZHIPUAI_API_KEY", "");
+        let err = build_client(&cfg(ProviderProfile::Zai))
+            .err()
+            .ok_or("expected an error")?;
+        assert!(
+            err.to_string().contains("ZAI_API_KEY"),
+            "error names the primary: {err}"
+        );
         Ok(())
     }
 

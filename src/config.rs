@@ -57,6 +57,17 @@ pub struct DifftraceConfig {
 }
 
 impl DifftraceConfig {
+    pub fn apply_env_overrides(&mut self) -> Result<(), crate::error::DifftraceError> {
+        if let Some(profile) = std::env::var("DIFFTRACE_PROFILE")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            self.provider.profile =
+                parse_profile(&profile).map_err(crate::error::DifftraceError::Cli)?;
+        }
+        Ok(())
+    }
+
     pub fn load() -> Result<Self, DifftraceError> {
         let home = dirs::home_dir().ok_or(DifftraceError::NoHomeDir)?;
         let path = home.join(".difftrace").join("config.toml");
@@ -76,6 +87,18 @@ impl DifftraceConfig {
 
     pub fn from_toml_str(contents: &str) -> Result<Self, DifftraceError> {
         toml::from_str(contents).map_err(|source| DifftraceError::ConfigParse { source })
+    }
+}
+
+pub fn parse_profile(raw: &str) -> Result<ProviderProfile, String> {
+    match raw {
+        "anthropic" => Ok(ProviderProfile::Anthropic),
+        "openai" => Ok(ProviderProfile::OpenAi),
+        "zai" => Ok(ProviderProfile::Zai),
+        "ollama" => Ok(ProviderProfile::Ollama),
+        other => Err(format!(
+            "unknown provider profile {other:?}; expected anthropic, openai, zai, or ollama"
+        )),
     }
 }
 
@@ -132,6 +155,62 @@ mod tests {
     fn a_missing_config_file_yields_the_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let cfg = DifftraceConfig::load_from(Path::new("/nonexistent-difftrace/config.toml"))?;
         assert_eq!(cfg, DifftraceConfig::default());
+        Ok(())
+    }
+
+    #[test]
+    fn profile_strings_parse_to_their_variants() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(parse_profile("anthropic")?, ProviderProfile::Anthropic);
+        assert_eq!(parse_profile("openai")?, ProviderProfile::OpenAi);
+        assert_eq!(parse_profile("zai")?, ProviderProfile::Zai);
+        assert_eq!(parse_profile("ollama")?, ProviderProfile::Ollama);
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_profile_string_names_the_valid_ones() -> Result<(), Box<dyn std::error::Error>> {
+        let Err(err) = parse_profile("grok") else {
+            return Err("expected an unknown profile to fail".into());
+        };
+        assert!(err.contains("anthropic"), "error lists the options: {err}");
+        assert!(err.contains("zai"), "error lists the options: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn the_env_profile_override_replaces_the_configured_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_PROFILE"]);
+        env.set("DIFFTRACE_PROFILE", "zai");
+        let mut config = DifftraceConfig::default();
+        config.apply_env_overrides()?;
+        assert_eq!(config.provider.profile, ProviderProfile::Zai);
+        env.remove("DIFFTRACE_PROFILE");
+        Ok(())
+    }
+
+    #[test]
+    fn an_unset_or_empty_env_override_keeps_the_config() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_PROFILE"]);
+        env.remove("DIFFTRACE_PROFILE");
+        let mut config = DifftraceConfig::default();
+        config.apply_env_overrides()?;
+        assert_eq!(config.provider.profile, ProviderProfile::Anthropic);
+        env.set("DIFFTRACE_PROFILE", "");
+        config.apply_env_overrides()?;
+        assert_eq!(config.provider.profile, ProviderProfile::Anthropic);
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_env_override_is_an_error() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_PROFILE"]);
+        env.set("DIFFTRACE_PROFILE", "nonsense");
+        let mut config = DifftraceConfig::default();
+        let Err(err) = config.apply_env_overrides() else {
+            return Err("expected the invalid override to fail".into());
+        };
+        assert!(err.to_string().contains("nonsense"));
         Ok(())
     }
 }
