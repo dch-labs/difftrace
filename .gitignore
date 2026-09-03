@@ -1,0 +1,9 @@
+/target
+*.swp
+*.swo
+*~
+.DS_Store
+.env
+
+# Local planning record — never ships
+PLAN.md

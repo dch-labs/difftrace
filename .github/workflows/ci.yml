@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: difftrace
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: dch-labs/loopctl
+          path: loopctl
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            difftrace
+            loopctl
+      - run: cargo check --all-features
+        working-directory: difftrace
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: difftrace
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: dch-labs/loopctl
+          path: loopctl
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            difftrace
+            loopctl
+      - run: cargo test --all-features
+        working-directory: difftrace
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: difftrace
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: dch-labs/loopctl
+          path: loopctl
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            difftrace
+            loopctl
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: difftrace
+
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: difftrace
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+        working-directory: difftrace
+
+  doctest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: difftrace
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: dch-labs/loopctl
+          path: loopctl
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            difftrace
+            loopctl
+      - run: cargo test --doc --all-features
+        working-directory: difftrace
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: difftrace
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          repository: dch-labs/loopctl
+          path: loopctl
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            difftrace
+            loopctl
+      - run: cargo doc --no-deps --all-features
+        working-directory: difftrace
+        env:
+          RUSTDOCFLAGS: -D warnings
