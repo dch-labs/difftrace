@@ -99,6 +99,16 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             .await
     }
 
+    pub(crate) async fn own_open_threads(
+        &self,
+    ) -> Result<Vec<crate::github::ReviewThread>, DifftraceError> {
+        self.scope.gateway.own_open_threads(self.scope.pr).await
+    }
+
+    pub(crate) async fn resolve_thread(&self, thread_id: String) -> Result<(), DifftraceError> {
+        self.scope.gateway.resolve_thread(thread_id).await
+    }
+
     #[must_use]
     pub fn new(
         client: Arc<C>,
@@ -166,7 +176,7 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         let mut messages = vec![Message::user(summary_prompt(&merged)?)];
         let system = Some(SUMMARY_SYSTEM.to_owned());
         let options = RequestOptions::new().with_response_format(summary_response_format());
-        let mut attempts_left: u8 = 1;
+        let mut attempts_left: u8 = 2;
         loop {
             let request = loopctl::api::StreamRequest {
                 messages: messages.clone(),
@@ -290,6 +300,7 @@ diff --git a/src/lib.rs b/src/lib.rs
                         "file": "src/lib.rs",
                         "line": 2,
                         "severity": "warning",
+                        "complexity": 3,
                         "title": "Lock dropped early",
                         "body": "The guard is dropped before the read completes."
                     }]
@@ -425,7 +436,7 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[tokio::test]
-    async fn a_summary_still_malformed_after_the_retry_fails()
+    async fn a_summary_still_malformed_after_the_retries_fails()
     -> Result<(), Box<dyn std::error::Error>> {
         let bad = json!({
             "summary": { "text": "nested where a string belongs" },
@@ -433,6 +444,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             "tests": "Covered."
         });
         let client = MockApiClient::new("review-model").with_responses(vec![
+            text_response(&bad.to_string()),
             text_response(&bad.to_string()),
             text_response(&bad.to_string()),
         ]);
@@ -446,6 +458,30 @@ diff --git a/src/lib.rs b/src/lib.rs
             err.to_string().contains("expected a string"),
             "names the schema breach: {err}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_summary_recovering_on_the_final_attempt_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let good = json!({
+            "summary": "Adds retry with backoff.",
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let bad = json!({
+            "summary": { "text": "nested where a string belongs" },
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            text_response(&bad.to_string()),
+            text_response(&bad.to_string()),
+            text_response(&good.to_string()),
+        ]);
+        let runner = runner(Arc::new(client), ReviewSettings::default(), None)?;
+        let summary = runner.summarize(&[Findings::default()]).await?;
+        assert_eq!(summary.summary, "Adds retry with backoff.");
         Ok(())
     }
 

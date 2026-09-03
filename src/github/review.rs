@@ -28,6 +28,21 @@ impl Side {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewEvent {
+    Approved,
+    ChangesRequested,
+}
+
+impl ReviewEvent {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "APPROVED",
+            Self::ChangesRequested => "REQUEST_CHANGES",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommentPosition {
     pub path: String,
@@ -39,6 +54,7 @@ pub struct CommentPosition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewSubmission {
     pub head_sha: String,
+    pub event: ReviewEvent,
     pub summary: String,
     pub comments: Vec<CommentPosition>,
 }
@@ -56,7 +72,7 @@ impl<'a> WireReview<'a> {
         Self {
             commit_id: submission.head_sha.as_str(),
             body: submission.summary.as_str(),
-            event: "COMMENT",
+            event: submission.event.as_str(),
             comments: submission
                 .comments
                 .iter()
@@ -102,6 +118,7 @@ mod tests {
     fn the_wire_review_is_built_from_the_submission() -> Result<(), Box<dyn std::error::Error>> {
         let submission = ReviewSubmission {
             head_sha: "abc123".to_owned(),
+            event: ReviewEvent::ChangesRequested,
             summary: "Two findings.".to_owned(),
             comments: vec![
                 CommentPosition {
@@ -128,7 +145,7 @@ mod tests {
         let u64_at = |pointer: &str| value.pointer(pointer).and_then(serde_json::Value::as_u64);
         assert_eq!(str_at("/commit_id"), Some("abc123".to_owned()));
         assert_eq!(str_at("/body"), Some("Two findings.".to_owned()));
-        assert_eq!(str_at("/event"), Some("COMMENT".to_owned()));
+        assert_eq!(str_at("/event"), Some("REQUEST_CHANGES".to_owned()));
         assert_eq!(
             value
                 .pointer("/comments")
@@ -157,6 +174,7 @@ mod tests {
     fn an_empty_submission_posts_a_summary_only_review() -> Result<(), Box<dyn std::error::Error>> {
         let submission = ReviewSubmission {
             head_sha: "abc123".to_owned(),
+            event: ReviewEvent::Approved,
             summary: "Clean.".to_owned(),
             comments: Vec::new(),
         };
@@ -170,9 +188,15 @@ mod tests {
         );
         assert_eq!(
             value.pointer("/event").and_then(serde_json::Value::as_str),
-            Some("COMMENT")
+            Some("APPROVED")
         );
         Ok(())
+    }
+
+    #[test]
+    fn review_events_map_to_their_wire_names() {
+        assert_eq!(ReviewEvent::Approved.as_str(), "APPROVED");
+        assert_eq!(ReviewEvent::ChangesRequested.as_str(), "REQUEST_CHANGES");
     }
 
     #[test]

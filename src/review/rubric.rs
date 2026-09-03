@@ -14,6 +14,8 @@ Rules:
   them will be dropped.
 - Severity: nitpick, suggestion, warning, critical — reserve critical for
   defects that will bite in production.
+- Complexity: rate each finding 1-5, where 1 is a one-liner and 5 needs
+  restructuring.
 - Report defects and concrete improvements; do not restate the diff.
 - Use the tools to read context you need (file diff sections, full files,
   prior comments), then call record_findings exactly once with every
@@ -92,6 +94,7 @@ mod tests {
             })
             .ok_or("expected a value")?;
         assert!(text.contains("record_findings exactly once"));
+        assert!(text.contains("rate each finding 1-5"));
         assert!(text.contains("#42 \"Fix the worker\""));
         assert!(text.contains("Restarts consumers."));
         Ok(())

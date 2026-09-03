@@ -11,7 +11,9 @@ use crate::findings::Findings;
 use crate::findings::ReviewSummary;
 use crate::findings::Severity;
 use crate::github::CommentPosition;
+use crate::github::ReviewEvent;
 use crate::github::ReviewSubmission;
+use crate::github::ReviewThread;
 use crate::prompts::fix_all_section;
 use crate::review::ReviewRunner;
 use crate::tools::submit::DroppedFinding;
@@ -77,13 +79,40 @@ fn is_blocking(severity: Severity) -> bool {
     matches!(severity, Severity::Warning | Severity::Critical)
 }
 
+pub(crate) fn review_event(findings: &[Finding]) -> ReviewEvent {
+    let blocking = findings.iter().any(|finding| is_blocking(finding.severity));
+    if blocking {
+        ReviewEvent::ChangesRequested
+    } else {
+        ReviewEvent::Approved
+    }
+}
+
+fn threads_to_resolve(threads: &[ReviewThread], comments: &[CommentPosition]) -> Vec<String> {
+    threads
+        .iter()
+        .filter_map(|thread| {
+            let still_present = thread.line.or(thread.original_line).is_some_and(|anchor| {
+                comments
+                    .iter()
+                    .any(|comment| comment.path == thread.path && comment.line == anchor)
+            });
+            if still_present {
+                None
+            } else {
+                Some(thread.id.clone())
+            }
+        })
+        .collect()
+}
+
 fn verdict_section(findings: &[Finding]) -> String {
     let blockers = findings
         .iter()
         .filter(|finding| is_blocking(finding.severity))
         .collect::<Vec<_>>();
     if blockers.is_empty() {
-        return "## Verdict\n\n🟢 Good to go — no blocking findings. Nitpicks and suggestions, if any, don't block."
+        return "## Verdict\n\n🎉 Good to go — no blocking findings. Nitpicks and suggestions, if any, don't block."
             .to_owned();
     }
     let noun = if blockers.len() == 1 {
@@ -96,12 +125,13 @@ fn verdict_section(findings: &[Finding]) -> String {
         .enumerate()
         .map(|(index, finding)| {
             format!(
-                "{}. `{}:{}` — [{}] {}",
+                "{}. `{}:{}` — {} {} ({})",
                 index.saturating_add(1),
                 finding.file,
                 finding.line,
-                finding.severity.as_str(),
+                finding.severity.glyph(),
                 finding.title,
+                crate::findings::complexity_glyph(finding.complexity),
             )
         })
         .collect::<Vec<_>>()
@@ -174,12 +204,39 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         if dry_run {
             return Ok(outcome);
         }
+        let previous_threads = match self.own_open_threads().await {
+            Ok(threads) => threads,
+            Err(err) => {
+                tracing::warn!(
+                    target: "difftrace::review",
+                    error = %err,
+                    "could not list previous review threads; none will be resolved"
+                );
+                Vec::new()
+            }
+        };
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
+            event: review_event(&outcome.findings),
             summary: outcome.render_markdown(),
             comments: outcome.comments.clone(),
         };
         self.submit(submission).await?;
+        let resolved = threads_to_resolve(&previous_threads, &outcome.comments);
+        for id in &resolved {
+            if let Err(err) = self.resolve_thread(id.clone()).await {
+                tracing::warn!(
+                    target: "difftrace::review",
+                    error = %err,
+                    "could not resolve a previous review thread"
+                );
+            }
+        }
+        tracing::info!(
+            target: "difftrace::review",
+            resolved = resolved.len(),
+            "resolved previous threads"
+        );
         outcome.posted = true;
         Ok(outcome)
     }
@@ -189,6 +246,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
 mod tests {
     use super::*;
     use crate::github::PrOverview;
+    use crate::github::Side;
     use crate::tools::fake_gateway::FakeGateway;
     use loopctl::testing::MockApiClient;
     use loopctl::testing::MockResponse;
@@ -262,6 +320,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             "file": file,
             "line": line,
             "severity": severity,
+            "complexity": 3,
             "title": "Title",
             "body": "Body"
         })
@@ -341,6 +400,76 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert!(batches.iter().all(|batch| batch.len() == 1));
     }
 
+    #[test]
+    fn only_unreposted_threads_are_slated_for_resolution() {
+        let threads = vec![
+            ReviewThread {
+                id: "T_KEEP".to_owned(),
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_FIXED".to_owned(),
+                path: "src/beta.rs".to_owned(),
+                line: Some(13),
+                original_line: Some(13),
+            },
+            ReviewThread {
+                id: "T_MOVED".to_owned(),
+                path: "src/gone.rs".to_owned(),
+                line: None,
+                original_line: Some(40),
+            },
+        ];
+        let comments = vec![
+            CommentPosition {
+                path: "src/alpha.rs".to_owned(),
+                line: 2,
+                side: Side::Right,
+                body: String::new(),
+            },
+            CommentPosition {
+                path: "src/beta.rs".to_owned(),
+                line: 11,
+                side: Side::Right,
+                body: String::new(),
+            },
+        ];
+        let slated = threads_to_resolve(&threads, &comments);
+        assert_eq!(slated, vec!["T_FIXED".to_owned(), "T_MOVED".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn a_re_review_resolves_unreposted_threads_and_requests_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::with_threads(vec![
+            ReviewThread {
+                id: "T_KEEP".to_owned(),
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_FIXED".to_owned(),
+                path: "src/beta.rs".to_owned(),
+                line: Some(13),
+                original_line: Some(13),
+            },
+        ]));
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        let outcome = runner.review_all(false).await?;
+        assert!(outcome.posted);
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(submission.event, ReviewEvent::ChangesRequested);
+        assert_eq!(
+            gateway.resolved_threads(),
+            vec!["T_FIXED".to_owned()],
+            "only the thread whose line was not reposted resolves"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn stage_and_observer_logs_reach_an_installed_subscriber()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -384,8 +513,8 @@ diff --git a/src/beta.rs b/src/beta.rs
         let rendered = outcome.render_markdown();
         assert!(rendered.starts_with("## Verdict"));
         assert!(rendered.contains("🔴 Not good to go — 2 blocking findings:"));
-        assert!(rendered.contains("1. `src/alpha.rs:2` — [warning] Title"));
-        assert!(rendered.contains("2. `src/beta.rs:11` — [warning] Title"));
+        assert!(rendered.contains("1. `src/alpha.rs:2` — ⚠️ Title (🟡)"));
+        assert!(rendered.contains("2. `src/beta.rs:11` — ⚠️ Title (🟡)"));
         assert!(
             !rendered.contains("3 blocking"),
             "an unanchored finding must not join the verdict's blockers"
@@ -395,9 +524,12 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert!(rendered.contains("- Retry can outlive shutdown."));
         assert!(rendered.contains("## Tests\nCovered by integration tests."));
         assert!(rendered.contains("## 🤖 Fix all findings"));
-        assert!(rendered.contains("1. `src/alpha.rs:2` — [warning] Title"));
-        assert!(rendered.contains("2. `src/beta.rs:11` — [warning] Title"));
-        assert!(rendered.contains("- `src/beta.rs:999` — [warning] Title"));
+        assert!(rendered.contains("1. `src/alpha.rs:2` — ⚠️ Title (🟡)"));
+        assert!(rendered.contains("2. `src/beta.rs:11` — ⚠️ Title (🟡)"));
+        assert!(
+            rendered
+                .contains("- `src/beta.rs:999` — ⚠️ Title (🟡, line outside the changed hunks)")
+        );
         assert!(rendered.contains("PR #42"));
         assert!(rendered.contains("commit headsha"));
         assert!(rendered.contains("<summary>Copy the fix-all prompt</summary>"));
@@ -427,7 +559,7 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert!(outcome.dropped.is_empty());
         let rendered = outcome.render_markdown();
         assert!(rendered.starts_with("## Verdict"));
-        assert!(rendered.contains("🟢 Good to go — no blocking findings."));
+        assert!(rendered.contains("🎉 Good to go — no blocking findings."));
         assert!(rendered.contains("## Risks\n\n(none flagged)"));
         assert!(rendered.contains("## Summary\nNothing to flag."));
         assert!(
@@ -461,13 +593,16 @@ diff --git a/src/beta.rs b/src/beta.rs
             text_response(&summary.to_string()),
         ]);
         let gateway = Arc::new(FakeGateway::empty());
-        let runner = make_runner(Arc::new(client), gateway)?;
-        let outcome = runner.review_all(true).await?;
+        let runner = make_runner(Arc::new(client), Arc::clone(&gateway))?;
+        let outcome = runner.review_all(false).await?;
         assert_eq!(outcome.comments.len(), 2);
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(submission.event, ReviewEvent::Approved);
         let rendered = outcome.render_markdown();
-        assert!(rendered.contains("🟢 Good to go — no blocking findings."));
-        assert!(rendered.contains("1. `src/alpha.rs:2` — [suggestion] Title"));
-        assert!(rendered.contains("2. `src/beta.rs:11` — [nitpick] Title"));
+        assert!(rendered.contains("🎉 Good to go — no blocking findings."));
+        assert!(rendered.contains("1. `src/alpha.rs:2` — 💡 Title"));
+        assert!(rendered.contains("2. `src/beta.rs:11` — 💬 Title"));
+        assert!(gateway.resolved_threads().is_empty());
         Ok(())
     }
 

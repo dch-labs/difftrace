@@ -12,10 +12,41 @@ use base64::Engine as _;
 use octocrab::Octocrab;
 
 pub use review::CommentPosition;
+pub use review::ReviewEvent;
 pub use review::ReviewSubmission;
 pub use review::Side;
 
 use crate::error::DifftraceError;
+
+const THREADS_QUERY: &str = "\
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\
+  repository(owner: $owner, name: $name) {\
+    pullRequest(number: $number) {\
+      reviewThreads(first: 100, after: $cursor) {\
+        nodes {\
+          id\
+          isResolved\
+          comments(first: 1) {\
+            nodes {\
+              author { login }\
+              path\
+              line\
+              originalLine\
+            }\
+          }\
+        }\
+        pageInfo { hasNextPage endCursor }\
+      }\
+    }\
+  }\
+}";
+
+const RESOLVE_MUTATION: &str = "\
+mutation($threadId: ID!) {\
+  resolveReviewThread(input: { threadId: $threadId }) {\
+    thread { isResolved }\
+  }\
+}";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRef {
@@ -77,6 +108,119 @@ impl From<octocrab::models::pulls::Comment> for ExistingComment {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewThread {
+    pub id: String,
+    pub path: String,
+    pub line: Option<u64>,
+    pub original_line: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadsWire {
+    #[serde(default)]
+    repository: Option<RepositoryWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryWire {
+    #[serde(default)]
+    pull_request: Option<PullRequestWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PullRequestWire {
+    #[serde(default)]
+    review_threads: Option<ReviewThreadsWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReviewThreadsWire {
+    #[serde(default)]
+    nodes: Vec<ThreadWire>,
+    #[serde(default)]
+    page_info: Option<PageInfoWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfoWire {
+    #[serde(default)]
+    has_next_page: bool,
+    #[serde(default)]
+    end_cursor: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadWire {
+    id: String,
+    is_resolved: bool,
+    #[serde(default)]
+    comments: Option<CommentsWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentsWire {
+    #[serde(default)]
+    nodes: Vec<ThreadCommentWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadCommentWire {
+    #[serde(default)]
+    author: Option<AuthorWire>,
+    path: String,
+    #[serde(default)]
+    line: Option<u64>,
+    #[serde(default)]
+    original_line: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthorWire {
+    login: String,
+}
+
+fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<ReviewThread>, Option<String>) {
+    let Some(threads) = wire
+        .repository
+        .and_then(|repository| repository.pull_request)
+        .and_then(|pull_request| pull_request.review_threads)
+    else {
+        return (Vec::new(), None);
+    };
+    let next = match threads.page_info {
+        Some(ref info) if info.has_next_page => info.end_cursor.clone(),
+        _ => None,
+    };
+    let mapped = threads
+        .nodes
+        .into_iter()
+        .filter(|thread| !thread.is_resolved)
+        .filter_map(|thread| {
+            let comment = thread.comments?.nodes.into_iter().next()?;
+            let login = comment.author.map(|author| author.login)?;
+            if login != own_login {
+                return None;
+            }
+            Some(ReviewThread {
+                id: thread.id,
+                path: comment.path,
+                line: comment.line,
+                original_line: comment.original_line,
+            })
+        })
+        .collect();
+    (mapped, next)
+}
+
 pub trait PrGateway: Send + Sync {
     fn pr_overview(
         &self,
@@ -103,6 +247,16 @@ pub trait PrGateway: Send + Sync {
         &self,
         pr: u64,
         submission: ReviewSubmission,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
+
+    fn own_open_threads(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ReviewThread>, DifftraceError>> + Send + '_>>;
+
+    fn resolve_thread(
+        &self,
+        thread_id: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
 }
 
@@ -272,6 +426,66 @@ impl PrGateway for GitHubClient {
         Box::pin(
             async move { review::post_review(&self.crab, &owner, &repo, pr, submission).await },
         )
+    }
+
+    fn own_open_threads(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ReviewThread>, DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let login = self
+                .crab
+                .current()
+                .user()
+                .await
+                .map_err(Self::map_github_error)?
+                .login;
+            let mut threads = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let payload = serde_json::json!({
+                    "query": THREADS_QUERY,
+                    "variables": {
+                        "owner": owner.as_str(),
+                        "name": repo.as_str(),
+                        "number": pr,
+                        "cursor": cursor,
+                    },
+                });
+                let wire: ThreadsWire = self
+                    .crab
+                    .graphql(&payload)
+                    .await
+                    .map_err(Self::map_github_error)?;
+                let (page, next) = own_threads_page(wire, &login);
+                threads.extend(page);
+                match next {
+                    Some(next_cursor) => cursor = Some(next_cursor),
+                    None => break,
+                }
+            }
+            Ok(threads)
+        })
+    }
+
+    fn resolve_thread(
+        &self,
+        thread_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        Box::pin(async move {
+            let payload = serde_json::json!({
+                "query": RESOLVE_MUTATION,
+                "variables": { "threadId": thread_id },
+            });
+            let _: serde_json::Value = self
+                .crab
+                .graphql(&payload)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(())
+        })
     }
 }
 
@@ -484,5 +698,99 @@ mod tests {
             "error names the problem: {err}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn own_threads_come_from_the_wire_filtered_by_author_and_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let wire: ThreadsWire = serde_json::from_value(json!({
+            "repository": { "pullRequest": { "reviewThreads": { "nodes": [
+                {
+                    "id": "T_KEEP",
+                    "isResolved": false,
+                    "comments": { "nodes": [ {
+                        "author": { "login": "difftrace[bot]" },
+                        "path": "src/a.rs", "line": 2, "originalLine": 2
+                    } ] }
+                },
+                {
+                    "id": "T_DONE",
+                    "isResolved": true,
+                    "comments": { "nodes": [ {
+                        "author": { "login": "difftrace[bot]" },
+                        "path": "src/a.rs", "line": 5, "originalLine": 5
+                    } ] }
+                },
+                {
+                    "id": "T_FOREIGN",
+                    "isResolved": false,
+                    "comments": { "nodes": [ {
+                        "author": { "login": "dana" },
+                        "path": "src/b.rs", "line": 7, "originalLine": 7
+                    } ] }
+                },
+                {
+                    "id": "T_OUTDATED",
+                    "isResolved": false,
+                    "comments": { "nodes": [ {
+                        "author": { "login": "difftrace[bot]" },
+                        "path": "src/c.rs", "line": null, "originalLine": 30
+                    } ] }
+                }
+            ] , "pageInfo": { "hasNextPage": false } } } }
+        }))?;
+        let (threads, next) = own_threads_page(wire, "difftrace[bot]");
+        assert_eq!(threads.len(), 2);
+        assert!(threads.iter().any(|thread| {
+            thread.id == "T_KEEP" && thread.path == "src/a.rs" && thread.line == Some(2)
+        }));
+        assert!(
+            threads
+                .iter()
+                .any(|thread| thread.id == "T_OUTDATED" && thread.line.is_none())
+        );
+        assert_eq!(next, None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_repository_section_yields_no_threads() -> Result<(), Box<dyn std::error::Error>> {
+        let wire: ThreadsWire = serde_json::from_value(json!({}))?;
+        let (threads, next) = own_threads_page(wire, "difftrace[bot]");
+        assert!(threads.is_empty());
+        assert_eq!(next, None);
+        Ok(())
+    }
+
+    #[test]
+    fn thread_pages_carry_the_next_cursor_only_when_one_exists()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let page = |has_next: bool, cursor: serde_json::Value| {
+            json!({
+                "repository": { "pullRequest": { "reviewThreads": {
+                    "nodes": [],
+                    "pageInfo": { "hasNextPage": has_next, "endCursor": cursor }
+                } } }
+            })
+        };
+        let more: ThreadsWire = serde_json::from_value(page(true, json!("CURSOR_1")))?;
+        let (_, next) = own_threads_page(more, "difftrace[bot]");
+        assert_eq!(next, Some("CURSOR_1".to_owned()));
+        let last: ThreadsWire = serde_json::from_value(page(false, json!("CURSOR_1")))?;
+        let (_, next) = own_threads_page(last, "difftrace[bot]");
+        assert_eq!(next, None);
+        let guarded: ThreadsWire = serde_json::from_value(page(true, json!(null)))?;
+        let (_, next) = own_threads_page(guarded, "difftrace[bot]");
+        assert_eq!(
+            next, None,
+            "a page claiming more without a cursor must end the loop"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_resolve_mutation_targets_the_thread() {
+        assert!(RESOLVE_MUTATION.contains("resolveReviewThread"));
+        assert!(RESOLVE_MUTATION.contains("$threadId"));
     }
 }

@@ -22,6 +22,7 @@ use serde_json::json;
 use crate::findings::Finding;
 use crate::findings::Findings;
 use crate::findings::findings_array_schema;
+use crate::findings::reject_out_of_range_complexity;
 use crate::findings::reject_zero_lines;
 use crate::github::CommentPosition;
 use crate::github::ReviewSubmission;
@@ -184,6 +185,7 @@ impl Tool for SubmitReviewTool {
             let parsed: SubmitInput = serde_json::from_value(input)
                 .map_err(|err| ToolError::InvalidInput(err.to_string()))?;
             reject_zero_lines(&parsed.findings).map_err(ToolError::InvalidInput)?;
+            reject_out_of_range_complexity(&parsed.findings).map_err(ToolError::InvalidInput)?;
             if self.submitted.swap(true, Ordering::SeqCst) {
                 return Ok(ToolOutput::error_text(
                     "The review was already submitted; this run posts exactly one review.",
@@ -195,6 +197,7 @@ impl Tool for SubmitReviewTool {
             let posted = comments.len();
             let submission = ReviewSubmission {
                 head_sha: self.scope.head_sha.clone(),
+                event: crate::review::batch::review_event(&grounded.findings),
                 summary: parsed.summary,
                 comments,
             };
@@ -257,6 +260,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             file: file.to_owned(),
             line,
             severity: crate::findings::Severity::Warning,
+            complexity: 3,
             title: "Title".to_owned(),
             body: "Body".to_owned(),
         }
@@ -267,6 +271,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             "file": file,
             "line": line,
             "severity": "warning",
+            "complexity": 3,
             "title": "Title",
             "body": "Body"
         })
@@ -320,7 +325,8 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(comment.path, "src/lib.rs");
         assert_eq!(comment.line, 2);
         assert_eq!(comment.side, Side::Right);
-        assert!(comment.body.contains("[warning] Title"));
+        assert!(comment.body.contains("badge/warning-orange"));
+        assert!(comment.body.contains("**Title**"));
         assert!(comment.body.contains("<summary>🤖 Fix prompt</summary>"));
         assert!(comment.body.contains("File: src/lib.rs, line 2"));
         Ok(())
@@ -476,6 +482,7 @@ diff --git a/src/lib.rs b/src/lib.rs
                         "file": "src/lib.rs",
                         "line": 0,
                         "severity": "warning",
+                        "complexity": 3,
                         "title": "T",
                         "body": "B"
                     })],
@@ -486,6 +493,39 @@ diff --git a/src/lib.rs b/src/lib.rs
             .err()
             .ok_or("expected an error")?;
         assert!(err.to_string().contains("at least 1"));
+        assert_eq!(gateway.submit_calls(), 0);
+        tool.call(
+            input("Summary.", &[finding_json("src/lib.rs", 2)]),
+            &ToolContext::default(),
+        )
+        .await?;
+        assert_eq!(gateway.submit_calls(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_complexity_is_rejected_without_consuming_the_submission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
+        let err = tool
+            .call(
+                input(
+                    "Summary.",
+                    &[json!({
+                        "file": "src/lib.rs",
+                        "line": 2,
+                        "severity": "warning",
+                        "complexity": 6,
+                        "title": "T",
+                        "body": "B"
+                    })],
+                ),
+                &ToolContext::default(),
+            )
+            .await
+            .err()
+            .ok_or("expected an error")?;
+        assert!(err.to_string().contains("1-5"));
         assert_eq!(gateway.submit_calls(), 0);
         tool.call(
             input("Summary.", &[finding_json("src/lib.rs", 2)]),

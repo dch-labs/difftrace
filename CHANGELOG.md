@@ -75,8 +75,9 @@ reaches crates.io; the switch is a drop-in once it does.
   directory), clean soft-stop on turn-budget exhaustion, and a
   structured-output summary pass over the aggregated findings, sent with
   `strict` off because Anthropic-protocol endpoints (the default profile
-  and zai) refuse strict response formats at request time, with one
-  corrective retry when the returned JSON fails schema parsing; the
+  and zai) refuse strict response formats at request time, with two
+  corrective retries (three attempts) when the returned JSON fails
+  schema parsing; the
   per-file findings cap is enforced at record time with a receipt, and
   findings carrying `line: 0` are rejected where findings enter the
   system. Pinned by the `review::*::tests` suites (findings recorded
@@ -148,3 +149,33 @@ reaches crates.io; the switch is a drop-in once it does.
   prompts. Derived mechanically from the posted findings, so the verdict
   cannot contradict them; the risks section is always rendered
   ("(none flagged)" when empty). Pinned by the batch render suite.
+  The review itself is submitted as the matching GitHub review event —
+  `REQUEST_CHANGES` while blockers exist, `APPROVED` when clean (note
+  an app approval can satisfy branch-protection required-review
+  counts). Pinned by the wire and event-pairing tests.
+- Re-review thread resolution: on every posted review, previous threads
+  authored by the reviewing identity resolve when no new finding lands
+  on their file and anchor line — outdated threads with no current
+  anchor resolve too. Threads come from the GraphQL `reviewThreads`
+  connection (cursor-paginated past the first 100), filtered by the `/user` login of the token, and resolve
+  through the `resolveReviewThread` mutation after the review posts;
+  thread-listing and per-thread failures log a warning and never fail
+  the review. Pinned by the gateway wire fixture, the resolution-slate
+  unit, and a full scripted re-review.
+- Visual severity language: inline comment headers carry a shields.io
+  severity badge (`nitpick` grey, `suggestion` blue, `warning` orange,
+  `critical` red — rendered by that third-party service with alt text
+  as fallback), while the verdict blockers and the fix-all report use
+  severity glyphs (💬 💡 ⚠️ 🔴); the copyable agent prompts keep the
+  plain `[severity]` word. Pinned by the severity ladder test and the
+  render asserts.
+- Per-finding fix complexity: the model rates every finding 1–5
+  (1 a one-liner, 5 needs restructuring; taught in the rubric, required
+  in the findings schema, out-of-range values rejected at both findings
+  entry points). Comment headers carry a second badge on a color ramp
+  (1 blue, 2 green, 3 yellow, 4 orange, 5 purple — red stays reserved
+  for critical severity), verdict blockers and
+  fix-all report lines carry the matching circle glyph in parentheses,
+  and the copyable prompts carry a plain `Complexity: n/5` line. Pinned
+  by the ladder test, the entry-rejection tests at both gates, and the
+  render asserts.

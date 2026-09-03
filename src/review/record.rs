@@ -16,6 +16,7 @@ use serde_json::json;
 use crate::findings::Finding;
 use crate::findings::Findings;
 use crate::findings::findings_array_schema;
+use crate::findings::reject_out_of_range_complexity;
 use crate::findings::reject_zero_lines;
 
 pub type FindingsSlot = Arc<Mutex<Option<Findings>>>;
@@ -75,6 +76,7 @@ impl Tool for RecordFindingsTool {
             let parsed: RecordInput = serde_json::from_value(input)
                 .map_err(|err| ToolError::InvalidInput(err.to_string()))?;
             reject_zero_lines(&parsed.findings).map_err(ToolError::InvalidInput)?;
+            reject_out_of_range_complexity(&parsed.findings).map_err(ToolError::InvalidInput)?;
             let mut per_file = std::collections::BTreeMap::new();
             let mut accepted = Vec::new();
             let mut cap_drops: Vec<(String, usize)> = Vec::new();
@@ -126,6 +128,7 @@ mod tests {
                     "file": "src/lib.rs",
                     "line": 3,
                     "severity": "warning",
+                    "complexity": 3,
                     "title": "T",
                     "body": "B"
                 }]
@@ -169,8 +172,8 @@ mod tests {
             .call(
                 json!({
                     "findings": [
-                        { "file": "src/lib.rs", "line": 1, "severity": "warning", "title": "T", "body": "B" },
-                        { "file": "src/lib.rs", "line": 2, "severity": "warning", "title": "T", "body": "B" }
+                        { "file": "src/lib.rs", "line": 1, "severity": "warning", "complexity": 3, "title": "T", "body": "B" },
+                        { "file": "src/lib.rs", "line": 2, "severity": "warning", "complexity": 3, "title": "T", "body": "B" }
                     ]
                 }),
                 &ToolContext::default(),
@@ -198,7 +201,7 @@ mod tests {
             .call(
                 json!({
                     "findings": [
-                        { "file": "src/lib.rs", "line": 0, "severity": "warning", "title": "T", "body": "B" }
+                        { "file": "src/lib.rs", "line": 0, "severity": "warning", "complexity": 3, "title": "T", "body": "B" }
                     ]
                 }),
                 &ToolContext::default(),
@@ -207,6 +210,28 @@ mod tests {
             .err()
             .ok_or("expected an error")?;
         assert!(err.to_string().contains("at least 1"));
+        assert!(slot.lock().is_ok_and(|guard| guard.is_none()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_out_of_range_complexity_is_rejected_at_entry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let slot = RecordFindingsTool::empty_slot();
+        let tool = RecordFindingsTool::new(Arc::clone(&slot), 5);
+        let err = tool
+            .call(
+                json!({
+                    "findings": [
+                        { "file": "src/lib.rs", "line": 2, "severity": "warning", "complexity": 9, "title": "T", "body": "B" }
+                    ]
+                }),
+                &ToolContext::default(),
+            )
+            .await
+            .err()
+            .ok_or("expected an error")?;
+        assert!(err.to_string().contains("1-5"));
         assert!(slot.lock().is_ok_and(|guard| guard.is_none()));
         Ok(())
     }

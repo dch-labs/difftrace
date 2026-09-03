@@ -9,6 +9,7 @@ use crate::github::ExistingComment;
 use crate::github::PrGateway;
 use crate::github::PrOverview;
 use crate::github::ReviewSubmission;
+use crate::github::ReviewThread;
 
 #[derive(Clone, Default)]
 pub(crate) struct FakeGateway {
@@ -26,6 +27,8 @@ struct Inner {
     requested_prs: Mutex<Vec<u64>>,
     requested_reads: Mutex<Vec<(String, String)>>,
     requested_comment_lists: Mutex<Vec<u64>>,
+    threads: Mutex<Vec<ReviewThread>>,
+    resolved: Mutex<Vec<String>>,
 }
 
 impl FakeGateway {
@@ -61,6 +64,16 @@ impl FakeGateway {
             .comments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = comments;
+        gateway
+    }
+
+    pub(crate) fn with_threads(threads: Vec<ReviewThread>) -> Self {
+        let gateway = Self::empty();
+        *gateway
+            .inner
+            .threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = threads;
         gateway
     }
 
@@ -110,6 +123,14 @@ impl FakeGateway {
             .fail_next_submit
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+    }
+
+    pub(crate) fn resolved_threads(&self) -> Vec<String> {
+        self.inner
+            .resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -235,6 +256,31 @@ impl PrGateway for FakeGateway {
             .submitted
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(submission);
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn own_open_threads(
+        &self,
+        _pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ReviewThread>, DifftraceError>> + Send + '_>> {
+        let threads = self
+            .inner
+            .threads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move { Ok(threads) })
+    }
+
+    fn resolve_thread(
+        &self,
+        thread_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        self.inner
+            .resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(thread_id);
         Box::pin(async move { Ok(()) })
     }
 }
