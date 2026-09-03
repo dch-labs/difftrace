@@ -85,7 +85,7 @@ mod tests {
     use crate::diff::DiffIndex;
     use crate::tools::fake_gateway::FakeGateway;
 
-    fn scope() -> Arc<ReviewScope> {
+    fn scope() -> Result<Arc<ReviewScope>, Box<dyn std::error::Error>> {
         let diff = "\
 diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
@@ -100,44 +100,48 @@ diff --git a/README.md b/README.md
 -a
 +b
 ";
-        Arc::new(ReviewScope::new(
+        Ok(Arc::new(ReviewScope::new(
             Arc::new(FakeGateway::empty()),
-            Arc::new(DiffIndex::parse(diff).unwrap()),
+            Arc::new(DiffIndex::parse(diff)?),
             7,
             "abc",
-        ))
+        )))
     }
 
     #[tokio::test]
-    async fn a_files_section_is_served_verbatim() {
-        let tool = FileDiffTool::new(scope());
+    async fn a_files_section_is_served_verbatim() -> Result<(), Box<dyn std::error::Error>> {
+        let tool = FileDiffTool::new(scope()?);
         let output = tool
             .call(json!({ "path": "README.md" }), &ToolContext::default())
-            .await
-            .unwrap();
+            .await?;
         let text = output.text_content();
         assert!(text.contains("diff --git a/README.md b/README.md"));
         assert!(text.contains("+b"));
         assert!(!text.contains("src/lib.rs"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn an_absent_path_is_rejected() {
-        let tool = FileDiffTool::new(scope());
+    async fn an_absent_path_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let tool = FileDiffTool::new(scope()?);
         let err = tool
             .call(json!({ "path": "nope.rs" }), &ToolContext::default())
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(err, ToolError::InvalidInput(_)));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn a_missing_path_argument_is_rejected() {
-        let tool = FileDiffTool::new(scope());
+    async fn a_missing_path_argument_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let tool = FileDiffTool::new(scope()?);
         let err = tool
             .call(json!({}), &ToolContext::default())
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(err, ToolError::InvalidInput(_)));
+        Ok(())
     }
 }

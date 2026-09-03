@@ -188,112 +188,130 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_builds_with_an_env_key() {
+    fn anthropic_builds_with_an_env_key() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["ANTHROPIC_API_KEY"]);
         env.set("ANTHROPIC_API_KEY", "env-key");
-        let client = build_client(&cfg(ProviderProfile::Anthropic)).unwrap();
+        let client = build_client(&cfg(ProviderProfile::Anthropic))?;
         assert_eq!(client.model(), "test-model");
+        Ok(())
     }
 
     #[test]
-    fn a_missing_anthropic_key_names_the_env_var() {
+    fn a_missing_anthropic_key_names_the_env_var() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["ANTHROPIC_API_KEY"]);
         env.remove("ANTHROPIC_API_KEY");
-        let err = build_client(&cfg(ProviderProfile::Anthropic)).unwrap_err();
+        let err = build_client(&cfg(ProviderProfile::Anthropic))
+            .err()
+            .ok_or("expected an error")?;
         assert!(
             err.to_string().contains("ANTHROPIC_API_KEY"),
             "error must name the env var: {err}"
         );
+        Ok(())
     }
 
     #[test]
-    fn openai_builds_with_an_env_key() {
+    fn openai_builds_with_an_env_key() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["OPENAI_API_KEY"]);
         env.set("OPENAI_API_KEY", "env-key");
-        let client = build_client(&cfg(ProviderProfile::OpenAi)).unwrap();
+        let client = build_client(&cfg(ProviderProfile::OpenAi))?;
         assert_eq!(client.model(), "test-model");
+        Ok(())
     }
 
     #[test]
-    fn a_missing_openai_key_names_the_env_var() {
+    fn a_missing_openai_key_names_the_env_var() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["OPENAI_API_KEY"]);
         env.remove("OPENAI_API_KEY");
-        let err = build_client(&cfg(ProviderProfile::OpenAi)).unwrap_err();
+        let err = build_client(&cfg(ProviderProfile::OpenAi))
+            .err()
+            .ok_or("expected an error")?;
         assert!(
             err.to_string().contains("OPENAI_API_KEY"),
             "error must name the env var: {err}"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_custom_base_url_applies() {
+    fn a_custom_base_url_applies() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["OPENAI_API_KEY"]);
         env.set("OPENAI_API_KEY", "env-key");
         let mut config = cfg(ProviderProfile::OpenAi);
         config.provider.base_url = Some("https://proxy.example/v1".to_owned());
-        let client = build_client(&config).unwrap();
+        let client = build_client(&config)?;
         assert_eq!(client.base_url(), "https://proxy.example/v1");
+        Ok(())
     }
 
     #[test]
-    fn an_empty_api_key_counts_as_missing() {
+    fn an_empty_api_key_counts_as_missing() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["ANTHROPIC_API_KEY"]);
         env.set("ANTHROPIC_API_KEY", "");
-        let err = build_client(&cfg(ProviderProfile::Anthropic)).unwrap_err();
+        let err = build_client(&cfg(ProviderProfile::Anthropic))
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(
             err,
             DifftraceError::MissingApiKey {
                 env_var: "ANTHROPIC_API_KEY"
             }
         ));
+        Ok(())
     }
 
     #[test]
-    fn an_anthropic_base_url_applies() {
+    fn an_anthropic_base_url_applies() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["ANTHROPIC_API_KEY"]);
         env.set("ANTHROPIC_API_KEY", "env-key");
         let mut config = cfg(ProviderProfile::Anthropic);
         config.provider.base_url = Some("https://proxy.anthropic.example".to_owned());
-        let client = build_client(&config).unwrap();
+        let client = build_client(&config)?;
         assert_eq!(client.base_url(), "https://proxy.anthropic.example");
+        Ok(())
     }
 
     #[test]
-    fn an_unset_model_keeps_the_provider_default() {
+    fn an_unset_model_keeps_the_provider_default() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["ANTHROPIC_API_KEY"]);
         env.set("ANTHROPIC_API_KEY", "env-key");
         let mut config = cfg(ProviderProfile::Anthropic);
         config.provider.model = None;
-        let client = build_client(&config).unwrap();
+        let client = build_client(&config)?;
         assert!(!client.model().is_empty());
+        Ok(())
     }
 
     #[test]
-    fn ollama_builds_without_a_key_at_the_local_endpoint() {
+    fn ollama_builds_without_a_key_at_the_local_endpoint() -> Result<(), Box<dyn std::error::Error>>
+    {
         let env = loopctl::testing::EnvGuard::acquire(&["OLLAMA_API_KEY"]);
         env.remove("OLLAMA_API_KEY");
-        let client = build_client(&cfg(ProviderProfile::Ollama)).unwrap();
+        let client = build_client(&cfg(ProviderProfile::Ollama))?;
         assert_eq!(client.base_url(), OLLAMA_BASE_URL);
         assert_eq!(client.model(), "test-model");
+        Ok(())
     }
 
     #[test]
-    fn an_ollama_cloud_key_comes_from_the_env() {
+    fn an_ollama_cloud_key_comes_from_the_env() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["OLLAMA_API_KEY"]);
         env.set("OLLAMA_API_KEY", "env-key");
         let mut config = cfg(ProviderProfile::Ollama);
         config.provider.base_url = Some("https://cloud.example/v1".to_owned());
-        let client = build_client(&config).unwrap();
+        let client = build_client(&config)?;
         assert_eq!(client.base_url(), "https://cloud.example/v1");
+        Ok(())
     }
 
     #[test]
-    fn ollama_requires_a_model() {
+    fn ollama_requires_a_model() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["OLLAMA_API_KEY"]);
         env.remove("OLLAMA_API_KEY");
         let mut config = cfg(ProviderProfile::Ollama);
         config.provider.model = None;
-        let err = build_client(&config).unwrap_err();
+        let err = build_client(&config).err().ok_or("expected an error")?;
         assert!(matches!(err, DifftraceError::OllamaModelMissing));
+        Ok(())
     }
 }

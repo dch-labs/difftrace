@@ -1,7 +1,5 @@
 //! Smoke tests for the crate skeleton.
 
-#![cfg_attr(test, allow(clippy::missing_panics_doc))]
-
 #[test]
 fn the_package_version_has_major_and_minor() {
     let version = env!("CARGO_PKG_VERSION");

@@ -320,17 +320,18 @@ index 3333333..4444444 100644
 ";
 
     #[test]
-    fn multi_file_diff_parses_both_files() {
-        let index = DiffIndex::parse(SAMPLE).unwrap();
+    fn multi_file_diff_parses_both_files() -> Result<(), Box<dyn std::error::Error>> {
+        let index = DiffIndex::parse(SAMPLE)?;
         assert_eq!(index.len(), 2);
         assert_eq!(index.file_names(), vec!["src/lib.rs", "README.md"]);
+        Ok(())
     }
 
     #[test]
-    fn lines_are_numbered_on_their_sides() {
-        let index = DiffIndex::parse(SAMPLE).unwrap();
-        let file = index.file("src/lib.rs").unwrap();
-        let hunk = file.hunks.first().unwrap();
+    fn lines_are_numbered_on_their_sides() -> Result<(), Box<dyn std::error::Error>> {
+        let index = DiffIndex::parse(SAMPLE)?;
+        let file = index.file("src/lib.rs").ok_or("expected a value")?;
+        let hunk = file.hunks.first().ok_or("expected a value")?;
         assert_eq!(hunk.old_start, 1);
         assert_eq!(hunk.new_start, 1);
         let added: Vec<usize> = hunk
@@ -352,36 +353,40 @@ index 3333333..4444444 100644
             .collect();
         assert_eq!(removed, vec![3]);
         assert_eq!(file.anchor_lines, vec![1, 2, 3, 4, 5]);
+        Ok(())
     }
 
     #[test]
-    fn every_anchorable_line_clamps_to_itself() {
-        let index = DiffIndex::parse(SAMPLE).unwrap();
+    fn every_anchorable_line_clamps_to_itself() -> Result<(), Box<dyn std::error::Error>> {
+        let index = DiffIndex::parse(SAMPLE)?;
         for name in index.file_names() {
-            let file = index.file(name).unwrap();
+            let file = index.file(name).ok_or("expected a value")?;
             for anchor in &file.anchor_lines {
                 assert_eq!(index.clamp_to_hunk(name, *anchor), Some(*anchor));
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn a_line_outside_hunk_spans_is_rejected() {
-        let index = DiffIndex::parse(SAMPLE).unwrap();
+    fn a_line_outside_hunk_spans_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let index = DiffIndex::parse(SAMPLE)?;
         assert_eq!(index.clamp_to_hunk("src/lib.rs", 99), None);
         assert_eq!(index.clamp_to_hunk("README.md", 99), None);
         assert_eq!(index.clamp_to_hunk("absent.rs", 5), None);
+        Ok(())
     }
 
     #[test]
-    fn a_context_line_inside_a_hunk_clamps_to_itself() {
-        let index = DiffIndex::parse(SAMPLE).unwrap();
+    fn a_context_line_inside_a_hunk_clamps_to_itself() -> Result<(), Box<dyn std::error::Error>> {
+        let index = DiffIndex::parse(SAMPLE)?;
         assert_eq!(index.clamp_to_hunk("src/lib.rs", 1), Some(1));
         assert_eq!(index.clamp_to_hunk("README.md", 12), Some(12));
+        Ok(())
     }
 
     #[test]
-    fn a_new_file_has_only_new_side_anchors() {
+    fn a_new_file_has_only_new_side_anchors() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/added.txt b/added.txt
 new file mode 100644
@@ -392,15 +397,16 @@ index 0000000..1111111
 +first
 +second
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("added.txt").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("added.txt").ok_or("expected a value")?;
         assert_eq!(file.old_path, None);
         assert_eq!(file.anchor_lines, vec![1, 2]);
         assert_eq!(index.clamp_to_hunk("added.txt", 1), Some(1));
+        Ok(())
     }
 
     #[test]
-    fn a_deleted_file_has_no_new_side_anchors() {
+    fn a_deleted_file_has_no_new_side_anchors() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/gone.txt b/gone.txt
 deleted file mode 100644
@@ -411,15 +417,17 @@ index 1111111..0000000
 -first
 -second
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("gone.txt").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("gone.txt").ok_or("expected a value")?;
         assert_eq!(file.new_path, "gone.txt");
         assert!(file.anchor_lines.is_empty());
         assert_eq!(index.clamp_to_hunk("gone.txt", 1), None);
+        Ok(())
     }
 
     #[test]
-    fn a_removed_line_clamps_to_the_nearest_new_side_anchor() {
+    fn a_removed_line_clamps_to_the_nearest_new_side_anchor()
+    -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/f.rs b/f.rs
 --- a/f.rs
@@ -430,13 +438,15 @@ diff --git a/f.rs b/f.rs
 +added
  ctx-b
 ";
-        let index = DiffIndex::parse(raw).unwrap();
+        let index = DiffIndex::parse(raw)?;
         // New side runs 5 ctx, 6 added, 7 ctx; the removed line was old 6.
         assert_eq!(index.clamp_to_hunk("f.rs", 6), Some(6));
+        Ok(())
     }
 
     #[test]
-    fn a_pure_deletion_hunk_clamps_to_surrounding_context() {
+    fn a_pure_deletion_hunk_clamps_to_surrounding_context() -> Result<(), Box<dyn std::error::Error>>
+    {
         let raw = "\
 diff --git a/f.rs b/f.rs
 --- a/f.rs
@@ -446,14 +456,15 @@ diff --git a/f.rs b/f.rs
 -removed
  ctx-b
 ";
-        let index = DiffIndex::parse(raw).unwrap();
+        let index = DiffIndex::parse(raw)?;
         // New side is 5 ctx-a, 6 ctx-b; old 6 (removed) maps to 5 or 6.
         let clamped = index.clamp_to_hunk("f.rs", 6);
         assert!(clamped == Some(5) || clamped == Some(6));
+        Ok(())
     }
 
     #[test]
-    fn omitted_hunk_counts_default_to_one() {
+    fn omitted_hunk_counts_default_to_one() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/f.rs b/f.rs
 --- a/f.rs
@@ -462,30 +473,33 @@ diff --git a/f.rs b/f.rs
 -old
 +new
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("f.rs").unwrap();
-        let hunk = file.hunks.first().unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("f.rs").ok_or("expected a value")?;
+        let hunk = file.hunks.first().ok_or("expected a value")?;
         assert_eq!(hunk.old_count, 1);
         assert_eq!(hunk.new_count, 1);
         assert_eq!(file.anchor_lines, vec![9]);
+        Ok(())
     }
 
     #[test]
-    fn a_binary_file_carries_no_hunks() {
+    fn a_binary_file_carries_no_hunks() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/logo.png b/logo.png
 index 1111111..2222222 100644
 Binary files a/logo.png and b/logo.png differ
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("logo.png").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("logo.png").ok_or("expected a value")?;
         assert!(file.binary);
         assert!(file.hunks.is_empty());
         assert_eq!(index.clamp_to_hunk("logo.png", 1), None);
+        Ok(())
     }
 
     #[test]
-    fn a_removed_line_starting_with_dashes_stays_hunk_body() {
+    fn a_removed_line_starting_with_dashes_stays_hunk_body()
+    -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/notes.md b/notes.md
 --- a/notes.md
@@ -495,14 +509,15 @@ diff --git a/notes.md b/notes.md
 --- a/dash-prefixed note
  tail
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("notes.md").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("notes.md").ok_or("expected a value")?;
         assert_eq!(file.hunks.len(), 1);
         assert_eq!(file.new_path, "notes.md");
+        Ok(())
     }
 
     #[test]
-    fn a_no_newline_marker_is_ignored() {
+    fn a_no_newline_marker_is_ignored() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/f.txt b/f.txt
 --- a/f.txt
@@ -512,13 +527,14 @@ diff --git a/f.txt b/f.txt
 \\ No newline at end of file
 +second
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("f.txt").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("f.txt").ok_or("expected a value")?;
         assert_eq!(file.anchor_lines, vec![1]);
+        Ok(())
     }
 
     #[test]
-    fn a_malformed_hunk_header_names_the_line() {
+    fn a_malformed_hunk_header_names_the_line() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/f.rs b/f.rs
 --- a/f.rs
@@ -526,40 +542,44 @@ diff --git a/f.rs b/f.rs
 @@ broken @@
 +line
 ";
-        let err = DiffIndex::parse(raw).unwrap_err();
+        let err = DiffIndex::parse(raw).err().ok_or("expected an error")?;
         assert!(err.to_string().contains('4'), "error names the line: {err}");
+        Ok(())
     }
 
     #[test]
-    fn an_empty_diff_yields_an_empty_index() {
-        let index = DiffIndex::parse("").unwrap();
+    fn an_empty_diff_yields_an_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let index = DiffIndex::parse("")?;
         assert!(index.is_empty());
         assert_eq!(index.file_names(), Vec::<&str>::new());
+        Ok(())
     }
 
     #[test]
-    fn a_file_section_carries_only_that_files_raw_text() {
+    fn a_file_section_carries_only_that_files_raw_text() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "diff --git a/first.rs b/first.rs\n--- a/first.rs\n+++ b/first.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/mid.rs b/mid.rs\n--- a/mid.rs\n+++ b/mid.rs\n@@ -1 +1 @@\n-c\n+d\ndiff --git a/last.rs b/last.rs\n--- a/last.rs\n+++ b/last.rs\n@@ -1 +1 @@\n-e\n+f\n";
-        let index = DiffIndex::parse(raw).unwrap();
-        let first = index.file_section("first.rs").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let first = index.file_section("first.rs").ok_or("expected a value")?;
         assert_eq!(
             first,
             "diff --git a/first.rs b/first.rs\n--- a/first.rs\n+++ b/first.rs\n@@ -1 +1 @@\n-a\n+b"
         );
-        let mid = index.file_section("mid.rs").unwrap();
+        let mid = index.file_section("mid.rs").ok_or("expected a value")?;
         assert!(mid.starts_with("diff --git a/mid.rs b/mid.rs"));
         assert!(mid.contains("+d"));
         assert!(!mid.contains("first.rs"));
         assert!(!mid.contains("last.rs"));
-        let last = index.file_section("last.rs").unwrap();
+        let last = index.file_section("last.rs").ok_or("expected a value")?;
         assert!(last.starts_with("diff --git a/last.rs b/last.rs"));
         assert!(last.contains("+f"));
         assert!(!last.contains("mid.rs"));
         assert_eq!(index.file_section("absent.rs"), None);
+        Ok(())
     }
 
     #[test]
-    fn consecutive_hunks_renumber_both_sides_from_their_headers() {
+    fn consecutive_hunks_renumber_both_sides_from_their_headers()
+    -> Result<(), Box<dyn std::error::Error>> {
         let raw = "diff --git a/two.rs b/two.rs
 --- a/two.rs
 +++ b/two.rs
@@ -573,12 +593,12 @@ diff --git a/f.rs b/f.rs
 +add
  done
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("two.rs").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("two.rs").ok_or("expected a value")?;
         assert_eq!(file.hunks.len(), 2);
-        let first = file.hunks.first().unwrap();
+        let first = file.hunks.first().ok_or("expected a value")?;
         assert_eq!((first.old_start, first.new_start), (2, 2));
-        let second = file.hunks.get(1).unwrap();
+        let second = file.hunks.get(1).ok_or("expected a value")?;
         assert_eq!((second.old_start, second.new_start), (20, 20));
         let added: Vec<usize> = second
             .lines
@@ -591,10 +611,12 @@ diff --git a/f.rs b/f.rs
         assert_eq!(added, vec![21]);
         assert_eq!(file.anchor_lines, vec![2, 3, 4, 20, 21, 22]);
         assert_eq!(index.clamp_to_hunk("two.rs", 21), Some(21));
+        Ok(())
     }
 
     #[test]
-    fn a_deleted_file_with_an_embedded_b_path_keeps_its_identity() {
+    fn a_deleted_file_with_an_embedded_b_path_keeps_its_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
         let raw = "diff --git a/foo b/bar.rs b/foo b/bar.rs
 deleted file mode 100644
 index 1111111..0000000
@@ -603,45 +625,51 @@ index 1111111..0000000
 @@ -1 +0,0 @@
 -gone
 ";
-        let index = DiffIndex::parse(raw).unwrap();
-        let file = index.file("foo b/bar.rs").unwrap();
+        let index = DiffIndex::parse(raw)?;
+        let file = index.file("foo b/bar.rs").ok_or("expected a value")?;
         assert_eq!(file.new_path, "foo b/bar.rs");
         assert_eq!(file.old_path.as_deref(), Some("foo b/bar.rs"));
         assert!(file.anchor_lines.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn an_embedded_b_path_splits_where_both_sides_agree() {
-        let (old, new) = split_git_header("foo b/bar.rs b/foo b/bar.rs", 1).unwrap();
+    fn an_embedded_b_path_splits_where_both_sides_agree() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (old, new) = split_git_header("foo b/bar.rs b/foo b/bar.rs", 1)?;
         assert_eq!(old.as_deref(), Some("foo b/bar.rs"));
         assert_eq!(new.as_deref(), Some("foo b/bar.rs"));
+        Ok(())
     }
 
     #[test]
-    fn a_rename_header_keeps_the_first_split() {
-        let (old, new) = split_git_header("old.rs b/new.rs", 1).unwrap();
+    fn a_rename_header_keeps_the_first_split() -> Result<(), Box<dyn std::error::Error>> {
+        let (old, new) = split_git_header("old.rs b/new.rs", 1)?;
         assert_eq!(old.as_deref(), Some("old.rs"));
         assert_eq!(new.as_deref(), Some("new.rs"));
+        Ok(())
     }
 
     #[test]
-    fn an_over_declared_hunk_fails_the_parse() {
+    fn an_over_declared_hunk_fails_the_parse() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "diff --git a/h.rs b/h.rs
 --- a/h.rs
 +++ b/h.rs
 @@ -1,5 +1,5 @@
 +one
 ";
-        let err = DiffIndex::parse(raw).unwrap_err();
+        let err = DiffIndex::parse(raw).err().ok_or("expected an error")?;
         assert!(
             err.to_string().contains("declares more lines"),
             "error names the contradiction: {err}"
         );
         assert!(matches!(err, DifftraceError::DiffParse { line: 4, .. }));
+        Ok(())
     }
 
     #[test]
-    fn an_over_declared_hunk_fails_at_the_next_file_too() {
+    fn an_over_declared_hunk_fails_at_the_next_file_too() -> Result<(), Box<dyn std::error::Error>>
+    {
         let raw = "diff --git a/h.rs b/h.rs
 --- a/h.rs
 +++ b/h.rs
@@ -654,15 +682,16 @@ diff --git a/next.rs b/next.rs
 -a
 +b
 ";
-        let err = DiffIndex::parse(raw).unwrap_err();
+        let err = DiffIndex::parse(raw).err().ok_or("expected an error")?;
         assert!(
             err.to_string().contains("declares more lines"),
             "error names the contradiction: {err}"
         );
+        Ok(())
     }
 
     #[test]
-    fn an_under_declared_hunk_fails_at_the_next_header() {
+    fn an_under_declared_hunk_fails_at_the_next_header() -> Result<(), Box<dyn std::error::Error>> {
         let raw = "diff --git a/h.rs b/h.rs
 --- a/h.rs
 +++ b/h.rs
@@ -671,15 +700,17 @@ diff --git a/next.rs b/next.rs
 +two
 +three
 ";
-        let err = DiffIndex::parse(raw).unwrap_err();
+        let err = DiffIndex::parse(raw).err().ok_or("expected an error")?;
         assert!(
             err.to_string().contains("declares more lines"),
             "under-declared counts surface the same way: {err}"
         );
+        Ok(())
     }
 
     #[test]
-    fn a_hunk_header_inside_unclosed_counts_fails_the_parse() {
+    fn a_hunk_header_inside_unclosed_counts_fails_the_parse()
+    -> Result<(), Box<dyn std::error::Error>> {
         let raw = "diff --git a/h.rs b/h.rs
 --- a/h.rs
 +++ b/h.rs
@@ -689,11 +720,12 @@ diff --git a/next.rs b/next.rs
 -old
 +new
 ";
-        let err = DiffIndex::parse(raw).unwrap_err();
+        let err = DiffIndex::parse(raw).err().ok_or("expected an error")?;
         assert!(
             err.to_string().contains("before the previous hunk"),
             "error names the contradiction: {err}"
         );
         assert!(matches!(err, DifftraceError::DiffParse { line: 6, .. }));
+        Ok(())
     }
 }

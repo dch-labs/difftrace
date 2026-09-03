@@ -35,44 +35,81 @@ impl FakeGateway {
 
     pub(crate) fn with_overview(overview: PrOverview) -> Self {
         let gateway = Self::empty();
-        *gateway.inner.overview.lock().unwrap() = Some(overview);
+        *gateway
+            .inner
+            .overview
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(overview);
         gateway
     }
 
     pub(crate) fn with_file(path: &str, content: &str) -> Self {
         let gateway = Self::empty();
-        *gateway.inner.file.lock().unwrap() = Some((path.to_owned(), content.to_owned()));
+        *gateway
+            .inner
+            .file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((path.to_owned(), content.to_owned()));
         gateway
     }
 
     pub(crate) fn with_comments(comments: Vec<ExistingComment>) -> Self {
         let gateway = Self::empty();
-        *gateway.inner.comments.lock().unwrap() = comments;
+        *gateway
+            .inner
+            .comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = comments;
         gateway
     }
 
     pub(crate) fn requested_prs(&self) -> Vec<u64> {
-        self.inner.requested_prs.lock().unwrap().clone()
+        self.inner
+            .requested_prs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn requested_reads(&self) -> Vec<(String, String)> {
-        self.inner.requested_reads.lock().unwrap().clone()
+        self.inner
+            .requested_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn requested_comment_lists(&self) -> Vec<u64> {
-        self.inner.requested_comment_lists.lock().unwrap().clone()
+        self.inner
+            .requested_comment_lists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn submitted(&self) -> Option<ReviewSubmission> {
-        self.inner.submitted.lock().unwrap().clone()
+        self.inner
+            .submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn submit_calls(&self) -> usize {
-        *self.inner.submit_calls.lock().unwrap()
+        *self
+            .inner
+            .submit_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub(crate) fn fail_next_submit(&self) {
-        *self.inner.fail_next_submit.lock().unwrap() = true;
+        *self
+            .inner
+            .fail_next_submit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     }
 }
 
@@ -87,8 +124,17 @@ impl PrGateway for FakeGateway {
         &self,
         pr: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PrOverview, DifftraceError>> + Send + '_>> {
-        self.inner.requested_prs.lock().unwrap().push(pr);
-        let overview = self.inner.overview.lock().unwrap().clone();
+        self.inner
+            .requested_prs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(pr);
+        let overview = self
+            .inner
+            .overview
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         Box::pin(async move { overview.ok_or_else(|| missing("overview")) })
     }
 
@@ -108,13 +154,13 @@ impl PrGateway for FakeGateway {
         self.inner
             .requested_reads
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((path.clone(), git_ref));
         let configured = self
             .inner
             .file
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .map(|(p, content)| {
                 if *p == path {
@@ -136,8 +182,17 @@ impl PrGateway for FakeGateway {
         pr: u64,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ExistingComment>, DifftraceError>> + Send + '_>>
     {
-        self.inner.requested_comment_lists.lock().unwrap().push(pr);
-        let comments = self.inner.comments.lock().unwrap().clone();
+        self.inner
+            .requested_comment_lists
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(pr);
+        let comments = self
+            .inner
+            .comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         Box::pin(async move { Ok(comments) })
     }
 
@@ -146,13 +201,25 @@ impl PrGateway for FakeGateway {
         pr: u64,
         submission: ReviewSubmission,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
-        self.inner.requested_prs.lock().unwrap().push(pr);
+        self.inner
+            .requested_prs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(pr);
         {
-            let mut guard = self.inner.submit_calls.lock().unwrap();
+            let mut guard = self
+                .inner
+                .submit_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = (*guard).saturating_add(1);
         }
         let fail = {
-            let mut guard = self.inner.fail_next_submit.lock().unwrap();
+            let mut guard = self
+                .inner
+                .fail_next_submit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let value = *guard;
             *guard = false;
             value
@@ -163,7 +230,11 @@ impl PrGateway for FakeGateway {
             };
             return Box::pin(async move { Err(err) });
         }
-        *self.inner.submitted.lock().unwrap() = Some(submission);
+        *self
+            .inner
+            .submitted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(submission);
         Box::pin(async move { Ok(()) })
     }
 }

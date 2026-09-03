@@ -195,7 +195,7 @@ mod tests {
     use crate::diff::DiffIndex;
     use crate::tools::fake_gateway::FakeGateway;
 
-    fn diff_index() -> DiffIndex {
+    fn diff_index() -> Result<DiffIndex, Box<dyn std::error::Error>> {
         let diff = "\
 diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
@@ -206,21 +206,23 @@ diff --git a/src/lib.rs b/src/lib.rs
 +new
  tail
 ";
-        DiffIndex::parse(diff).unwrap()
+        DiffIndex::parse(diff).map_err(Into::into)
     }
 
-    fn tool(max_per_file: usize) -> (SubmitReviewTool, FakeGateway) {
+    fn tool(
+        max_per_file: usize,
+    ) -> Result<(SubmitReviewTool, FakeGateway), Box<dyn std::error::Error>> {
         let gateway = FakeGateway::empty();
         let scope = ReviewScope::new(
             Arc::new(gateway.clone()),
-            Arc::new(diff_index()),
+            Arc::new(diff_index()?),
             42,
             "headsha",
         );
-        (
+        Ok((
             SubmitReviewTool::new(Arc::new(scope), max_per_file),
             gateway,
-        )
+        ))
     }
 
     fn input(summary: &str, findings: &[Value]) -> Value {
@@ -238,28 +240,30 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[tokio::test]
-    async fn a_grounded_finding_is_posted_at_its_anchor() {
-        let (tool, gateway) = tool(5);
+    async fn a_grounded_finding_is_posted_at_its_anchor() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (tool, gateway) = tool(5)?;
         tool.call(
             input("Summary.", &[finding_json("src/lib.rs", 2)]),
             &ToolContext::default(),
         )
-        .await
-        .unwrap();
-        let submission = gateway.submitted().unwrap();
+        .await?;
+        let submission = gateway.submitted().ok_or("expected a value")?;
         assert_eq!(submission.head_sha, "headsha");
         assert_eq!(submission.summary, "Summary.");
         assert_eq!(submission.comments.len(), 1);
-        let comment = submission.comments.first().unwrap();
+        let comment = submission.comments.first().ok_or("expected a value")?;
         assert_eq!(comment.path, "src/lib.rs");
         assert_eq!(comment.line, 2);
         assert_eq!(comment.side, Side::Right);
         assert!(comment.body.contains("[warning] Title"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn an_out_of_hunk_finding_is_dropped_and_receipted() {
-        let (tool, gateway) = tool(5);
+    async fn an_out_of_hunk_finding_is_dropped_and_receipted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
         let output = tool
             .call(
                 input(
@@ -271,30 +275,45 @@ diff --git a/src/lib.rs b/src/lib.rs
                 ),
                 &ToolContext::default(),
             )
-            .await
-            .unwrap();
+            .await?;
         let text = output.text_content();
         assert!(text.contains("plus 1 inline findings"));
         assert!(text.contains("src/lib.rs:99"));
         assert!(text.contains("outside the changed hunks"));
-        assert_eq!(gateway.submitted().unwrap().comments.len(), 1);
+        assert_eq!(
+            gateway
+                .submitted()
+                .ok_or("expected a value")?
+                .comments
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn a_finding_in_an_absent_file_is_dropped() {
-        let (tool, gateway) = tool(5);
+    async fn a_finding_in_an_absent_file_is_dropped() -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
         tool.call(
             input("Summary.", &[finding_json("nope.rs", 1)]),
             &ToolContext::default(),
         )
-        .await
-        .unwrap();
-        assert_eq!(gateway.submitted().unwrap().comments.len(), 0);
+        .await?;
+        assert_eq!(
+            gateway
+                .submitted()
+                .ok_or("expected a value")?
+                .comments
+                .len(),
+            0
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn findings_beyond_the_per_file_cap_are_dropped() {
-        let (tool, gateway) = tool(1);
+    async fn findings_beyond_the_per_file_cap_are_dropped() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (tool, gateway) = tool(1)?;
         let output = tool
             .call(
                 input(
@@ -303,35 +322,41 @@ diff --git a/src/lib.rs b/src/lib.rs
                 ),
                 &ToolContext::default(),
             )
-            .await
-            .unwrap();
+            .await?;
         assert!(
             output
                 .text_content()
                 .contains("per-file finding cap reached")
         );
-        assert_eq!(gateway.submitted().unwrap().comments.len(), 1);
+        assert_eq!(
+            gateway
+                .submitted()
+                .ok_or("expected a value")?
+                .comments
+                .len(),
+            1
+        );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn a_second_submission_never_reaches_the_gateway() {
-        let (tool, gateway) = tool(5);
+    async fn a_second_submission_never_reaches_the_gateway()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
         let input = input("Summary.", &[finding_json("src/lib.rs", 2)]);
-        let first = tool
-            .call(input.clone(), &ToolContext::default())
-            .await
-            .unwrap();
+        let first = tool.call(input.clone(), &ToolContext::default()).await?;
         assert!(!first.is_error);
-        let second = tool.call(input, &ToolContext::default()).await.unwrap();
+        let second = tool.call(input, &ToolContext::default()).await?;
         assert!(second.is_error);
         assert!(second.text_content().contains("exactly one review"));
         assert_eq!(gateway.submit_calls(), 1);
         assert!(gateway.submitted().is_some());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn a_failed_submission_may_be_retried() {
-        let (tool, gateway) = tool(5);
+    async fn a_failed_submission_may_be_retried() -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
         gateway.fail_next_submit();
         let err = tool
             .call(
@@ -339,60 +364,74 @@ diff --git a/src/lib.rs b/src/lib.rs
                 &ToolContext::default(),
             )
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(err, ToolError::Execution(_)));
         let second = tool
             .call(
                 input("Retry.", &[finding_json("src/lib.rs", 2)]),
                 &ToolContext::default(),
             )
-            .await
-            .unwrap();
+            .await?;
         assert!(!second.is_error);
-        let submission = gateway.submitted().unwrap();
+        let submission = gateway.submitted().ok_or("expected a value")?;
         assert_eq!(submission.summary, "Retry.");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn invalid_input_does_not_consume_the_single_submission() {
-        let (tool, gateway) = tool(5);
+    async fn invalid_input_does_not_consume_the_single_submission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
         let err = tool
             .call(json!({ "summary": "s" }), &ToolContext::default())
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(err, ToolError::InvalidInput(_)));
         tool.call(
             input("Summary.", &[finding_json("src/lib.rs", 2)]),
             &ToolContext::default(),
         )
-        .await
-        .unwrap();
+        .await?;
         assert!(gateway.submitted().is_some());
+        Ok(())
     }
 
     #[test]
-    fn the_tool_schema_and_the_findings_schema_share_one_source() {
+    fn the_tool_schema_and_the_findings_schema_share_one_source()
+    -> Result<(), Box<dyn std::error::Error>> {
         let tool_schema = submit_input_schema();
-        let tool_items = tool_schema["properties"]["findings"]["items"].clone();
-        let model_items = Findings::schema()["properties"]["findings"]["items"].clone();
+        let tool_items = tool_schema
+            .pointer("/properties/findings/items")
+            .cloned()
+            .ok_or("tool schema must carry the findings items")?;
+        let model_items = Findings::schema()
+            .pointer("/properties/findings/items")
+            .cloned()
+            .ok_or("model schema must carry the findings items")?;
         assert_eq!(tool_items, model_items);
-        let severity =
-            tool_schema["properties"]["findings"]["items"]["properties"]["severity"]["enum"]
-                .clone();
+        let severity = tool_schema
+            .pointer("/properties/findings/items/properties/severity/enum")
+            .cloned()
+            .ok_or("severity enum must exist")?;
         assert_eq!(
             severity,
             json!(["nitpick", "suggestion", "warning", "critical"])
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn invalid_input_never_reaches_the_gateway() {
-        let (tool, gateway) = tool(5);
+    async fn invalid_input_never_reaches_the_gateway() -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
         let err = tool
             .call(json!({ "summary": "s" }), &ToolContext::default())
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(err, ToolError::InvalidInput(_)));
         assert!(gateway.submitted().is_none());
+        Ok(())
     }
 }

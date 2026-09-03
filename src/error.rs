@@ -43,4 +43,12 @@ pub enum DifftraceError {
     ContentTooLarge { path: String, size: i64 },
     #[error("cannot parse diff at line {line}: {reason}")]
     DiffParse { line: usize, reason: String },
+
+    #[error("review run failed: {source}")]
+    ReviewRun { source: loopctl::error::LoopError },
+
+    #[error("summary generation failed: {source}")]
+    Summary {
+        source: loopctl::structured::StructuredError,
+    },
 }

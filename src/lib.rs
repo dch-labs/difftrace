@@ -8,17 +8,7 @@
 //! `provider` (loopctl client factory), `github` (the REST layer behind
 //! `PrGateway`), `diff` (the diff index and grounding authority),
 //! `findings` (the model-output contracts), `tools` (the agent's
-//! loopctl `Tool` surface).
-
-// Test-only lint relaxations; this list is fixed and must not grow.
-#![cfg_attr(
-    test,
-    allow(
-        clippy::unwrap_used,
-        clippy::indexing_slicing,
-        clippy::missing_panics_doc,
-    )
-)]
+//! loopctl `Tool` surface), `review` (the runner that drives batches).
 
 pub mod config;
 pub mod diff;
@@ -26,4 +16,5 @@ pub mod error;
 pub mod findings;
 pub mod github;
 pub mod provider;
+pub mod review;
 pub mod tools;

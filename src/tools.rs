@@ -48,6 +48,27 @@ impl ReviewScope {
     }
 
     #[must_use]
+    pub fn batch_registry(
+        &self,
+        record: crate::review::record::FindingsSlot,
+        _max_findings_per_file: usize,
+    ) -> ToolRegistry {
+        let scope = Arc::new(Self {
+            gateway: Arc::clone(&self.gateway),
+            index: Arc::clone(&self.index),
+            pr: self.pr,
+            head_sha: self.head_sha.clone(),
+        });
+        let mut registry = ToolRegistry::new();
+        registry.register(overview::OverviewTool::new(Arc::clone(&scope)));
+        registry.register(file_diff::FileDiffTool::new(Arc::clone(&scope)));
+        registry.register(read_file::ReadFileTool::new(Arc::clone(&scope)));
+        registry.register(comments::ListCommentsTool::new(Arc::clone(&scope)));
+        registry.register(crate::review::RecordFindingsTool::new(record));
+        registry
+    }
+
+    #[must_use]
     pub fn registry(&self, max_findings_per_file: usize) -> ToolRegistry {
         let scope = Arc::new(Self {
             gateway: Arc::clone(&self.gateway),

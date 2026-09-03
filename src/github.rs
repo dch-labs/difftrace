@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn pr_overview_maps_the_wire_fields() {
+    fn pr_overview_maps_the_wire_fields() -> Result<(), Box<dyn std::error::Error>> {
         let model: octocrab::models::pulls::PullRequest = serde_json::from_value(json!({
             "id": 1001,
             "number": 42,
@@ -317,8 +317,7 @@ mod tests {
             "changed_files": 3,
             "additions": 120,
             "deletions": 15
-        }))
-        .unwrap();
+        }))?;
         let overview = PrOverview::from(model);
         assert_eq!(overview.number, 42);
         assert_eq!(overview.title, "Fix the flaky worker");
@@ -336,27 +335,28 @@ mod tests {
         assert_eq!(overview.changed_files, 3);
         assert_eq!(overview.additions, 120);
         assert_eq!(overview.deletions, 15);
+        Ok(())
     }
 
     #[test]
-    fn absent_optional_fields_default_to_empty() {
+    fn absent_optional_fields_default_to_empty() -> Result<(), Box<dyn std::error::Error>> {
         let model: octocrab::models::pulls::PullRequest = serde_json::from_value(json!({
             "id": 1002,
             "number": 43,
             "url": "https://api.github.com/repos/acme/app/pulls/43",
             "head": { "ref": "feature", "sha": "aaa" },
             "base": { "ref": "main", "sha": "bbb" }
-        }))
-        .unwrap();
+        }))?;
         let overview = PrOverview::from(model);
         assert_eq!(overview.title, "");
         assert_eq!(overview.description, None);
         assert_eq!(overview.author, "");
         assert_eq!(overview.changed_files, 0);
+        Ok(())
     }
 
     #[test]
-    fn existing_comment_maps_the_wire_fields() {
+    fn existing_comment_maps_the_wire_fields() -> Result<(), Box<dyn std::error::Error>> {
         let model: octocrab::models::pulls::Comment = serde_json::from_value(json!({
             "url": "https://api.github.com/repos/acme/app/pulls/comments/9",
             "id": 9,
@@ -376,8 +376,7 @@ mod tests {
             "_links": {},
             "line": 12,
             "side": "LEFT"
-        }))
-        .unwrap();
+        }))?;
         let comment = ExistingComment::from(model);
         assert_eq!(comment.id, 9);
         assert_eq!(comment.path, "src/main.rs");
@@ -385,10 +384,11 @@ mod tests {
         assert_eq!(comment.side, Some(Side::Left));
         assert_eq!(comment.body, "This drops the lock too early.");
         assert_eq!(comment.author, "dana");
+        Ok(())
     }
 
     #[test]
-    fn an_absent_wire_side_maps_to_none() {
+    fn an_absent_wire_side_maps_to_none() -> Result<(), Box<dyn std::error::Error>> {
         let model: octocrab::models::pulls::Comment = serde_json::from_value(json!({
             "url": "https://api.github.com/repos/acme/app/pulls/comments/10",
             "id": 10,
@@ -403,13 +403,17 @@ mod tests {
             "html_url": "https://github.com/acme/app/pull/42#discussion_r10",
             "pull_request_url": "https://api.github.com/repos/acme/app/pulls/42",
             "_links": {}
-        }))
-        .unwrap();
+        }))?;
         let comment = ExistingComment::from(model);
         assert_eq!(comment.side, None);
+        Ok(())
     }
 
-    fn content_json(encoding: &str, content: &str, size: i64) -> octocrab::models::repos::Content {
+    fn content_json(
+        encoding: &str,
+        content: &str,
+        size: i64,
+    ) -> Result<octocrab::models::repos::Content, Box<dyn std::error::Error>> {
         serde_json::from_value(json!({
             "name": "file.txt",
             "path": "file.txt",
@@ -426,40 +430,45 @@ mod tests {
                 "self": "https://api.github.com/repos/acme/app/contents/file.txt"
             }
         }))
-        .unwrap()
+        .map_err(Into::into)
     }
 
     #[test]
-    fn content_above_the_endpoint_limit_is_rejected_not_emptied() {
+    fn content_above_the_endpoint_limit_is_rejected_not_emptied()
+    -> Result<(), Box<dyn std::error::Error>> {
         let err =
-            GitHubClient::decode_content("vendored/big.log", content_json("none", "", 5_242_880))
-                .unwrap_err();
+            GitHubClient::decode_content("vendored/big.log", content_json("none", "", 5_242_880)?)
+                .err()
+                .ok_or("expected an error")?;
         assert!(
             err.to_string().contains("5242880"),
             "error reports the size: {err}"
         );
         assert!(matches!(err, DifftraceError::ContentTooLarge { .. }));
+        Ok(())
     }
 
     #[test]
-    fn base64_content_round_trips_through_the_decode() {
+    fn base64_content_round_trips_through_the_decode() -> Result<(), Box<dyn std::error::Error>> {
         let text = GitHubClient::decode_content(
             "src/lib.rs",
-            content_json("base64", "Zm4gbWFpbigpIHt9Cg==\n", 12),
-        )
-        .unwrap();
+            content_json("base64", "Zm4gbWFpbigpIHt9Cg==\n", 12)?,
+        )?;
         assert_eq!(text, "fn main() {}\n");
+        Ok(())
     }
 
     #[test]
-    fn non_utf8_content_is_rejected_as_binary() {
-        let err = GitHubClient::decode_content("logo.dat", content_json("base64", "/w==", 1))
-            .unwrap_err();
+    fn non_utf8_content_is_rejected_as_binary() -> Result<(), Box<dyn std::error::Error>> {
+        let err = GitHubClient::decode_content("logo.dat", content_json("base64", "/w==", 1)?)
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(err, DifftraceError::BinaryContent { .. }));
+        Ok(())
     }
 
     #[test]
-    fn enterprise_base_url_must_parse() {
+    fn enterprise_base_url_must_parse() -> Result<(), Box<dyn std::error::Error>> {
         let err = GitHubClient::new(
             "token".to_owned(),
             RepoRef {
@@ -468,10 +477,12 @@ mod tests {
             },
             Some("not a url"),
         )
-        .unwrap_err();
+        .err()
+        .ok_or("expected an error")?;
         assert!(
             err.to_string().contains("base URL"),
             "error names the problem: {err}"
         );
+        Ok(())
     }
 }

@@ -36,7 +36,7 @@ pub struct Finding {
     pub body: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Findings {
     pub findings: Vec<Finding>,
 }
@@ -111,20 +111,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_schema_requires_every_finding_field() {
+    fn the_schema_requires_every_finding_field() -> Result<(), Box<dyn std::error::Error>> {
         let schema = Findings::schema();
-        let finding = &schema["properties"]["findings"]["items"];
-        let required = finding["required"].as_array().unwrap();
+        let required = schema
+            .pointer("/properties/findings/items/required")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("schema must carry the findings required list")?;
         for field in ["file", "line", "severity", "title", "body"] {
             assert!(
                 required.iter().any(|v| v.as_str() == Some(field)),
                 "schema must require {field}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn model_values_round_trip_into_findings() {
+    fn model_values_round_trip_into_findings() -> Result<(), Box<dyn std::error::Error>> {
         let value = serde_json::json!({
             "findings": [{
                 "file": "src/main.rs",
@@ -134,11 +137,12 @@ mod tests {
                 "body": "The guard is dropped before the read completes."
             }]
         });
-        let findings: Findings = StructuredOutput::from_value(value).unwrap();
-        let finding = findings.findings.first().unwrap();
+        let findings: Findings = StructuredOutput::from_value(value)?;
+        let finding = findings.findings.first().ok_or("expected a value")?;
         assert_eq!(finding.file, "src/main.rs");
         assert_eq!(finding.line, 12);
         assert_eq!(finding.severity, Severity::Warning);
+        Ok(())
     }
 
     #[test]
@@ -156,33 +160,39 @@ mod tests {
     }
 
     #[test]
-    fn empty_findings_are_allowed() {
+    fn empty_findings_are_allowed() -> Result<(), Box<dyn std::error::Error>> {
         let findings: Findings =
-            StructuredOutput::from_value(serde_json::json!({ "findings": [] })).unwrap();
+            StructuredOutput::from_value(serde_json::json!({ "findings": [] }))?;
         assert!(findings.findings.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn the_schema_requires_every_summary_field() {
+    fn the_schema_requires_every_summary_field() -> Result<(), Box<dyn std::error::Error>> {
         let schema = ReviewSummary::schema();
-        let required = schema["required"].as_array().unwrap();
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("schema must carry the required list")?;
         for field in ["summary", "risk_notes", "tests"] {
             assert!(
                 required.iter().any(|v| v.as_str() == Some(field)),
                 "schema must require {field}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn model_values_round_trip_into_a_summary() {
+    fn model_values_round_trip_into_a_summary() -> Result<(), Box<dyn std::error::Error>> {
         let value = serde_json::json!({
             "summary": "Adds retry with backoff to the worker loop.",
             "risk_notes": ["Retry can now outlive the shutdown signal."],
             "tests": "Covered by the new integration test."
         });
-        let summary: ReviewSummary = StructuredOutput::from_value(value).unwrap();
+        let summary: ReviewSummary = StructuredOutput::from_value(value)?;
         assert_eq!(summary.risk_notes.len(), 1);
+        Ok(())
     }
 
     #[test]

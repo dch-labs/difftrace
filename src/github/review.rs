@@ -99,7 +99,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_wire_review_is_built_from_the_submission() {
+    fn the_wire_review_is_built_from_the_submission() -> Result<(), Box<dyn std::error::Error>> {
         let submission = ReviewSubmission {
             head_sha: "abc123".to_owned(),
             summary: "Two findings.".to_owned(),
@@ -118,34 +118,61 @@ mod tests {
                 },
             ],
         };
-        let value = serde_json::to_value(WireReview::from_submission(&submission)).unwrap();
-        assert_eq!(value["commit_id"], "abc123");
-        assert_eq!(value["body"], "Two findings.");
-        assert_eq!(value["event"], "COMMENT");
-        assert_eq!(value["comments"].as_array().map(Vec::len), Some(2));
-        assert_eq!(value["comments"][0]["path"], "src/main.rs");
-        assert_eq!(value["comments"][0]["line"], 12);
-        assert_eq!(value["comments"][0]["side"], "RIGHT");
-        assert_eq!(value["comments"][0]["body"], "Unwrapped lock.");
-        assert_eq!(value["comments"][1]["path"], "old/module.rs");
-        assert_eq!(value["comments"][1]["line"], 7);
-        assert_eq!(value["comments"][1]["side"], "LEFT");
+        let value = serde_json::to_value(WireReview::from_submission(&submission))?;
+        let str_at = |pointer: &str| {
+            value
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        let u64_at = |pointer: &str| value.pointer(pointer).and_then(serde_json::Value::as_u64);
+        assert_eq!(str_at("/commit_id"), Some("abc123".to_owned()));
+        assert_eq!(str_at("/body"), Some("Two findings.".to_owned()));
+        assert_eq!(str_at("/event"), Some("COMMENT".to_owned()));
         assert_eq!(
-            value["comments"][1]["body"],
-            "Removed constant still referenced."
+            value
+                .pointer("/comments")
+                .and_then(|c| c.as_array())
+                .map(Vec::len),
+            Some(2)
         );
+        assert_eq!(str_at("/comments/0/path"), Some("src/main.rs".to_owned()));
+        assert_eq!(u64_at("/comments/0/line"), Some(12));
+        assert_eq!(str_at("/comments/0/side"), Some("RIGHT".to_owned()));
+        assert_eq!(
+            str_at("/comments/0/body"),
+            Some("Unwrapped lock.".to_owned())
+        );
+        assert_eq!(str_at("/comments/1/path"), Some("old/module.rs".to_owned()));
+        assert_eq!(u64_at("/comments/1/line"), Some(7));
+        assert_eq!(str_at("/comments/1/side"), Some("LEFT".to_owned()));
+        assert_eq!(
+            str_at("/comments/1/body"),
+            Some("Removed constant still referenced.".to_owned())
+        );
+        Ok(())
     }
 
     #[test]
-    fn an_empty_submission_posts_a_summary_only_review() {
+    fn an_empty_submission_posts_a_summary_only_review() -> Result<(), Box<dyn std::error::Error>> {
         let submission = ReviewSubmission {
             head_sha: "abc123".to_owned(),
             summary: "Clean.".to_owned(),
             comments: Vec::new(),
         };
-        let value = serde_json::to_value(WireReview::from_submission(&submission)).unwrap();
-        assert_eq!(value["comments"].as_array().map(Vec::len), Some(0));
-        assert_eq!(value["event"], "COMMENT");
+        let value = serde_json::to_value(WireReview::from_submission(&submission))?;
+        assert_eq!(
+            value
+                .pointer("/comments")
+                .and_then(|c| c.as_array())
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            value.pointer("/event").and_then(serde_json::Value::as_str),
+            Some("COMMENT")
+        );
+        Ok(())
     }
 
     #[test]

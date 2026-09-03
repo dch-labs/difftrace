@@ -93,7 +93,8 @@ mod tests {
     use crate::tools::fake_gateway::FakeGateway;
 
     #[tokio::test]
-    async fn prior_comments_are_listed_with_their_anchors() {
+    async fn prior_comments_are_listed_with_their_anchors() -> Result<(), Box<dyn std::error::Error>>
+    {
         let gateway = FakeGateway::with_comments(vec![ExistingComment {
             id: 9,
             path: "src/lib.rs".to_owned(),
@@ -109,15 +110,16 @@ mod tests {
             "h",
         );
         let tool = ListCommentsTool::new(Arc::new(scope));
-        let output = tool.call(json!({}), &ToolContext::default()).await.unwrap();
+        let output = tool.call(json!({}), &ToolContext::default()).await?;
         let text = output.text_content();
         assert!(text.contains("#9 dana src/lib.rs:12 LEFT"));
         assert!(text.contains("Too early."));
         assert_eq!(gateway.requested_comment_lists(), vec![42]);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn an_empty_comment_list_says_so() {
+    async fn an_empty_comment_list_says_so() -> Result<(), Box<dyn std::error::Error>> {
         let scope = ReviewScope::new(
             Arc::new(FakeGateway::empty()),
             Arc::new(DiffIndex::empty()),
@@ -125,7 +127,8 @@ mod tests {
             "h",
         );
         let tool = ListCommentsTool::new(Arc::new(scope));
-        let output = tool.call(json!({}), &ToolContext::default()).await.unwrap();
+        let output = tool.call(json!({}), &ToolContext::default()).await?;
         assert_eq!(output.text_content(), "No review comments yet.");
+        Ok(())
     }
 }

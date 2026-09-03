@@ -54,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `DiffIndex::file_section` serving each file's raw unified-diff section
   from the retained source text. Pinned by
   `a_file_section_carries_only_that_files_raw_text`.
+- Review engine: `ReviewRunner` (generic over the loopctl client) driving
+  one `BareLoop` per batch — rubric `ContextContributor` re-emitting the
+  rules and pull-request frame every turn, `record_findings` as the
+  batch's single output channel, output-limiting middleware on the tool
+  pipeline, a `TrajectoryObserver` capture per run (JSONL to a configured
+  directory), clean soft-stop on turn-budget exhaustion, and a
+  structured-output summary pass over the aggregated findings. Pinned by
+  the `review::*::tests` suites (findings recorded through a scripted
+  `MockApiClient` engine run, budget-exhaustion soft stop, trajectory
+  JSONL on disk, summary generation, rubric and record-tool contracts).
 - Findings schema: `Findings` and `ReviewSummary` as loopctl
   `StructuredOutput` types with strict JSON Schemas and a closed four-level
   severity set. Pinned by the `findings::tests` suite (schema/serde mirror,

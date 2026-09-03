@@ -5,8 +5,6 @@
 //! `DIFFTRACE_TEST_PR`. Without them every test reports success by
 //! skipping, so CI stays offline.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::missing_panics_doc))]
-
 use difftrace::github::GitHubClient;
 use difftrace::github::PrGateway;
 use difftrace::github::RepoRef;
@@ -24,11 +22,13 @@ fn live_ready() -> Option<(String, String, u64)> {
 }
 
 #[tokio::test]
-async fn live_pr_overview_and_diff_fetch() {
+async fn live_pr_overview_and_diff_fetch() -> Result<(), Box<dyn std::error::Error>> {
     let Some((token, repo, pr)) = live_ready() else {
-        return;
+        return Ok(());
     };
-    let (owner, name) = repo.split_once('/').unwrap();
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or("DIFFTRACE_TEST_REPO must be owner/repo")?;
     let client = GitHubClient::new(
         token,
         RepoRef {
@@ -36,15 +36,15 @@ async fn live_pr_overview_and_diff_fetch() {
             repo: name.to_owned(),
         },
         None,
-    )
-    .unwrap();
-    let overview = client.pr_overview(pr).await.unwrap();
+    )?;
+    let overview = client.pr_overview(pr).await?;
     assert!(!overview.head_sha.is_empty());
     assert!(!overview.title.is_empty() || overview.number > 0);
-    let diff = client.pr_diff(pr).await.unwrap();
+    let diff = client.pr_diff(pr).await?;
     assert!(
         diff.contains("diff --git"),
         "expected a unified diff, got: {}",
         diff.chars().take(80).collect::<String>()
     );
+    Ok(())
 }

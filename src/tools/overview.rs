@@ -88,7 +88,8 @@ mod tests {
     use crate::tools::fake_gateway::FakeGateway;
 
     #[tokio::test]
-    async fn the_overview_tool_renders_the_pull_request_summary() {
+    async fn the_overview_tool_renders_the_pull_request_summary()
+    -> Result<(), Box<dyn std::error::Error>> {
         let gateway = FakeGateway::with_overview(PrOverview {
             number: 42,
             title: "Fix the flaky worker".to_owned(),
@@ -108,10 +109,11 @@ mod tests {
             "abc123",
         );
         let tool = OverviewTool::new(Arc::new(scope));
-        let output = tool.call(json!({}), &ToolContext::default()).await.unwrap();
+        let output = tool.call(json!({}), &ToolContext::default()).await?;
         assert!(output.text_content().contains("#42 Fix the flaky worker"));
         assert!(output.text_content().contains("dana"));
         assert!(output.text_content().contains("Restarts consumers."));
         assert_eq!(gateway.requested_prs(), vec![42]);
+        Ok(())
     }
 }

@@ -86,7 +86,7 @@ mod tests {
     use crate::tools::fake_gateway::FakeGateway;
 
     #[tokio::test]
-    async fn a_file_is_read_at_the_head_sha() {
+    async fn a_file_is_read_at_the_head_sha() -> Result<(), Box<dyn std::error::Error>> {
         let gateway = FakeGateway::with_file("src/lib.rs", "fn main() {}");
         let scope = ReviewScope::new(
             Arc::new(gateway.clone()),
@@ -97,17 +97,17 @@ mod tests {
         let tool = ReadFileTool::new(Arc::new(scope));
         let output = tool
             .call(json!({ "path": "src/lib.rs" }), &ToolContext::default())
-            .await
-            .unwrap();
+            .await?;
         assert_eq!(output.text_content(), "fn main() {}");
         assert_eq!(
             gateway.requested_reads(),
             vec![("src/lib.rs".to_owned(), "headsha".to_owned())]
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn an_empty_path_is_rejected() {
+    async fn an_empty_path_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
         let scope = ReviewScope::new(
             Arc::new(FakeGateway::empty()),
             Arc::new(DiffIndex::empty()),
@@ -118,7 +118,9 @@ mod tests {
         let err = tool
             .call(json!({ "path": "" }), &ToolContext::default())
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected an error")?;
         assert!(matches!(err, ToolError::InvalidInput(_)));
+        Ok(())
     }
 }
