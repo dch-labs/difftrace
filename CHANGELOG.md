@@ -73,7 +73,9 @@ reaches crates.io; the switch is a drop-in once it does.
   batch's single output channel, output-limiting middleware on the tool
   pipeline, a `TrajectoryObserver` capture per run (JSONL to a configured
   directory), clean soft-stop on turn-budget exhaustion, and a
-  structured-output summary pass over the aggregated findings; the
+  structured-output summary pass over the aggregated findings, sent with
+  `strict` off because Anthropic-protocol endpoints (the default profile
+  and zai) refuse strict response formats at request time; the
   per-file findings cap is enforced at record time with a receipt, and
   findings carrying `line: 0` are rejected where findings enter the
   system. Pinned by the `review::*::tests` suites (findings recorded

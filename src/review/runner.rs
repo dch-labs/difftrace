@@ -11,7 +11,9 @@ use loopctl::memory::trajectory::TrajectoryObserver;
 use loopctl::message::Message;
 use loopctl::middleware::OutputLimitMiddleware;
 use loopctl::middleware::ToolPipelineBuilder;
-use loopctl::structured::request_structured;
+use loopctl::structured::RequestOptions;
+use loopctl::structured::ResponseFormat;
+use loopctl::structured::StructuredOutput;
 
 use crate::config::ReviewSettings;
 use crate::diff::DiffIndex;
@@ -43,6 +45,12 @@ pub struct ReviewRunner<C: loopctl::api::ApiClient> {
 fn batch_prompt(files: &[String]) -> String {
     let list = files.join("\n");
     format!("Review these changed files:\n{list}")
+}
+
+fn summary_response_format() -> ResponseFormat {
+    let mut response_format = ResponseFormat::from_type::<ReviewSummary>();
+    response_format.strict = false;
+    response_format
 }
 
 fn summary_prompt(findings: &Findings) -> Result<String, DifftraceError> {
@@ -151,13 +159,21 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         }
         let prompt = summary_prompt(&merged)?;
         let system = Some(SUMMARY_SYSTEM.to_owned());
-        request_structured::<ReviewSummary>(
-            self.client.as_ref(),
-            vec![Message::user(prompt)],
+        let options = RequestOptions::new().with_response_format(summary_response_format());
+        let request = loopctl::api::StreamRequest {
+            messages: vec![Message::user(prompt)],
             system,
-        )
-        .await
-        .map_err(|source| DifftraceError::Summary { source })
+            tools: None,
+        };
+        let response = self
+            .client
+            .create_message_with_options(&request, options)
+            .await
+            .map_err(|source| DifftraceError::Summary {
+                source: loopctl::structured::StructuredError::Api(source),
+            })?;
+        let value = self.client.extract_structured(&response.message);
+        ReviewSummary::from_value(value).map_err(|source| DifftraceError::Summary { source })
     }
 }
 
@@ -304,6 +320,29 @@ diff --git a/src/lib.rs b/src/lib.rs
             let _unused = std::fs::remove_file(entry.path());
         }
         let _unused = std::fs::remove_dir(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn the_summary_request_is_explicitly_non_strict() {
+        let response_format = summary_response_format();
+        assert!(
+            !response_format.strict,
+            "strict = true is refused by Anthropic-protocol endpoints at request time"
+        );
+        assert_eq!(response_format.name, ReviewSummary::name());
+        assert_eq!(response_format.schema, ReviewSummary::schema());
+    }
+
+    #[test]
+    fn the_summary_options_carry_the_response_format() -> Result<(), Box<dyn std::error::Error>> {
+        let options = RequestOptions::new().with_response_format(summary_response_format());
+        let response_format = options
+            .response_format
+            .as_ref()
+            .ok_or("expected a response format on the options")?;
+        assert!(!response_format.strict);
+        assert_eq!(response_format.name, "difftrace_review_summary");
         Ok(())
     }
 
