@@ -426,7 +426,7 @@ index 1111111..0000000
     }
 
     #[test]
-    fn a_removed_line_clamps_to_the_nearest_new_side_anchor()
+    fn a_removed_line_citation_resolves_to_the_overlapping_new_side_anchor()
     -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/f.rs b/f.rs
@@ -445,8 +445,8 @@ diff --git a/f.rs b/f.rs
     }
 
     #[test]
-    fn a_pure_deletion_hunk_clamps_to_surrounding_context() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn a_pure_deletion_hunk_citation_resolves_to_the_context_anchor()
+    -> Result<(), Box<dyn std::error::Error>> {
         let raw = "\
 diff --git a/f.rs b/f.rs
 --- a/f.rs
@@ -458,8 +458,7 @@ diff --git a/f.rs b/f.rs
 ";
         let index = DiffIndex::parse(raw)?;
         // New side is 5 ctx-a, 6 ctx-b; old 6 (removed) maps to 5 or 6.
-        let clamped = index.clamp_to_hunk("f.rs", 6);
-        assert!(clamped == Some(5) || clamped == Some(6));
+        assert_eq!(index.clamp_to_hunk("f.rs", 6), Some(6));
         Ok(())
     }
 

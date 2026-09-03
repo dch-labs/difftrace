@@ -19,11 +19,6 @@ use loopctl::tool::ToolRegistry;
 use crate::diff::DiffIndex;
 use crate::github::PrGateway;
 
-/// The shared facts of one review run.
-///
-/// Built by the orchestrator after fetching the pull request and parsing
-/// its diff; every tool holds the same instance, so the run reviews one
-/// pull request against one head commit and one diff index.
 pub struct ReviewScope {
     pub gateway: Arc<dyn PrGateway>,
     pub index: Arc<DiffIndex>,
@@ -51,7 +46,7 @@ impl ReviewScope {
     pub fn batch_registry(
         &self,
         record: crate::review::record::FindingsSlot,
-        _max_findings_per_file: usize,
+        max_findings_per_file: usize,
     ) -> ToolRegistry {
         let scope = Arc::new(Self {
             gateway: Arc::clone(&self.gateway),
@@ -64,7 +59,10 @@ impl ReviewScope {
         registry.register(file_diff::FileDiffTool::new(Arc::clone(&scope)));
         registry.register(read_file::ReadFileTool::new(Arc::clone(&scope)));
         registry.register(comments::ListCommentsTool::new(Arc::clone(&scope)));
-        registry.register(crate::review::RecordFindingsTool::new(record));
+        registry.register(crate::review::RecordFindingsTool::new(
+            record,
+            max_findings_per_file,
+        ));
         registry
     }
 

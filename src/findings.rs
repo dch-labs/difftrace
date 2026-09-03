@@ -36,6 +36,18 @@ pub struct Finding {
     pub body: String,
 }
 
+pub(crate) fn reject_zero_lines(findings: &[Finding]) -> Result<(), String> {
+    for finding in findings {
+        if finding.line == 0 {
+            return Err(format!(
+                "finding line must be at least 1: {}:{}",
+                finding.file, finding.line
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Findings {
     pub findings: Vec<Finding>,

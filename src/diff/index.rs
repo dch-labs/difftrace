@@ -1,6 +1,7 @@
 //! The queryable diff index: files, hunks, per-line side numbering, and
-//! the `clamp_to_hunk` resolution a finding must pass before it can
-//! become a comment.
+//! `clamp_to_hunk` — a finding's line must be an anchorable line of the
+//! diff (a context or added line of some hunk) before it can become a
+//! comment; anything else is rejected.
 
 use crate::error::DifftraceError;
 
@@ -30,20 +31,6 @@ pub struct Hunk {
     pub lines: Vec<DiffLine>,
 }
 
-impl Hunk {
-    #[must_use]
-    pub fn new_span(&self) -> (usize, usize) {
-        if self.new_count == 0 {
-            return (0, 0);
-        }
-        let last = self
-            .new_start
-            .saturating_add(self.new_count)
-            .saturating_sub(1);
-        (self.new_start, last)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
     pub section: (usize, usize),
@@ -53,22 +40,6 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     pub binary: bool,
     pub anchor_lines: Vec<usize>,
-}
-
-impl FileDiff {
-    fn in_hunk_span(&self, line: usize) -> bool {
-        self.hunks.iter().any(|hunk| {
-            let (first, last) = hunk.new_span();
-            first > 0 && line >= first && line <= last
-        })
-    }
-
-    fn nearest_anchor(&self, line: usize) -> Option<usize> {
-        self.anchor_lines
-            .iter()
-            .copied()
-            .min_by_key(|anchor| anchor.abs_diff(line))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -138,12 +109,9 @@ impl DiffIndex {
     #[must_use]
     pub fn clamp_to_hunk(&self, file: &str, line: usize) -> Option<usize> {
         let file = self.file(file)?;
-        if !file.in_hunk_span(line) {
-            return None;
+        match file.anchor_lines.binary_search(&line) {
+            Ok(_) => Some(line),
+            Err(_) => None,
         }
-        if file.anchor_lines.binary_search(&line).is_ok() {
-            return Some(line);
-        }
-        file.nearest_anchor(line)
     }
 }

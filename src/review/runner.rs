@@ -74,28 +74,14 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         }
     }
 
-    /// Review one batch of changed files with a fresh agent run.
-    ///
-    /// A batch that exhausts its turn budget stops cleanly with whatever
-    /// findings it recorded up to that point; every other failure
-    /// propagates as [`DifftraceError::ReviewRun`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DifftraceError::ReviewRun`] when the loop fails for a
-    /// reason other than the turn budget.
     pub async fn review_batch(&self, files: &[String]) -> Result<Findings, DifftraceError> {
         let slot = RecordFindingsTool::empty_slot();
-        let engine_registry = self
+        let registry = self
             .scope
             .batch_registry(Arc::clone(&slot), self.settings.max_findings_per_file);
-        let pipeline_core = Arc::new(
-            self.scope
-                .batch_registry(Arc::clone(&slot), self.settings.max_findings_per_file),
-        );
         let mut agent = BareLoop::new(
             Arc::clone(&self.client),
-            engine_registry,
+            registry,
             loopctl::config::SessionConfig::default(),
         );
         agent.add_contributor(Box::new(ReviewRubric::new(&self.overview)));
@@ -104,8 +90,7 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             None => TrajectoryObserver::in_memory(),
         }));
         let pipeline = ToolPipelineBuilder::new()
-            .with_middleware(OutputLimitMiddleware::new(TOOL_OUTPUT_MAX_CHARS))
-            .with_core(pipeline_core);
+            .with_middleware(OutputLimitMiddleware::new(TOOL_OUTPUT_MAX_CHARS));
         agent
             .set_pipeline(pipeline)
             .map_err(|source| DifftraceError::ReviewRun { source })?;
@@ -128,15 +113,6 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         Ok(recorded.unwrap_or_default())
     }
 
-    /// Summarize the aggregated findings of all batches.
-    ///
-    /// Uses the provider's native structured output; the prompted JSON
-    /// fallback activates once the loopctl dependency pin advances past
-    /// the prompted-structured release.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`DifftraceError::Summary`] when the pass fails.
     pub async fn summarize(&self, batches: &[Findings]) -> Result<ReviewSummary, DifftraceError> {
         let mut merged = Findings::default();
         for batch in batches {
@@ -319,6 +295,54 @@ diff --git a/src/lib.rs b/src/lib.rs
         );
         assert_eq!(summary.risk_notes.len(), 1);
         assert_eq!(summary.tests, "Covered by the new integration test.");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_oversized_tool_output_is_truncated_for_the_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let big = "a".repeat(TOOL_OUTPUT_MAX_CHARS.saturating_add(4_096));
+        let gateway = FakeGateway::with_file("src/lib.rs", &big);
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call(
+                "call_1",
+                "read_file_at_head",
+                json!({ "path": "src/lib.rs" }),
+            ),
+            tool_call("call_2", "record_findings", json!({ "findings": [] })),
+            text_response("Clean batch."),
+        ]);
+        let dir = std::env::temp_dir().join(format!("difftrace-traj-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            Arc::new(gateway),
+            Arc::new(diff_index()?),
+            overview(),
+            ReviewSettings::default(),
+            Some(dir.clone()),
+        );
+        runner.review_batch(&["src/lib.rs".to_owned()]).await?;
+        let mut trajectory = String::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+                trajectory.push_str(&std::fs::read_to_string(entry.path())?);
+            }
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let _unused = std::fs::remove_file(entry?.path());
+        }
+        let _unused = std::fs::remove_dir(&dir);
+        assert!(
+            trajectory.contains("[truncated]"),
+            "the oversized tool output must carry the truncation marker in the trajectory"
+        );
+        let untruncated = format!(r#""text": "aaaa{}"#, "a".repeat(TOOL_OUTPUT_MAX_CHARS));
+        assert!(
+            !trajectory.contains(&untruncated),
+            "the trajectory must not carry an untruncated {TOOL_OUTPUT_MAX_CHARS}-char payload"
+        );
         Ok(())
     }
 }

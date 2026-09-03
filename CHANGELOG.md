@@ -60,10 +60,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batch's single output channel, output-limiting middleware on the tool
   pipeline, a `TrajectoryObserver` capture per run (JSONL to a configured
   directory), clean soft-stop on turn-budget exhaustion, and a
-  structured-output summary pass over the aggregated findings. Pinned by
-  the `review::*::tests` suites (findings recorded through a scripted
-  `MockApiClient` engine run, budget-exhaustion soft stop, trajectory
-  JSONL on disk, summary generation, rubric and record-tool contracts).
+  structured-output summary pass over the aggregated findings; the
+  per-file findings cap is enforced at record time with a receipt, and
+  findings carrying `line: 0` are rejected where findings enter the
+  system. Pinned by the `review::*::tests` suites (findings recorded
+  through a scripted `MockApiClient` engine run, budget-exhaustion soft
+  stop, trajectory JSONL on disk, summary generation, rubric and
+  record-tool contracts, record-time cap receipt, zero-line rejection,
+  and the output limit proven by an oversized tool payload carrying the
+  `[truncated]` marker in the trajectory).
 - Findings schema: `Findings` and `ReviewSummary` as loopctl
   `StructuredOutput` types with strict JSON Schemas and a closed four-level
   severity set. Pinned by the `findings::tests` suite (schema/serde mirror,

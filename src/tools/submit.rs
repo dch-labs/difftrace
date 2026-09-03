@@ -22,6 +22,7 @@ use serde_json::json;
 use crate::findings::Finding;
 use crate::findings::Findings;
 use crate::findings::findings_array_schema;
+use crate::findings::reject_zero_lines;
 use crate::github::CommentPosition;
 use crate::github::ReviewSubmission;
 use crate::github::Side;
@@ -163,6 +164,7 @@ impl Tool for SubmitReviewTool {
         Box::pin(async move {
             let parsed: SubmitInput = serde_json::from_value(input)
                 .map_err(|err| ToolError::InvalidInput(err.to_string()))?;
+            reject_zero_lines(&parsed.findings).map_err(ToolError::InvalidInput)?;
             if self.submitted.swap(true, Ordering::SeqCst) {
                 return Ok(ToolOutput::error_text(
                     "The review was already submitted; this run posts exactly one review.",
@@ -395,6 +397,38 @@ diff --git a/src/lib.rs b/src/lib.rs
         )
         .await?;
         assert!(gateway.submitted().is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_zero_line_finding_is_rejected_without_consuming_the_submission()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (tool, gateway) = tool(5)?;
+        let err = tool
+            .call(
+                input(
+                    "Summary.",
+                    &[json!({
+                        "file": "src/lib.rs",
+                        "line": 0,
+                        "severity": "warning",
+                        "title": "T",
+                        "body": "B"
+                    })],
+                ),
+                &ToolContext::default(),
+            )
+            .await
+            .err()
+            .ok_or("expected an error")?;
+        assert!(err.to_string().contains("at least 1"));
+        assert_eq!(gateway.submit_calls(), 0);
+        tool.call(
+            input("Summary.", &[finding_json("src/lib.rs", 2)]),
+            &ToolContext::default(),
+        )
+        .await?;
+        assert_eq!(gateway.submit_calls(), 1);
         Ok(())
     }
 
