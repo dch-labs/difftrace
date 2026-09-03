@@ -15,6 +15,18 @@ pub enum Severity {
     Critical,
 }
 
+impl Severity {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nitpick => "nitpick",
+            Self::Suggestion => "suggestion",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     pub file: String,
@@ -29,6 +41,28 @@ pub struct Findings {
     pub findings: Vec<Finding>,
 }
 
+#[must_use]
+pub fn findings_array_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "file": { "type": "string" },
+                "line": { "type": "integer", "minimum": 1 },
+                "severity": {
+                    "type": "string",
+                    "enum": ["nitpick", "suggestion", "warning", "critical"]
+                },
+                "title": { "type": "string" },
+                "body": { "type": "string" }
+            },
+            "required": ["file", "line", "severity", "title", "body"],
+            "additionalProperties": false
+        }
+    })
+}
+
 impl StructuredOutput for Findings {
     fn name() -> &'static str {
         "difftrace_findings"
@@ -38,24 +72,7 @@ impl StructuredOutput for Findings {
         serde_json::json!({
             "type": "object",
             "properties": {
-                "findings": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "file": { "type": "string" },
-                            "line": { "type": "integer", "minimum": 1 },
-                            "severity": {
-                                "type": "string",
-                                "enum": ["nitpick", "suggestion", "warning", "critical"]
-                            },
-                            "title": { "type": "string" },
-                            "body": { "type": "string" }
-                        },
-                        "required": ["file", "line", "severity", "title", "body"],
-                        "additionalProperties": false
-                    }
-                }
+                "findings": findings_array_schema()
             },
             "required": ["findings"],
             "additionalProperties": false

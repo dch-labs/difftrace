@@ -10,25 +10,28 @@ use crate::error::DifftraceError;
 pub(super) fn parse(diff_text: &str) -> Result<DiffIndex, DifftraceError> {
     let mut files = Vec::new();
     let mut current: Option<FileBuilder> = None;
+    let line_count = diff_text.lines().count();
     for (idx, raw) in diff_text.lines().enumerate() {
         let line_no = idx.saturating_add(1);
         if let Some(header) = raw.strip_prefix("diff --git ") {
-            flush(&mut files, &mut current)?;
+            let end_line = line_no.saturating_sub(1);
+            flush(&mut files, &mut current, end_line)?;
             current = Some(FileBuilder::new(header, line_no)?);
         } else if let Some(builder) = current.as_mut() {
             builder.push_line(raw, line_no)?;
         }
     }
-    flush(&mut files, &mut current)?;
-    Ok(DiffIndex::from_files(files))
+    flush(&mut files, &mut current, line_count)?;
+    Ok(DiffIndex::from_parts(diff_text.to_owned(), files))
 }
 
 fn flush(
     files: &mut Vec<FileDiff>,
     current: &mut Option<FileBuilder>,
+    end_line: usize,
 ) -> Result<(), DifftraceError> {
     if let Some(builder) = current.take() {
-        files.push(builder.finish()?);
+        files.push(builder.finish(end_line)?);
     }
     Ok(())
 }
@@ -41,6 +44,7 @@ fn parse_error(line: usize, reason: &str) -> DifftraceError {
 }
 
 struct FileBuilder {
+    start_line: usize,
     git_old: Option<String>,
     git_new: Option<String>,
     dash_old: Option<String>,
@@ -64,6 +68,7 @@ impl FileBuilder {
     fn new(header: &str, line_no: usize) -> Result<Self, DifftraceError> {
         let (git_old, git_new) = split_git_header(header, line_no)?;
         Ok(Self {
+            start_line: line_no,
             git_old,
             git_new,
             dash_old: None,
@@ -167,7 +172,7 @@ impl FileBuilder {
         }
     }
 
-    fn finish(mut self) -> Result<FileDiff, DifftraceError> {
+    fn finish(mut self, end_line: usize) -> Result<FileDiff, DifftraceError> {
         if let Some(active) = &self.active
             && (active.remaining_old > 0 || active.remaining_new > 0)
         {
@@ -187,6 +192,7 @@ impl FileBuilder {
             .or(self.git_old)
             .unwrap_or_default();
         Ok(FileDiff {
+            section: (self.start_line, end_line),
             old_path,
             new_path,
             hunks: self.hunks,
@@ -529,6 +535,27 @@ diff --git a/f.rs b/f.rs
         let index = DiffIndex::parse("").unwrap();
         assert!(index.is_empty());
         assert_eq!(index.file_names(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn a_file_section_carries_only_that_files_raw_text() {
+        let raw = "diff --git a/first.rs b/first.rs\n--- a/first.rs\n+++ b/first.rs\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/mid.rs b/mid.rs\n--- a/mid.rs\n+++ b/mid.rs\n@@ -1 +1 @@\n-c\n+d\ndiff --git a/last.rs b/last.rs\n--- a/last.rs\n+++ b/last.rs\n@@ -1 +1 @@\n-e\n+f\n";
+        let index = DiffIndex::parse(raw).unwrap();
+        let first = index.file_section("first.rs").unwrap();
+        assert_eq!(
+            first,
+            "diff --git a/first.rs b/first.rs\n--- a/first.rs\n+++ b/first.rs\n@@ -1 +1 @@\n-a\n+b"
+        );
+        let mid = index.file_section("mid.rs").unwrap();
+        assert!(mid.starts_with("diff --git a/mid.rs b/mid.rs"));
+        assert!(mid.contains("+d"));
+        assert!(!mid.contains("first.rs"));
+        assert!(!mid.contains("last.rs"));
+        let last = index.file_section("last.rs").unwrap();
+        assert!(last.starts_with("diff --git a/last.rs b/last.rs"));
+        assert!(last.contains("+f"));
+        assert!(!last.contains("mid.rs"));
+        assert_eq!(index.file_section("absent.rs"), None);
     }
 
     #[test]

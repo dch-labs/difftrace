@@ -46,6 +46,8 @@ impl Hunk {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDiff {
+    pub section: (usize, usize),
+
     pub old_path: Option<String>,
     pub new_path: String,
     pub hunks: Vec<Hunk>,
@@ -71,12 +73,13 @@ impl FileDiff {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DiffIndex {
+    source: String,
     files: Vec<FileDiff>,
 }
 
 impl DiffIndex {
-    pub(crate) fn from_files(files: Vec<FileDiff>) -> Self {
-        Self { files }
+    pub(crate) fn from_parts(source: String, files: Vec<FileDiff>) -> Self {
+        Self { source, files }
     }
 
     pub fn parse(diff_text: &str) -> Result<Self, DifftraceError> {
@@ -94,6 +97,25 @@ impl DiffIndex {
             .iter()
             .map(|file| file.new_path.as_str())
             .collect()
+    }
+
+    #[must_use]
+    pub fn file_section(&self, path: &str) -> Option<String> {
+        let file = self.file(path)?;
+        let start = file.section.0.saturating_sub(1);
+        let count = file
+            .section
+            .1
+            .saturating_sub(file.section.0)
+            .saturating_add(1);
+        let text = self
+            .source
+            .lines()
+            .skip(start)
+            .take(count)
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(text)
     }
 
     #[must_use]

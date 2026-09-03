@@ -12,7 +12,7 @@ pub enum Side {
 }
 
 impl Side {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Right => "RIGHT",
             Self::Left => "LEFT",

@@ -7,7 +7,8 @@
 //! Modules: `config` (configuration), `error` (the error enum),
 //! `provider` (loopctl client factory), `github` (the REST layer behind
 //! `PrGateway`), `diff` (the diff index and grounding authority),
-//! `findings` (the model-output contracts).
+//! `findings` (the model-output contracts), `tools` (the agent's
+//! loopctl `Tool` surface).
 
 // Test-only lint relaxations; this list is fixed and must not grow.
 #![cfg_attr(
@@ -25,3 +26,4 @@ pub mod error;
 pub mod findings;
 pub mod github;
 pub mod provider;
+pub mod tools;

@@ -38,6 +38,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hunk. Pinned by the `diff::parse::tests` suite (side numbering,
   consecutive-hunk renumbering, new/deleted/binary files, `--`-prefixed
   body lines, embedded ` b/` paths, count validation).
+- Review tools: five loopctl `Tool` implementations (`get_pr_overview`,
+  `get_file_diff`, `read_file_at_head`, `list_review_comments`,
+  `submit_review`) over the `PrGateway` seam and the diff index, assembled
+  by `ReviewScope::registry`. `submit_review` is the only write-class tool
+  and grounds every finding through `clamp_to_hunk` before posting,
+  dropping ungrounded findings with a receipt that names each one; it
+  fires at most once per run — a second submission is refused before the
+  gateway, and a failed submission may be retried. Pinned by the
+  `tools::*::tests` suites (rendering including the comment side, gateway
+  call mapping, grounding drops, the per-file cap, invalid-input
+  rejection, the once-guard and its retry path, registry assembly)
+  against an in-memory fake gateway; the tool's findings-item schema is
+  composed from `Findings::schema()` and pinned equal to it.
+- `DiffIndex::file_section` serving each file's raw unified-diff section
+  from the retained source text. Pinned by
+  `a_file_section_carries_only_that_files_raw_text`.
 - Findings schema: `Findings` and `ReviewSummary` as loopctl
   `StructuredOutput` types with strict JSON Schemas and a closed four-level
   severity set. Pinned by the `findings::tests` suite (schema/serde mirror,
