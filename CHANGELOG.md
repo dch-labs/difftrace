@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fatal errors and thread-resolution warnings print the full error
+  chain — octocrab's error type displays only a variant name ("GitHub"),
+  so the actual rejection message and documentation URL sat two
+  `source()` levels down and never reached the log. Pinned by the
+  error-chain unit test.
+
 ## [0.1.1] - 2026-09-04
 
 ### Added

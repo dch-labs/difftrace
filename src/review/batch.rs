@@ -209,7 +209,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             Err(err) => {
                 tracing::warn!(
                     target: "difftrace::review",
-                    error = %err,
+                    error = %crate::error::error_chain(&err),
                     "could not list previous review threads; none will be resolved"
                 );
                 Vec::new()
@@ -227,7 +227,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             if let Err(err) = self.resolve_thread(id.clone()).await {
                 tracing::warn!(
                     target: "difftrace::review",
-                    error = %err,
+                    error = %crate::error::error_chain(&err),
                     "could not resolve a previous review thread"
                 );
             }

@@ -45,7 +45,7 @@ fn main() -> ExitCode {
     match runtime.block_on(run(args)) {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("difftrace: {err}");
+            eprintln!("difftrace: {}", difftrace::error::error_chain(&err));
             ExitCode::FAILURE
         }
     }

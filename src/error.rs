@@ -55,3 +55,45 @@ pub enum DifftraceError {
     #[error("{0}")]
     Cli(String),
 }
+
+#[must_use]
+pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        text.push_str(": ");
+        text.push_str(&error.to_string());
+        source = error.source();
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct Inner(&'static str);
+
+    impl std::fmt::Display for Inner {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl std::error::Error for Inner {}
+
+    #[test]
+    fn the_chain_reaches_every_source_level() {
+        let leaf = DifftraceError::NotAFile {
+            path: "gone.txt".to_owned(),
+        };
+        assert_eq!(error_chain(&leaf), leaf.to_string());
+        let inner: Box<dyn std::error::Error + Send + Sync> = Box::new(Inner("root cause"));
+        let nested = DifftraceError::InvalidBaseUrl {
+            url: "not a url".to_owned(),
+            source: inner,
+        };
+        assert!(error_chain(&nested).contains("root cause"));
+    }
+}
