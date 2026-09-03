@@ -157,23 +157,38 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         for batch in batches {
             merged.findings.extend(batch.findings.iter().cloned());
         }
-        let prompt = summary_prompt(&merged)?;
+        let mut messages = vec![Message::user(summary_prompt(&merged)?)];
         let system = Some(SUMMARY_SYSTEM.to_owned());
         let options = RequestOptions::new().with_response_format(summary_response_format());
-        let request = loopctl::api::StreamRequest {
-            messages: vec![Message::user(prompt)],
-            system,
-            tools: None,
-        };
-        let response = self
-            .client
-            .create_message_with_options(&request, options)
-            .await
-            .map_err(|source| DifftraceError::Summary {
-                source: loopctl::structured::StructuredError::Api(source),
-            })?;
-        let value = self.client.extract_structured(&response.message);
-        ReviewSummary::from_value(value).map_err(|source| DifftraceError::Summary { source })
+        let mut attempts_left: u8 = 1;
+        loop {
+            let request = loopctl::api::StreamRequest {
+                messages: messages.clone(),
+                system: system.clone(),
+                tools: None,
+            };
+            let response = self
+                .client
+                .create_message_with_options(&request, options.clone())
+                .await
+                .map_err(|source| DifftraceError::Summary {
+                    source: loopctl::structured::StructuredError::Api(source),
+                })?;
+            let value = self.client.extract_structured(&response.message);
+            match ReviewSummary::from_value(value) {
+                Ok(summary) => return Ok(summary),
+                Err(source) if attempts_left == 0 => {
+                    return Err(DifftraceError::Summary { source });
+                }
+                Err(source) => {
+                    attempts_left = attempts_left.saturating_sub(1);
+                    messages.push(Message::user(format!(
+                        "That JSON did not match the schema: {source}. \
+Return the corrected JSON now, matching every field type exactly."
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -343,6 +358,57 @@ diff --git a/src/lib.rs b/src/lib.rs
             .ok_or("expected a response format on the options")?;
         assert!(!response_format.strict);
         assert_eq!(response_format.name, "difftrace_review_summary");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_malformed_summary_gets_one_corrective_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let good = json!({
+            "summary": "Adds retry with backoff to the worker loop.",
+            "risk_notes": ["Retry can now outlive the shutdown signal."],
+            "tests": "Covered by the new integration test."
+        });
+        let bad = json!({
+            "summary": { "text": "nested where a string belongs" },
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            text_response(&bad.to_string()),
+            text_response(&good.to_string()),
+        ]);
+        let runner = runner(Arc::new(client.clone()), ReviewSettings::default(), None)?;
+        let summary = runner.summarize(&[Findings::default()]).await?;
+        assert_eq!(
+            summary.summary,
+            "Adds retry with backoff to the worker loop."
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_summary_still_malformed_after_the_retry_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let bad = json!({
+            "summary": { "text": "nested where a string belongs" },
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            text_response(&bad.to_string()),
+            text_response(&bad.to_string()),
+        ]);
+        let runner = runner(Arc::new(client.clone()), ReviewSettings::default(), None)?;
+        let err = runner
+            .summarize(&[Findings::default()])
+            .await
+            .err()
+            .ok_or("expected the retry exhaustion to fail")?;
+        assert!(
+            err.to_string().contains("expected a string"),
+            "names the schema breach: {err}"
+        );
         Ok(())
     }
 

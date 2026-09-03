@@ -61,8 +61,8 @@ created, difftrace says so on stderr and proceeds without capture.
 
 ```toml
 [provider]
-profile = "anthropic"      # anthropic | openai | zai | ollama
-model = "claude-sonnet-4"  # optional; ollama requires it; zai defaults to glm-4.7
+profile = "zai"      # anthropic | openai | zai | ollama
+model = "glm-4.7"  # optional; ollama requires it; zai defaults to glm-4.7
 base_url = "…"             # optional endpoint override
 
 [github]

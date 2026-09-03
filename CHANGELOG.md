@@ -75,7 +75,8 @@ reaches crates.io; the switch is a drop-in once it does.
   directory), clean soft-stop on turn-budget exhaustion, and a
   structured-output summary pass over the aggregated findings, sent with
   `strict` off because Anthropic-protocol endpoints (the default profile
-  and zai) refuse strict response formats at request time; the
+  and zai) refuse strict response formats at request time, with one
+  corrective retry when the returned JSON fails schema parsing; the
   per-file findings cap is enforced at record time with a receipt, and
   findings carrying `line: 0` are rejected where findings enter the
   system. Pinned by the `review::*::tests` suites (findings recorded
