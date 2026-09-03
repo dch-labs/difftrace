@@ -141,6 +141,20 @@ pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceE
                 .map(DifftraceClient::OpenAi)
                 .map_err(|source| DifftraceError::ClientBuild { source })
         }
+        ProviderProfile::Zai => {
+            let key = env_key_with_alias("ZAI_API_KEY", "ZHIPUAI_API_KEY")?;
+            let mut builder = loopctl::provider::zai_builder().with_api_key(key);
+            if let Some(model) = &provider.model {
+                builder = builder.with_model(model.clone());
+            }
+            if let Some(base_url) = &provider.base_url {
+                builder = builder.with_base_url(base_url.clone());
+            }
+            builder
+                .build()
+                .map(DifftraceClient::Anthropic)
+                .map_err(|source| DifftraceError::ClientBuild { source })
+        }
         ProviderProfile::Ollama => {
             let model = provider
                 .model
@@ -163,6 +177,17 @@ pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceE
                 .map_err(|source| DifftraceError::ClientBuild { source })
         }
     }
+}
+
+fn env_key_with_alias(
+    primary: &'static str,
+    alias: &'static str,
+) -> Result<String, DifftraceError> {
+    std::env::var(primary)
+        .or_else(|_| std::env::var(alias))
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or(DifftraceError::MissingApiKey { env_var: primary })
 }
 
 fn env_key(var: &'static str) -> Result<String, DifftraceError> {
@@ -301,6 +326,58 @@ mod tests {
         config.provider.base_url = Some("https://cloud.example/v1".to_owned());
         let client = build_client(&config)?;
         assert_eq!(client.base_url(), "https://cloud.example/v1");
+        Ok(())
+    }
+
+    #[test]
+    fn zai_builds_with_env_key_at_its_endpoint() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.set("ZAI_API_KEY", "env-key");
+        env.remove("ZHIPUAI_API_KEY");
+        let client = build_client(&cfg(ProviderProfile::Zai))?;
+        assert_eq!(client.base_url(), "https://api.z.ai/api/anthropic");
+        assert_eq!(client.model(), "test-model");
+        let mut default_model = cfg(ProviderProfile::Zai);
+        default_model.provider.model = None;
+        let client = build_client(&default_model)?;
+        assert_eq!(client.model(), "glm-4.7");
+        Ok(())
+    }
+
+    #[test]
+    fn a_zhipuai_alias_key_satisfies_the_zai_profile() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.remove("ZAI_API_KEY");
+        env.set("ZHIPUAI_API_KEY", "alias-key");
+        let client = build_client(&cfg(ProviderProfile::Zai))?;
+        assert_eq!(client.base_url(), "https://api.z.ai/api/anthropic");
+        Ok(())
+    }
+
+    #[test]
+    fn a_missing_zai_key_names_the_primary_variable() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.remove("ZAI_API_KEY");
+        env.remove("ZHIPUAI_API_KEY");
+        let err = build_client(&cfg(ProviderProfile::Zai))
+            .err()
+            .ok_or("expected an error")?;
+        assert!(
+            err.to_string().contains("ZAI_API_KEY"),
+            "error must name the env var: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_zai_model_override_replaces_the_default() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY"]);
+        env.set("ZAI_API_KEY", "env-key");
+        let mut config = cfg(ProviderProfile::Zai);
+        config.provider.model = Some("glm-5.0".to_owned());
+        let client = build_client(&config)?;
+        assert_eq!(client.model(), "glm-5.0");
+        assert_eq!(client.base_url(), "https://api.z.ai/api/anthropic");
         Ok(())
     }
 

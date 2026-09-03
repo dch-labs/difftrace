@@ -16,7 +16,8 @@ and posts one atomic review — or renders it locally with `--dry-run`.
 - A GitHub personal access token with read access to pull requests (and
   write access when posting reviews) — `GITHUB_TOKEN`
 - A provider API key — `ANTHROPIC_API_KEY` (default profile),
-  `OPENAI_API_KEY`, or `OLLAMA_API_KEY` for a local server
+  `OPENAI_API_KEY`, `ZAI_API_KEY` (or its `ZHIPUAI_API_KEY` alias), or
+  `OLLAMA_API_KEY` for a local server
 
 difftrace depends on loopctl via a git pin until loopctl 0.3.1+ is
 published to crates.io (0.3.0 lacks the trajectory capture difftrace
@@ -55,8 +56,8 @@ created, difftrace says so on stderr and proceeds without capture.
 
 ```toml
 [provider]
-profile = "anthropic"      # anthropic | openai | ollama
-model = "claude-sonnet-4"  # optional; ollama requires it
+profile = "anthropic"      # anthropic | openai | zai | ollama
+model = "claude-sonnet-4"  # optional; ollama requires it; zai defaults to glm-4.7
 base_url = "…"             # optional endpoint override
 
 [github]

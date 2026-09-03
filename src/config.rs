@@ -12,6 +12,7 @@ pub enum ProviderProfile {
     #[default]
     Anthropic,
     OpenAi,
+    Zai,
     Ollama,
 }
 

@@ -28,9 +28,14 @@ reaches crates.io; the switch is a drop-in once it does.
   loopctl's Anthropic and OpenAI clients via the statically dispatched
   `DifftraceClient` enum, with the `Ollama` profile riding the OpenAI
   protocol at a local endpoint; keys resolve from the environment only,
-  empty strings counting as missing. Pinned by the `provider::tests` suite
+  empty strings counting as missing. The `zai` profile rides loopctl's
+  Anthropic-compatible client at `https://api.z.ai/api/anthropic`
+  (default model `glm-4.7`, key from `ZAI_API_KEY` or its
+  `ZHIPUAI_API_KEY` alias). Pinned by the `provider::tests` suite
   (per-profile construction, missing/empty key errors naming the variable,
-  base-URL overrides on both profiles, Ollama model requirement).
+  base-URL overrides on both profiles, Ollama model requirement; the zai
+  suite pins the endpoint, default model, alias fallback, and model
+  override).
 - `GitHub` REST layer behind the `PrGateway` trait: pull request summary,
   raw diff fetch, file content at a ref, review-comment listing, and atomic
   review submission (summary + inline comments anchored with `line`/`side`)
