@@ -15,9 +15,22 @@ use difftrace::github::GitHubClient;
 use difftrace::github::PrGateway;
 use difftrace::provider::build_client;
 use difftrace::review::ReviewRunner;
+use tracing_subscriber::EnvFilter;
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let result = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+    if let Err(err) = result {
+        eprintln!("difftrace: cannot install the log subscriber: {err}");
+    }
+}
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    init_logging();
     let Command::Review(args) = cli.command;
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

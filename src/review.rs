@@ -5,6 +5,7 @@
 //! output.
 
 pub mod batch;
+pub mod logging;
 pub mod record;
 pub mod rubric;
 pub mod runner;

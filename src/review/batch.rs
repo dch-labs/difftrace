@@ -6,10 +6,13 @@
 use loopctl::api::ApiClient;
 
 use crate::error::DifftraceError;
+use crate::findings::Finding;
 use crate::findings::Findings;
 use crate::findings::ReviewSummary;
+use crate::findings::Severity;
 use crate::github::CommentPosition;
 use crate::github::ReviewSubmission;
+use crate::prompts::fix_all_section;
 use crate::review::ReviewRunner;
 use crate::tools::submit::DroppedFinding;
 use crate::tools::submit::ground_findings;
@@ -26,8 +29,11 @@ pub fn plan_batches(files: &[String], batch_size: usize) -> Vec<Vec<String>> {
 
 pub struct ReviewOutcome {
     pub summary: ReviewSummary,
+    pub findings: Vec<Finding>,
     pub comments: Vec<CommentPosition>,
     pub dropped: Vec<DroppedFinding>,
+    pub pr: u64,
+    pub head_sha: String,
     pub posted: bool,
 }
 
@@ -35,20 +41,11 @@ impl ReviewOutcome {
     #[must_use]
     pub fn render_markdown(&self) -> String {
         let sections = [
+            verdict_section(&self.findings),
             format!("## Summary\n{}", self.summary.summary),
-            if self.summary.risk_notes.is_empty() {
-                String::new()
-            } else {
-                let notes = self
-                    .summary
-                    .risk_notes
-                    .iter()
-                    .map(|note| format!("- {note}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                format!("## Risks\n{notes}")
-            },
+            risks_section(&self.summary.risk_notes),
             format!("## Tests\n{}", self.summary.tests),
+            fix_all_section(&self.findings, &self.dropped, self.pr, &self.head_sha),
             if self.dropped.is_empty() {
                 String::new()
             } else {
@@ -56,7 +53,10 @@ impl ReviewOutcome {
                     .dropped
                     .iter()
                     .map(|entry| {
-                        format!("<!-- {}:{} — {} -->", entry.file, entry.line, entry.reason)
+                        format!(
+                            "<!-- {}:{} — {} -->",
+                            entry.finding.file, entry.finding.line, entry.reason
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -73,12 +73,83 @@ impl ReviewOutcome {
     }
 }
 
+fn is_blocking(severity: Severity) -> bool {
+    matches!(severity, Severity::Warning | Severity::Critical)
+}
+
+fn verdict_section(findings: &[Finding]) -> String {
+    let blockers = findings
+        .iter()
+        .filter(|finding| is_blocking(finding.severity))
+        .collect::<Vec<_>>();
+    if blockers.is_empty() {
+        return "## Verdict\n\n🟢 Good to go — no blocking findings. Nitpicks and suggestions, if any, don't block."
+            .to_owned();
+    }
+    let noun = if blockers.len() == 1 {
+        "finding"
+    } else {
+        "findings"
+    };
+    let list = blockers
+        .iter()
+        .enumerate()
+        .map(|(index, finding)| {
+            format!(
+                "{}. `{}:{}` — [{}] {}",
+                index.saturating_add(1),
+                finding.file,
+                finding.line,
+                finding.severity.as_str(),
+                finding.title,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "## Verdict\n\n🔴 Not good to go — {} blocking {}:\n\n{list}\n\nTo be good to go: fix the items above — each inline comment carries a fix prompt, or copy the fix-all prompt below. Nitpicks and suggestions don't block.",
+        blockers.len(),
+        noun,
+    )
+}
+
+fn risks_section(notes: &[String]) -> String {
+    if notes.is_empty() {
+        return "## Risks\n\n(none flagged)".to_owned();
+    }
+    let list = notes
+        .iter()
+        .map(|note| format!("- {note}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("## Risks\n{list}")
+}
+
 impl<C: ApiClient + 'static> ReviewRunner<C> {
     pub async fn review_all(&self, dry_run: bool) -> Result<ReviewOutcome, DifftraceError> {
         let files = self.file_names();
+        let batches = plan_batches(&files, self.settings().batch_files);
+        tracing::info!(
+            target: "difftrace::review",
+            files = files.len(),
+            batches = batches.len(),
+            "reviewing"
+        );
         let mut aggregated = Findings::default();
-        for batch in plan_batches(&files, self.settings().batch_files) {
-            let findings = self.review_batch(&batch).await?;
+        for (index, batch) in batches.iter().enumerate() {
+            tracing::info!(
+                target: "difftrace::review",
+                batch = index,
+                files = batch.join(", "),
+                "batch started"
+            );
+            let findings = self.review_batch(batch).await?;
+            tracing::info!(
+                target: "difftrace::review",
+                batch = index,
+                findings = findings.findings.len(),
+                "batch finished"
+            );
             aggregated.findings.extend(findings.findings);
         }
         let grounded = ground_findings(
@@ -93,8 +164,11 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             .await?;
         let mut outcome = ReviewOutcome {
             summary,
+            findings: grounded.findings,
             comments: grounded.comments,
             dropped: grounded.dropped,
+            pr: self.pr(),
+            head_sha: self.head_sha().to_owned(),
             posted: false,
         };
         if dry_run {
@@ -180,10 +254,14 @@ diff --git a/src/beta.rs b/src/beta.rs
     }
 
     fn finding_json(file: &str, line: usize) -> serde_json::Value {
+        finding_json_severity(file, line, "warning")
+    }
+
+    fn finding_json_severity(file: &str, line: usize, severity: &str) -> serde_json::Value {
         json!({
             "file": file,
             "line": line,
-            "severity": "warning",
+            "severity": severity,
             "title": "Title",
             "body": "Body"
         })
@@ -264,6 +342,26 @@ diff --git a/src/beta.rs b/src/beta.rs
     }
 
     #[tokio::test]
+    async fn stage_and_observer_logs_reach_an_installed_subscriber()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (logs, _guard) = crate::review::logging::test_support::install();
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = make_runner(Arc::new(scripted_client()), gateway)?;
+        let outcome = runner.review_all(true).await?;
+        assert_eq!(outcome.comments.len(), 2);
+        let text = logs.text();
+        assert!(text.contains("reviewing"), "stage logs must emit");
+        assert!(text.contains("batch started"));
+        assert!(text.contains("batch finished"));
+        assert!(
+            text.contains("run started"),
+            "the logging observer must be registered"
+        );
+        assert!(text.contains("tool call"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_dry_run_aggregates_grounds_and_renders_without_posting()
     -> Result<(), Box<dyn std::error::Error>> {
         let gateway = Arc::new(FakeGateway::empty());
@@ -275,14 +373,101 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert_eq!(outcome.comments.len(), 2);
         assert_eq!(outcome.dropped.len(), 1);
         assert_eq!(
-            outcome.dropped.first().ok_or("expected a drop")?.file,
+            outcome
+                .dropped
+                .first()
+                .ok_or("expected a drop")?
+                .finding
+                .file,
             "src/beta.rs"
         );
         let rendered = outcome.render_markdown();
+        assert!(rendered.starts_with("## Verdict"));
+        assert!(rendered.contains("🔴 Not good to go — 2 blocking findings:"));
+        assert!(rendered.contains("1. `src/alpha.rs:2` — [warning] Title"));
+        assert!(rendered.contains("2. `src/beta.rs:11` — [warning] Title"));
+        assert!(
+            !rendered.contains("3 blocking"),
+            "an unanchored finding must not join the verdict's blockers"
+        );
+        assert!(rendered.contains("To be good to go: fix the items above"));
         assert!(rendered.contains("## Summary\nTwo files reviewed."));
         assert!(rendered.contains("- Retry can outlive shutdown."));
         assert!(rendered.contains("## Tests\nCovered by integration tests."));
+        assert!(rendered.contains("## 🤖 Fix all findings"));
+        assert!(rendered.contains("1. `src/alpha.rs:2` — [warning] Title"));
+        assert!(rendered.contains("2. `src/beta.rs:11` — [warning] Title"));
+        assert!(rendered.contains("- `src/beta.rs:999` — [warning] Title"));
+        assert!(rendered.contains("PR #42"));
+        assert!(rendered.contains("commit headsha"));
+        assert!(rendered.contains("<summary>Copy the fix-all prompt</summary>"));
         assert!(rendered.contains("src/beta.rs:999"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_review_without_findings_renders_no_fix_all_section()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let summary = json!({
+            "summary": "Nothing to flag.",
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call("call_1", "record_findings", json!({ "findings": [] })),
+            text_response("Batch one done."),
+            tool_call("call_2", "record_findings", json!({ "findings": [] })),
+            text_response("Batch two done."),
+            text_response(&summary.to_string()),
+        ]);
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = make_runner(Arc::new(client), gateway)?;
+        let outcome = runner.review_all(true).await?;
+        assert!(outcome.comments.is_empty());
+        assert!(outcome.dropped.is_empty());
+        let rendered = outcome.render_markdown();
+        assert!(rendered.starts_with("## Verdict"));
+        assert!(rendered.contains("🟢 Good to go — no blocking findings."));
+        assert!(rendered.contains("## Risks\n\n(none flagged)"));
+        assert!(rendered.contains("## Summary\nNothing to flag."));
+        assert!(
+            !rendered.contains("Fix all findings"),
+            "a clean review must not render a fix-all section"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn nitpicks_and_suggestions_do_not_block_the_verdict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let summary = json!({
+            "summary": "Polish only.",
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call(
+                "call_1",
+                "record_findings",
+                json!({ "findings": [finding_json_severity("src/alpha.rs", 2, "suggestion")] }),
+            ),
+            text_response("Batch one done."),
+            tool_call(
+                "call_2",
+                "record_findings",
+                json!({ "findings": [finding_json_severity("src/beta.rs", 11, "nitpick")] }),
+            ),
+            text_response("Batch two done."),
+            text_response(&summary.to_string()),
+        ]);
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = make_runner(Arc::new(client), gateway)?;
+        let outcome = runner.review_all(true).await?;
+        assert_eq!(outcome.comments.len(), 2);
+        let rendered = outcome.render_markdown();
+        assert!(rendered.contains("🟢 Good to go — no blocking findings."));
+        assert!(rendered.contains("1. `src/alpha.rs:2` — [suggestion] Title"));
+        assert!(rendered.contains("2. `src/beta.rs:11` — [nitpick] Title"));
         Ok(())
     }
 
@@ -314,6 +499,13 @@ diff --git a/src/beta.rs b/src/beta.rs
         let submission = gateway.submitted().ok_or("expected a submission")?;
         assert_eq!(submission.comments.len(), 1);
         assert_eq!(outcome.dropped.len(), 1);
+        assert!(submission.summary.starts_with("## Verdict"));
+        assert!(
+            submission
+                .summary
+                .contains("🔴 Not good to go — 1 blocking finding:")
+        );
+        assert!(submission.summary.contains("## Risks\n\n(none flagged)"));
         assert!(submission.summary.contains("One finding"));
         assert!(submission.summary.contains("alpha.rs:999"));
         let overstatement = "two findings";

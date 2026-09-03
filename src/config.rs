@@ -65,6 +65,12 @@ impl DifftraceConfig {
             self.provider.profile =
                 parse_profile(&profile).map_err(crate::error::DifftraceError::Cli)?;
         }
+        if let Some(model) = std::env::var("DIFFTRACE_MODEL")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            self.provider.model = Some(model);
+        }
         Ok(())
     }
 
@@ -199,6 +205,42 @@ mod tests {
         env.set("DIFFTRACE_PROFILE", "");
         config.apply_env_overrides()?;
         assert_eq!(config.provider.profile, ProviderProfile::Anthropic);
+        Ok(())
+    }
+
+    #[test]
+    fn the_env_model_override_replaces_the_configured_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_MODEL"]);
+        env.set("DIFFTRACE_MODEL", "glm-4.8");
+        let mut config = DifftraceConfig::default();
+        config.provider.model = Some("glm-4.7".to_owned());
+        config.apply_env_overrides()?;
+        assert_eq!(config.provider.model.as_deref(), Some("glm-4.8"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_env_model_override_supplies_a_model_when_none_is_configured()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_MODEL"]);
+        env.set("DIFFTRACE_MODEL", "glm-4.8");
+        let mut config = DifftraceConfig::default();
+        assert_eq!(config.provider.model, None);
+        config.apply_env_overrides()?;
+        assert_eq!(config.provider.model.as_deref(), Some("glm-4.8"));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unset_or_empty_env_model_override_keeps_the_config()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_MODEL"]);
+        env.set("DIFFTRACE_MODEL", "");
+        let mut config = DifftraceConfig::default();
+        config.provider.model = Some("glm-4.7".to_owned());
+        config.apply_env_overrides()?;
+        assert_eq!(config.provider.model.as_deref(), Some("glm-4.7"));
         Ok(())
     }
 

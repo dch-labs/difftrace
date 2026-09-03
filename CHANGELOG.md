@@ -102,8 +102,10 @@ reaches crates.io; the switch is a drop-in once it does.
   renders the review to stdout; posting prints a findings receipt; exit
   is non-zero only on error, never on findings. The
   `DIFFTRACE_PROFILE` environment variable overrides the configured
-  profile without a config file (pinned by the `config::tests` override
-  suite alongside profile-string parsing and rejection). An explicit
+  profile without a config file, and `DIFFTRACE_MODEL` overrides the
+  configured model the same way — empty values counting as unset
+  (pinned by the `config::tests` override suite alongside
+  profile-string parsing and rejection). An explicit
   `--config`
   path that does not exist is an error, the provider client is built
   before any network call, and disabled trajectory capture says so on
@@ -116,3 +118,33 @@ reaches crates.io; the switch is a drop-in once it does.
   `StructuredOutput` types with strict JSON Schemas and a closed four-level
   severity set. Pinned by the `findings::tests` suite (schema/serde mirror,
   round trips, unknown-severity rejection).
+- `tracing` logging end to end — stage boundaries, per-batch start/finish
+  with file lists and finding counts, a `LoggingObserver` mirroring run
+  turns and tool calls into the log, and the summary retry warning —
+  controlled by `RUST_LOG` (default `info`).
+- Binary releases from the `Binaries` workflow: a rolling `nightly`
+  prerelease on every master push, plus a release carrying the same
+  linux x86_64 tarball for every `v*` tag. Actions download a prebuilt
+  binary pinned to an audited tag instead of compiling the repository's
+  default branch, so upstream branch changes cannot alter the privileged
+  review binary; the review workflow in consumer repos fetches it with
+  `gh release download` and uploads the run's trajectory JSONL as an
+  artifact.
+- Agent fix prompts in the posted review, all rendered from one wording
+  source (`prompts`): every inline finding carries a collapsed
+  "🤖 Fix prompt" section whose fenced block (GitHub's copy button)
+  holds a self-contained instruction — file, anchored line, severity,
+  title, detail, and fix directives — and the summary body gains a
+  "Fix all findings" section pairing a readable per-finding report
+  with a copyable prompt naming the pull request and head commit.
+  Findings dropped during grounding join the fix-all prompt marked
+  unanchored with their drop reason: still never posted as inline
+  comments, but no longer invisible to fix-it passes. Pinned by the
+  `prompts::tests` suite plus the grounding and render tests.
+- Verdict section leading every rendered review: good to go exactly
+  when no grounded finding carries warning or critical severity —
+  blockers are listed with file and line, unanchored (dropped) findings
+  never block, and the "to be good to go" note points at the fix
+  prompts. Derived mechanically from the posted findings, so the verdict
+  cannot contradict them; the risks section is always rendered
+  ("(none flagged)" when empty). Pinned by the batch render suite.

@@ -26,6 +26,7 @@ use crate::findings::reject_zero_lines;
 use crate::github::CommentPosition;
 use crate::github::ReviewSubmission;
 use crate::github::Side;
+use crate::prompts::comment_body;
 use crate::tools::ReviewScope;
 
 pub struct SubmitReviewTool {
@@ -42,8 +43,7 @@ struct SubmitInput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DroppedFinding {
-    pub file: String,
-    pub line: usize,
+    pub finding: Finding,
     pub reason: &'static str,
 }
 
@@ -66,8 +66,7 @@ pub(crate) fn ground_findings(
         let grounded = index.clamp_to_hunk(&finding.file, finding.line);
         let Some(line) = grounded else {
             dropped.push(DroppedFinding {
-                file: finding.file,
-                line: finding.line,
+                finding,
                 reason: "line outside the changed hunks",
             });
             continue;
@@ -77,8 +76,7 @@ pub(crate) fn ground_findings(
             .or_insert(0usize);
         if *count >= max_per_file {
             dropped.push(DroppedFinding {
-                file: finding.file,
-                line: finding.line,
+                finding,
                 reason: "per-file finding cap reached",
             });
             continue;
@@ -88,12 +86,7 @@ pub(crate) fn ground_findings(
             path: finding.file.clone(),
             line: line as u64,
             side: Side::Right,
-            body: format!(
-                "**[{}] {}**\n\n{}",
-                finding.severity.as_str(),
-                finding.title,
-                finding.body
-            ),
+            body: comment_body(&finding, line as u64),
         });
         accepted.push(finding);
     }
@@ -111,7 +104,12 @@ fn render_receipt(posted: usize, dropped: &[DroppedFinding]) -> String {
     }
     let drop_lines = dropped
         .iter()
-        .map(|entry| format!("- {}:{} — {}", entry.file, entry.line, entry.reason))
+        .map(|entry| {
+            format!(
+                "- {}:{} — {}",
+                entry.finding.file, entry.finding.line, entry.reason
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     text.push_str("\nDropped findings (never posted):\n");
@@ -293,6 +291,15 @@ diff --git a/src/lib.rs b/src/lib.rs
         );
         assert_eq!(grounded.comments.len(), 1);
         assert_eq!(grounded.dropped.len(), 2);
+        assert!(grounded.dropped.iter().any(|entry| {
+            entry.finding.file == "src/lib.rs" && entry.reason == "line outside the changed hunks"
+        }));
+        assert!(
+            grounded
+                .dropped
+                .iter()
+                .any(|entry| entry.finding.file == "absent.rs")
+        );
         Ok(())
     }
 
@@ -314,6 +321,8 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(comment.line, 2);
         assert_eq!(comment.side, Side::Right);
         assert!(comment.body.contains("[warning] Title"));
+        assert!(comment.body.contains("<summary>🤖 Fix prompt</summary>"));
+        assert!(comment.body.contains("File: src/lib.rs, line 2"));
         Ok(())
     }
 

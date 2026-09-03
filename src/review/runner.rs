@@ -23,6 +23,7 @@ use crate::findings::ReviewSummary;
 use crate::github::PrGateway;
 use crate::github::PrOverview;
 use crate::review::RecordFindingsTool;
+use crate::review::logging::LoggingObserver;
 use crate::review::rubric::ReviewRubric;
 use crate::tools::ReviewScope;
 
@@ -80,6 +81,10 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         &self.scope.head_sha
     }
 
+    pub(crate) fn pr(&self) -> u64 {
+        self.scope.pr
+    }
+
     pub(crate) fn settings(&self) -> &ReviewSettings {
         &self.settings
     }
@@ -128,6 +133,7 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             Some(dir) => TrajectoryObserver::writing_to(dir),
             None => TrajectoryObserver::in_memory(),
         }));
+        agent.register_observer(Arc::new(LoggingObserver));
         let pipeline = ToolPipelineBuilder::new()
             .with_middleware(OutputLimitMiddleware::new(TOOL_OUTPUT_MAX_CHARS));
         agent
@@ -181,6 +187,11 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
                     return Err(DifftraceError::Summary { source });
                 }
                 Err(source) => {
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %source,
+                        "summary schema mismatch; retrying once with the parse error fed back"
+                    );
                     attempts_left = attempts_left.saturating_sub(1);
                     messages.push(Message::user(format!(
                         "That JSON did not match the schema: {source}. \
@@ -383,6 +394,32 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(
             summary.summary,
             "Adds retry with backoff to the worker loop."
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_summary_retry_is_visible_in_the_logs() -> Result<(), Box<dyn std::error::Error>> {
+        let (logs, _guard) = crate::review::logging::test_support::install();
+        let good = json!({
+            "summary": "Adds retry with backoff.",
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let bad = json!({
+            "summary": { "text": "nested where a string belongs" },
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            text_response(&bad.to_string()),
+            text_response(&good.to_string()),
+        ]);
+        let runner = runner(Arc::new(client), ReviewSettings::default(), None)?;
+        runner.summarize(&[Findings::default()]).await?;
+        assert!(
+            logs.text().contains("summary schema mismatch"),
+            "the retry warning must reach an installed subscriber"
         );
         Ok(())
     }

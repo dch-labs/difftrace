@@ -38,17 +38,28 @@ difftrace review --repo owner/repo --pr 42 [--dry-run] [--config PATH]
 The `DIFFTRACE_PROFILE` environment variable overrides
 `provider.profile` without a config file — the natural mechanism in CI,
 where no `~/.difftrace/config.toml` exists (e.g. `DIFFTRACE_PROFILE=zai`
-in a GitHub Action).
+in a GitHub Action). `DIFFTRACE_MODEL` overrides `provider.model` the
+same way; an empty value counts as unset, and without either the
+provider's default model applies (zai: `glm-4.7`).
 
 Progress goes to stderr; the rendered review (dry run) and the posting
 receipt go to stdout. Exit status is non-zero only on error — a review
 full of findings still exits `0`.
 
-Posted reviews carry the summary, risks, and test-coverage note as the
-body, one inline comment per grounded finding (severity-tagged, anchored
-to the head commit), and an HTML-comment block listing any dropped
-findings — citations outside the changed hunks or over the per-file cap —
-so nothing is silently discarded.
+The review body leads with a verdict: good to go exactly when no
+grounded finding is a warning or critical, with blockers listed by
+file and line (dropped findings never block) and a note pointing at
+the fix prompts. It is followed by the summary, the risks section
+(always present, "(none flagged)" when empty), and the test-coverage
+note. One inline comment per grounded finding (severity-tagged,
+anchored to the head commit) — each with a collapsed "🤖 Fix prompt"
+section whose fenced block has a copy button — and a "Fix all
+findings" section in the body: a readable report plus a copyable
+prompt covering every raised finding, naming the pull request and head
+commit. Findings dropped during grounding — citations outside the
+changed hunks or over the per-file cap — are listed in an HTML-comment
+block and included in the fix-all prompt marked unanchored, so nothing
+is silently discarded.
 
 Every run captures a JSONL trajectory under
 `~/.difftrace/trajectories/` recording the model requests, tool calls,
