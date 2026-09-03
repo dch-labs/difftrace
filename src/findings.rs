@@ -1,0 +1,181 @@
+//! The model-output contracts: inline [`Finding`]s per batch and a
+//! whole-review [`ReviewSummary`], each a loopctl `StructuredOutput`
+//! with a strict JSON Schema.
+
+use loopctl::structured::StructuredOutput;
+use serde::Deserialize;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Nitpick,
+    Suggestion,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub file: String,
+    pub line: usize,
+    pub severity: Severity,
+    pub title: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Findings {
+    pub findings: Vec<Finding>,
+}
+
+impl StructuredOutput for Findings {
+    fn name() -> &'static str {
+        "difftrace_findings"
+    }
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "findings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file": { "type": "string" },
+                            "line": { "type": "integer", "minimum": 1 },
+                            "severity": {
+                                "type": "string",
+                                "enum": ["nitpick", "suggestion", "warning", "critical"]
+                            },
+                            "title": { "type": "string" },
+                            "body": { "type": "string" }
+                        },
+                        "required": ["file", "line", "severity", "title", "body"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["findings"],
+            "additionalProperties": false
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewSummary {
+    pub summary: String,
+    pub risk_notes: Vec<String>,
+    pub tests: String,
+}
+
+impl StructuredOutput for ReviewSummary {
+    fn name() -> &'static str {
+        "difftrace_review_summary"
+    }
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": { "type": "string" },
+                "risk_notes": { "type": "array", "items": { "type": "string" } },
+                "tests": { "type": "string" }
+            },
+            "required": ["summary", "risk_notes", "tests"],
+            "additionalProperties": false
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_schema_requires_every_finding_field() {
+        let schema = Findings::schema();
+        let finding = &schema["properties"]["findings"]["items"];
+        let required = finding["required"].as_array().unwrap();
+        for field in ["file", "line", "severity", "title", "body"] {
+            assert!(
+                required.iter().any(|v| v.as_str() == Some(field)),
+                "schema must require {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_values_round_trip_into_findings() {
+        let value = serde_json::json!({
+            "findings": [{
+                "file": "src/main.rs",
+                "line": 12,
+                "severity": "warning",
+                "title": "Lock dropped early",
+                "body": "The guard is dropped before the read completes."
+            }]
+        });
+        let findings: Findings = StructuredOutput::from_value(value).unwrap();
+        let finding = findings.findings.first().unwrap();
+        assert_eq!(finding.file, "src/main.rs");
+        assert_eq!(finding.line, 12);
+        assert_eq!(finding.severity, Severity::Warning);
+    }
+
+    #[test]
+    fn an_unknown_severity_is_rejected() {
+        let value = serde_json::json!({
+            "findings": [{
+                "file": "src/main.rs",
+                "line": 12,
+                "severity": "catastrophic",
+                "title": "t",
+                "body": "b"
+            }]
+        });
+        assert!(<Findings as StructuredOutput>::from_value(value).is_err());
+    }
+
+    #[test]
+    fn empty_findings_are_allowed() {
+        let findings: Findings =
+            StructuredOutput::from_value(serde_json::json!({ "findings": [] })).unwrap();
+        assert!(findings.findings.is_empty());
+    }
+
+    #[test]
+    fn the_schema_requires_every_summary_field() {
+        let schema = ReviewSummary::schema();
+        let required = schema["required"].as_array().unwrap();
+        for field in ["summary", "risk_notes", "tests"] {
+            assert!(
+                required.iter().any(|v| v.as_str() == Some(field)),
+                "schema must require {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn model_values_round_trip_into_a_summary() {
+        let value = serde_json::json!({
+            "summary": "Adds retry with backoff to the worker loop.",
+            "risk_notes": ["Retry can now outlive the shutdown signal."],
+            "tests": "Covered by the new integration test."
+        });
+        let summary: ReviewSummary = StructuredOutput::from_value(value).unwrap();
+        assert_eq!(summary.risk_notes.len(), 1);
+    }
+
+    #[test]
+    fn structured_output_names_are_identifier_safe() {
+        for name in [Findings::name(), ReviewSummary::name()] {
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "name must be identifier-safe: {name}"
+            );
+        }
+    }
+}

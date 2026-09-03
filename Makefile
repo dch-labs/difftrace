@@ -14,10 +14,10 @@ clippy:
 	cargo clippy --all-targets --all-features -- -D warnings
 
 fmt:
-	cargo fmt --all -- --check
+	cargo fmt -- --check
 
 lint:
-	cargo fmt --all
+	cargo fmt
 
 docs:
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features

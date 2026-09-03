@@ -84,7 +84,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.98.0
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: cargo fmt -- --check
         working-directory: difftrace
 
   doctest:

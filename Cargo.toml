@@ -20,16 +20,23 @@ name = "difftrace"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 dirs = "6"
 futures = "0.3"
-loopctl = { path = "../loopctl", features = ["anthropic", "openai", "testing"] }
+loopctl = { git = "https://github.com/dch-labs/loopctl", features = ["anthropic", "openai", "testing"] }
+octocrab = "0.54"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 toml = "0.8"
 
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros"] }
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

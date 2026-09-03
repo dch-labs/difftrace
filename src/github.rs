@@ -1,0 +1,477 @@
+//! The `GitHub` REST layer: everything behind the [`PrGateway`] trait in
+//! difftrace's own types, so the agent layers never see octocrab or the
+//! wire models. [`GitHubClient`] is the PAT-authenticated reference
+//! implementation.
+
+mod review;
+
+use std::future::Future;
+use std::pin::Pin;
+
+use base64::Engine as _;
+use octocrab::Octocrab;
+
+pub use review::CommentPosition;
+pub use review::ReviewSubmission;
+pub use review::Side;
+
+use crate::error::DifftraceError;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoRef {
+    pub owner: String,
+    pub repo: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrOverview {
+    pub number: u64,
+    pub title: String,
+    pub description: Option<String>,
+    pub author: String,
+    pub head_sha: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub changed_files: u64,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+impl From<octocrab::models::pulls::PullRequest> for PrOverview {
+    fn from(pr: octocrab::models::pulls::PullRequest) -> Self {
+        Self {
+            number: pr.number,
+            title: pr.title.unwrap_or_default(),
+            description: pr.body,
+            author: pr.user.map(|user| user.login).unwrap_or_default(),
+            head_sha: pr.head.sha.clone(),
+            head_branch: pr.head.ref_field.clone(),
+            base_branch: pr.base.ref_field.clone(),
+            changed_files: pr.changed_files.unwrap_or_default(),
+            additions: pr.additions.unwrap_or_default(),
+            deletions: pr.deletions.unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingComment {
+    pub id: u64,
+    pub path: String,
+    pub line: Option<u64>,
+    pub side: Option<Side>,
+    pub body: String,
+    pub author: String,
+}
+
+impl From<octocrab::models::pulls::Comment> for ExistingComment {
+    fn from(comment: octocrab::models::pulls::Comment) -> Self {
+        Self {
+            id: *comment.id,
+            path: comment.path,
+            line: comment.line,
+            side: comment.side.as_deref().and_then(Side::from_wire),
+            body: comment.body,
+            author: comment.user.map(|user| user.login).unwrap_or_default(),
+        }
+    }
+}
+
+pub trait PrGateway: Send + Sync {
+    fn pr_overview(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PrOverview, DifftraceError>> + Send + '_>>;
+
+    fn pr_diff(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>>;
+
+    fn file_at_ref(
+        &self,
+        path: String,
+        git_ref: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>>;
+
+    fn existing_review_comments(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ExistingComment>, DifftraceError>> + Send + '_>>;
+
+    fn submit_review(
+        &self,
+        pr: u64,
+        submission: ReviewSubmission,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
+}
+
+pub struct GitHubClient {
+    crab: Octocrab,
+    repo: RepoRef,
+}
+
+impl std::fmt::Debug for GitHubClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubClient")
+            .field("repo", &self.repo)
+            .finish_non_exhaustive()
+    }
+}
+
+impl GitHubClient {
+    pub fn new(
+        token: String,
+        repo: RepoRef,
+        api_base_url: Option<&str>,
+    ) -> Result<Self, DifftraceError> {
+        let mut builder = Octocrab::builder().personal_token(token);
+        if let Some(base_url) = api_base_url {
+            builder =
+                builder
+                    .base_uri(base_url)
+                    .map_err(|source| DifftraceError::InvalidBaseUrl {
+                        url: base_url.to_owned(),
+                        source: Box::new(source),
+                    })?;
+        }
+        let crab = builder
+            .build()
+            .map_err(|source| DifftraceError::GitHubInit { source })?;
+        Ok(Self { crab, repo })
+    }
+
+    #[must_use]
+    pub fn repo(&self) -> &RepoRef {
+        &self.repo
+    }
+
+    fn map_github_error(source: octocrab::Error) -> DifftraceError {
+        DifftraceError::GitHubApi { source }
+    }
+
+    fn decode_content(
+        path: &str,
+        content: octocrab::models::repos::Content,
+    ) -> Result<String, DifftraceError> {
+        if content.encoding.as_deref() != Some("base64") {
+            return Err(DifftraceError::ContentTooLarge {
+                path: path.to_owned(),
+                size: content.size,
+            });
+        }
+        let encoded = content.content.ok_or_else(|| DifftraceError::NotAFile {
+            path: path.to_owned(),
+        })?;
+        let mut raw = encoded.into_bytes();
+        raw.retain(|byte| !b" \n\t\r\x0b\x0c".contains(byte));
+        let bytes = base64::prelude::BASE64_STANDARD
+            .decode(raw)
+            .map_err(|source| DifftraceError::ContentDecode {
+                path: path.to_owned(),
+                source,
+            })?;
+        String::from_utf8(bytes).map_err(|_| DifftraceError::BinaryContent {
+            path: path.to_owned(),
+        })
+    }
+}
+
+impl PrGateway for GitHubClient {
+    fn pr_overview(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PrOverview, DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let model = self
+                .crab
+                .pulls(owner.as_str(), repo.as_str())
+                .get(pr)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(PrOverview::from(model))
+        })
+    }
+
+    fn pr_diff(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            self.crab
+                .pulls(owner.as_str(), repo.as_str())
+                .get_diff(pr)
+                .await
+                .map_err(Self::map_github_error)
+        })
+    }
+
+    fn file_at_ref(
+        &self,
+        path: String,
+        git_ref: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let mut items = self
+                .crab
+                .repos(owner.as_str(), repo.as_str())
+                .get_content()
+                .path(path.as_str())
+                .r#ref(git_ref.as_str())
+                .send()
+                .await
+                .map_err(Self::map_github_error)?;
+            let mut contents = items.take_items();
+            if contents.len() != 1 {
+                return Err(DifftraceError::NotAFile { path });
+            }
+            let Some(content) = contents.pop() else {
+                return Err(DifftraceError::NotAFile { path });
+            };
+            Self::decode_content(&path, content)
+        })
+    }
+
+    fn existing_review_comments(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ExistingComment>, DifftraceError>> + Send + '_>>
+    {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let page = self
+                .crab
+                .pulls(owner.as_str(), repo.as_str())
+                .list_comments(Some(pr))
+                .send()
+                .await
+                .map_err(Self::map_github_error)?;
+            let comments = self
+                .crab
+                .all_pages(page)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(comments.into_iter().map(ExistingComment::from).collect())
+        })
+    }
+
+    fn submit_review(
+        &self,
+        pr: u64,
+        submission: ReviewSubmission,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(
+            async move { review::post_review(&self.crab, &owner, &repo, pr, submission).await },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn author_json(login: &str) -> serde_json::Value {
+        json!({
+            "login": login,
+            "id": 7,
+            "node_id": "MDQ6VXNlcjc=",
+            "avatar_url": "https://avatars.githubusercontent.com/u/7?v=4",
+            "gravatar_id": "",
+            "url": format!("https://api.github.com/users/{login}"),
+            "html_url": format!("https://github.com/{login}"),
+            "followers_url": format!("https://api.github.com/users/{login}/followers"),
+            "following_url": format!("https://api.github.com/users/{login}/following{{/other_user}}"),
+            "gists_url": format!("https://api.github.com/users/{login}/gists{{/gist_id}}"),
+            "starred_url": format!("https://api.github.com/users/{login}/starred{{/owner}}{{/repo}}"),
+            "subscriptions_url": format!("https://api.github.com/users/{login}/subscriptions"),
+            "organizations_url": format!("https://api.github.com/users/{login}/orgs"),
+            "repos_url": format!("https://api.github.com/users/{login}/repos"),
+            "events_url": format!("https://api.github.com/users/{login}/events{{/privacy}}"),
+            "received_events_url": format!("https://api.github.com/users/{login}/received_events"),
+            "type": "User",
+            "site_admin": false
+        })
+    }
+
+    #[test]
+    fn pr_overview_maps_the_wire_fields() {
+        let model: octocrab::models::pulls::PullRequest = serde_json::from_value(json!({
+            "id": 1001,
+            "number": 42,
+            "url": "https://api.github.com/repos/acme/app/pulls/42",
+            "title": "Fix the flaky worker",
+            "body": "Restarts consumers on backpressure.",
+            "user": author_json("dana"),
+            "head": { "ref": "fix/worker", "sha": "abc123fullsha0000000000000000000000000000" },
+            "base": { "ref": "main", "sha": "def456fullsha0000000000000000000000000000" },
+            "changed_files": 3,
+            "additions": 120,
+            "deletions": 15
+        }))
+        .unwrap();
+        let overview = PrOverview::from(model);
+        assert_eq!(overview.number, 42);
+        assert_eq!(overview.title, "Fix the flaky worker");
+        assert_eq!(
+            overview.description.as_deref(),
+            Some("Restarts consumers on backpressure.")
+        );
+        assert_eq!(overview.author, "dana");
+        assert_eq!(overview.head_branch, "fix/worker");
+        assert_eq!(overview.base_branch, "main");
+        assert_eq!(
+            overview.head_sha,
+            "abc123fullsha0000000000000000000000000000"
+        );
+        assert_eq!(overview.changed_files, 3);
+        assert_eq!(overview.additions, 120);
+        assert_eq!(overview.deletions, 15);
+    }
+
+    #[test]
+    fn absent_optional_fields_default_to_empty() {
+        let model: octocrab::models::pulls::PullRequest = serde_json::from_value(json!({
+            "id": 1002,
+            "number": 43,
+            "url": "https://api.github.com/repos/acme/app/pulls/43",
+            "head": { "ref": "feature", "sha": "aaa" },
+            "base": { "ref": "main", "sha": "bbb" }
+        }))
+        .unwrap();
+        let overview = PrOverview::from(model);
+        assert_eq!(overview.title, "");
+        assert_eq!(overview.description, None);
+        assert_eq!(overview.author, "");
+        assert_eq!(overview.changed_files, 0);
+    }
+
+    #[test]
+    fn existing_comment_maps_the_wire_fields() {
+        let model: octocrab::models::pulls::Comment = serde_json::from_value(json!({
+            "url": "https://api.github.com/repos/acme/app/pulls/comments/9",
+            "id": 9,
+            "node_id": "MDI0OlB1bGxSZXF1ZXN0UmV2aWV3Q29tbWVudDk=",
+            "diff_hunk": "@@ -1,2 +1,3 @@\n context\n-old\n+new",
+            "path": "src/main.rs",
+            "position": 4,
+            "original_position": 4,
+            "commit_id": "ccc",
+            "original_commit_id": "ccc",
+            "user": author_json("dana"),
+            "body": "This drops the lock too early.",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "html_url": "https://github.com/acme/app/pull/42#discussion_r9",
+            "pull_request_url": "https://api.github.com/repos/acme/app/pulls/42",
+            "_links": {},
+            "line": 12,
+            "side": "LEFT"
+        }))
+        .unwrap();
+        let comment = ExistingComment::from(model);
+        assert_eq!(comment.id, 9);
+        assert_eq!(comment.path, "src/main.rs");
+        assert_eq!(comment.line, Some(12));
+        assert_eq!(comment.side, Some(Side::Left));
+        assert_eq!(comment.body, "This drops the lock too early.");
+        assert_eq!(comment.author, "dana");
+    }
+
+    #[test]
+    fn an_absent_wire_side_maps_to_none() {
+        let model: octocrab::models::pulls::Comment = serde_json::from_value(json!({
+            "url": "https://api.github.com/repos/acme/app/pulls/comments/10",
+            "id": 10,
+            "node_id": "MDI0OlB1bGxSZXF1ZXN0UmV2aWV3Q29tbWVudDEw",
+            "diff_hunk": "@@ -1 +1 @@\n-a\n+b",
+            "path": "src/lib.rs",
+            "commit_id": "ddd",
+            "original_commit_id": "ddd",
+            "body": "Note.",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "html_url": "https://github.com/acme/app/pull/42#discussion_r10",
+            "pull_request_url": "https://api.github.com/repos/acme/app/pulls/42",
+            "_links": {}
+        }))
+        .unwrap();
+        let comment = ExistingComment::from(model);
+        assert_eq!(comment.side, None);
+    }
+
+    fn content_json(encoding: &str, content: &str, size: i64) -> octocrab::models::repos::Content {
+        serde_json::from_value(json!({
+            "name": "file.txt",
+            "path": "file.txt",
+            "sha": "abc",
+            "encoding": encoding,
+            "content": content,
+            "size": size,
+            "url": "https://api.github.com/repos/acme/app/contents/file.txt",
+            "html_url": "https://github.com/acme/app/blob/main/file.txt",
+            "git_url": "https://api.github.com/repos/acme/app/git/blobs/abc",
+            "download_url": "https://raw.githubusercontent.com/acme/app/main/file.txt",
+            "type": "file",
+            "_links": {
+                "self": "https://api.github.com/repos/acme/app/contents/file.txt"
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn content_above_the_endpoint_limit_is_rejected_not_emptied() {
+        let err =
+            GitHubClient::decode_content("vendored/big.log", content_json("none", "", 5_242_880))
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("5242880"),
+            "error reports the size: {err}"
+        );
+        assert!(matches!(err, DifftraceError::ContentTooLarge { .. }));
+    }
+
+    #[test]
+    fn base64_content_round_trips_through_the_decode() {
+        let text = GitHubClient::decode_content(
+            "src/lib.rs",
+            content_json("base64", "Zm4gbWFpbigpIHt9Cg==\n", 12),
+        )
+        .unwrap();
+        assert_eq!(text, "fn main() {}\n");
+    }
+
+    #[test]
+    fn non_utf8_content_is_rejected_as_binary() {
+        let err = GitHubClient::decode_content("logo.dat", content_json("base64", "/w==", 1))
+            .unwrap_err();
+        assert!(matches!(err, DifftraceError::BinaryContent { .. }));
+    }
+
+    #[test]
+    fn enterprise_base_url_must_parse() {
+        let err = GitHubClient::new(
+            "token".to_owned(),
+            RepoRef {
+                owner: "acme".to_owned(),
+                repo: "app".to_owned(),
+            },
+            Some("not a url"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("base URL"),
+            "error names the problem: {err}"
+        );
+    }
+}
