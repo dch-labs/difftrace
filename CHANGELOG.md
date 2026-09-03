@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-03
+
+First working release: the full review pipeline end to end — diff
+grounding, batch agent runs, typed findings, summary, atomic posting,
+dry run, CLI. Depends on loopctl via a git pin until loopctl 0.3.1+
+reaches crates.io; the switch is a drop-in once it does.
+
 ### Added
 
 - Initial crate skeleton: library and binary targets, CI pipeline, style

@@ -33,7 +33,6 @@ pub struct GitHubConfig {
 #[serde(default)]
 pub struct ReviewSettings {
     pub max_findings_per_file: usize,
-    pub context_lines: usize,
     pub batch_files: usize,
     pub max_turns: usize,
 }
@@ -42,7 +41,6 @@ impl Default for ReviewSettings {
     fn default() -> Self {
         Self {
             max_findings_per_file: 5,
-            context_lines: 3,
             batch_files: 4,
             max_turns: 16,
         }
