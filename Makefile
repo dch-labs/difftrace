@@ -26,4 +26,5 @@ docs:
 
 e2e:
 	@test -n "$(GITHUB_TOKEN)" && test -n "$(DIFFTRACE_TEST_REPO)" && test -n "$(DIFFTRACE_TEST_PR)" || { echo "ERROR: set GITHUB_TOKEN, DIFFTRACE_TEST_REPO (owner/repo), DIFFTRACE_TEST_PR"; exit 1; }
+	DIFFTRACE_E2E=1 GITHUB_TOKEN=$(GITHUB_TOKEN) DIFFTRACE_TEST_REPO=$(DIFFTRACE_TEST_REPO) DIFFTRACE_TEST_PR=$(DIFFTRACE_TEST_PR) cargo test --test github_live
 	GITHUB_TOKEN=$(GITHUB_TOKEN) cargo run --all-features -- review --repo $(DIFFTRACE_TEST_REPO) --pr $(DIFFTRACE_TEST_PR) --dry-run

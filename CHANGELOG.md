@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- One verdict comment per pull request, edited in place: the full
+  verdict/summary/fix-all body now lives in a single top-level PR
+  comment marked with a hidden `<!-- difftrace:verdict -->` header
+  (created on the first review, edited on every re-review, footer
+  naming the reviewed commit), while the review submission keeps its
+  REQUEST_CHANGES / APPROVED event pairing with a one-line pointer
+  body. Pinned by `the_verdict_comment_is_created_then_edited_not_duplicated`,
+  `the_posted_review_body_is_the_pointer_not_the_verdict`, and
+  `verdict_comment_body_wraps_the_render_with_marker_and_footer`.
+- Re-raised findings reply into their existing thread: a grounded
+  finding whose (path, line) anchor matches an open difftrace thread
+  is posted as a reply through the dedicated review-comment replies
+  endpoint after the atomic review POST (the create-review request
+  schema documents no `in_reply_to`, so the review itself stays
+  positioned-comments-only) instead of opening a duplicate comment;
+  each reply names the commit that re-raised it, and threads not
+  matched resolve as before. Replies are best-effort: one that cannot
+  be posted logs a warning and never fails the run — the thread stays
+  open for the next re-review, and the finding remains in the verdict
+  comment. Pinned by
+  `a_re_raised_finding_replies_into_its_thread`,
+  `a_failed_reply_degrades_without_failing_the_run_or_resolving`,
+  `reply_matching_prefers_the_current_line_then_the_original`, and
+  `a_shifted_finding_posts_a_new_comment_and_resolves_the_old`.
+
+### Fixed
+
+- Thread resolution now works under GitHub App installation tokens:
+  the thread listing learned its own login via REST `GET /user`, which
+  installation tokens may not call — every production run logged
+  "could not list previous review threads" (Resource not accessible
+  by integration) and resolved nothing. The login now comes from the
+  GraphQL `viewer` query, valid for PATs and installation tokens
+  alike. Pinned by `the_login_comes_from_the_graphql_viewer_query`
+  and `live_own_open_threads_lists_under_the_token`, which `make e2e`
+  runs with `DIFFTRACE_E2E=1` ahead of its live dry-run.
+
+### Changed
+
+- Posting the verdict comment is retried (three attempts, one second
+  apart) and fails the run loudly when every attempt fails — the
+  review, thread replies, and resolutions complete first, so a red
+  verdict build defers nothing but the verdict itself; the next
+  re-review heals it. Pinned by
+  `a_verdict_upsert_exhausting_the_retries_fails_the_run_after_posting`
+  and `a_verdict_upsert_recovering_on_a_later_retry_succeeds`.
+- `PrGateway` grows `find_own_marker_comment` and `update_issue_comment`
+  (breaking for external implementors; pre-1.0 minor bump when cut).
+
 ## [0.2.1] - 2026-09-04
 
 ### Added

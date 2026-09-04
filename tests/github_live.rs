@@ -48,3 +48,27 @@ async fn live_pr_overview_and_diff_fetch() -> Result<(), Box<dyn std::error::Err
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn live_own_open_threads_lists_under_the_token() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((token, repo, pr)) = live_ready() else {
+        return Ok(());
+    };
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or("DIFFTRACE_TEST_REPO must be owner/repo")?;
+    let client = GitHubClient::new(
+        token,
+        RepoRef {
+            owner: owner.to_owned(),
+            repo: name.to_owned(),
+        },
+        None,
+    )?;
+    let threads = client.own_open_threads(pr).await?;
+    assert!(
+        threads.iter().all(|thread| !thread.id.is_empty()),
+        "every listed thread carries its GraphQL id"
+    );
+    Ok(())
+}

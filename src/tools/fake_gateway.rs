@@ -17,6 +17,8 @@ pub(crate) struct FakeGateway {
     inner: std::sync::Arc<Inner>,
 }
 
+const OWN_LOGIN: &str = "difftrace[bot]";
+
 #[derive(Default)]
 struct Inner {
     overview: Mutex<Option<PrOverview>>,
@@ -35,6 +37,11 @@ struct Inner {
     permissions: Mutex<Vec<(String, String)>>,
     posted_replies: Mutex<Vec<(u64, String)>>,
     posted_comments: Mutex<Vec<(u64, String)>>,
+    issue_comments: Mutex<Vec<ExistingIssueComment>>,
+    updated_comments: Mutex<Vec<(u64, String)>>,
+    fail_comment_writes: Mutex<usize>,
+    fail_reply_writes: Mutex<usize>,
+    next_comment_id: Mutex<u64>,
 }
 
 impl FakeGateway {
@@ -180,6 +187,53 @@ impl FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub(crate) fn updated_comments(&self) -> Vec<(u64, String)> {
+        self.inner
+            .updated_comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn issue_comment_bodies(&self) -> Vec<String> {
+        self.inner
+            .issue_comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|comment| comment.body.clone())
+            .collect()
+    }
+
+    pub(crate) fn fail_comment_writes(&self, count: usize) {
+        *self
+            .inner
+            .fail_comment_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = count;
+    }
+
+    pub(crate) fn fail_reply_writes(&self, count: usize) {
+        *self
+            .inner
+            .fail_reply_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = count;
+    }
+
+    fn consume_comment_write_failure(&self) -> bool {
+        let mut guard = self
+            .inner
+            .fail_comment_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *guard == 0 {
+            return false;
+        }
+        *guard = (*guard).saturating_sub(1);
+        true
     }
 }
 
@@ -333,6 +387,57 @@ impl PrGateway for FakeGateway {
         Box::pin(async move { Ok(()) })
     }
 
+    fn find_own_marker_comment(
+        &self,
+        _pr: u64,
+        marker: String,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<u64>, DifftraceError>> + Send + '_>> {
+        let found = crate::github::own_marker_comment_id(
+            &self
+                .inner
+                .issue_comments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+            OWN_LOGIN,
+            &marker,
+        );
+        Box::pin(async move { Ok(found) })
+    }
+
+    fn update_issue_comment(
+        &self,
+        comment_id: u64,
+        body: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        if self.consume_comment_write_failure() {
+            let err = DifftraceError::NotAFile {
+                path: "fake gateway comment-write failure".to_owned(),
+            };
+            return Box::pin(async move { Err(err) });
+        }
+        {
+            let mut guard = self
+                .inner
+                .issue_comments
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(stored) = guard.iter_mut().find(|comment| comment.id == comment_id) else {
+                let err = DifftraceError::NotAFile {
+                    path: format!("fake gateway has no issue comment {comment_id}"),
+                };
+                return Box::pin(async move { Err(err) });
+            };
+            stored.body.clone_from(&body);
+        }
+        self.inner
+            .updated_comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((comment_id, body));
+        Box::pin(async move { Ok(()) })
+    }
+
     fn fetch_issue_comment(
         &self,
         comment_id: u64,
@@ -387,6 +492,18 @@ impl PrGateway for FakeGateway {
         comment_id: u64,
         body: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        let mut guard = self
+            .inner
+            .fail_reply_writes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *guard > 0 {
+            *guard = (*guard).saturating_sub(1);
+            let err = DifftraceError::NotAFile {
+                path: "fake gateway reply-write failure".to_owned(),
+            };
+            return Box::pin(async move { Err(err) });
+        }
         self.inner
             .posted_replies
             .lock()
@@ -400,6 +517,30 @@ impl PrGateway for FakeGateway {
         pr: u64,
         body: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        if self.consume_comment_write_failure() {
+            let err = DifftraceError::NotAFile {
+                path: "fake gateway comment-write failure".to_owned(),
+            };
+            return Box::pin(async move { Err(err) });
+        }
+        let id = {
+            let mut guard = self
+                .inner
+                .next_comment_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *guard = (*guard).saturating_add(1);
+            *guard
+        };
+        self.inner
+            .issue_comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(ExistingIssueComment {
+                id,
+                body: body.clone(),
+                author: OWN_LOGIN.to_owned(),
+            });
         self.inner
             .posted_comments
             .lock()

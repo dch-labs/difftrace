@@ -14,10 +14,16 @@ use crate::github::CommentPosition;
 use crate::github::ReviewEvent;
 use crate::github::ReviewSubmission;
 use crate::github::ReviewThread;
+use crate::prompts::REVIEW_POINTER_BODY;
 use crate::prompts::fix_all_section;
+use crate::prompts::re_raised_reply_body;
 use crate::review::ReviewRunner;
 use crate::tools::submit::DroppedFinding;
 use crate::tools::submit::ground_findings;
+
+pub(crate) const VERDICT_MARKER: &str = "<!-- difftrace:verdict -->";
+const VERDICT_WRITE_ATTEMPTS: u8 = 3;
+const VERDICT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 pub fn plan_batches(files: &[String], batch_size: usize) -> Vec<Vec<String>> {
     let mut sorted = files.to_vec();
@@ -88,21 +94,47 @@ pub(crate) fn review_event(findings: &[Finding]) -> ReviewEvent {
     }
 }
 
-fn threads_to_resolve(threads: &[ReviewThread], comments: &[CommentPosition]) -> Vec<String> {
+fn verdict_comment_body(outcome: &ReviewOutcome) -> String {
+    format!(
+        "{VERDICT_MARKER}\n\n{}\n\n---\nReviewed commit: `{}`",
+        outcome.render_markdown().trim_end(),
+        outcome.head_sha
+    )
+}
+
+fn split_replies(
+    threads: &[ReviewThread],
+    comments: Vec<CommentPosition>,
+    head_sha: &str,
+) -> (Vec<CommentPosition>, Vec<(u64, String)>, Vec<String>) {
+    let mut positions = Vec::new();
+    let mut replies = Vec::new();
+    let mut matched = Vec::new();
+    for comment in comments {
+        let thread = threads.iter().find(|thread| {
+            thread.line.or(thread.original_line) == Some(comment.line)
+                && thread.path == comment.path
+                && !matched.contains(&thread.id)
+        });
+        match thread {
+            Some(thread) => {
+                matched.push(thread.id.clone());
+                replies.push((
+                    thread.comment_id,
+                    re_raised_reply_body(&comment.body, head_sha),
+                ));
+            }
+            None => positions.push(comment),
+        }
+    }
+    (positions, replies, matched)
+}
+
+fn threads_to_resolve(threads: &[ReviewThread], matched: &[String]) -> Vec<String> {
     threads
         .iter()
-        .filter_map(|thread| {
-            let still_present = thread.line.or(thread.original_line).is_some_and(|anchor| {
-                comments
-                    .iter()
-                    .any(|comment| comment.path == thread.path && comment.line == anchor)
-            });
-            if still_present {
-                None
-            } else {
-                Some(thread.id.clone())
-            }
-        })
+        .filter(|thread| !matched.contains(&thread.id))
+        .map(|thread| thread.id.clone())
         .collect()
 }
 
@@ -215,14 +247,17 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                 Vec::new()
             }
         };
+        let (positions, replies, matched) =
+            split_replies(&previous_threads, outcome.comments.clone(), self.head_sha());
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
             event: review_event(&outcome.findings),
-            summary: outcome.render_markdown(),
-            comments: outcome.comments.clone(),
+            summary: REVIEW_POINTER_BODY.to_owned(),
+            comments: positions,
         };
         self.submit(submission).await?;
-        let resolved = threads_to_resolve(&previous_threads, &outcome.comments);
+        self.post_re_raised_replies(replies).await;
+        let resolved = threads_to_resolve(&previous_threads, &matched);
         for id in &resolved {
             if let Err(err) = self.resolve_thread(id.clone()).await {
                 tracing::warn!(
@@ -237,8 +272,80 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             resolved = resolved.len(),
             "resolved previous threads"
         );
+        self.upsert_verdict_comment(&outcome).await?;
         outcome.posted = true;
         Ok(outcome)
+    }
+
+    async fn post_re_raised_replies(&self, replies: Vec<(u64, String)>) {
+        let mut posted = 0usize;
+        for (comment_id, body) in replies {
+            if let Err(err) = self
+                .gateway()
+                .reply_to_review_comment(self.pr(), comment_id, body)
+                .await
+            {
+                tracing::warn!(
+                    target: "difftrace::review",
+                    error = %crate::error::error_chain(&err),
+                    "could not reply into a previous review thread"
+                );
+                continue;
+            }
+            posted = posted.saturating_add(1);
+        }
+        tracing::info!(
+            target: "difftrace::review",
+            replied = posted,
+            "replied into re-raised threads"
+        );
+    }
+
+    async fn upsert_verdict_comment(&self, outcome: &ReviewOutcome) -> Result<(), DifftraceError> {
+        let body = verdict_comment_body(outcome);
+        let mut attempts_left = VERDICT_WRITE_ATTEMPTS;
+        loop {
+            let write = match self
+                .gateway()
+                .find_own_marker_comment(self.pr(), VERDICT_MARKER.to_owned())
+                .await
+            {
+                Ok(Some(comment_id)) => {
+                    self.gateway()
+                        .update_issue_comment(comment_id, body.clone())
+                        .await
+                }
+                Ok(None) => {
+                    self.gateway()
+                        .post_pr_comment(self.pr(), body.clone())
+                        .await
+                }
+                Err(err) => Err(err),
+            };
+            match write {
+                Ok(()) => {
+                    tracing::info!(target: "difftrace::review", "verdict comment written");
+                    return Ok(());
+                }
+                Err(err) if attempts_left <= 1 => {
+                    tracing::error!(
+                        target: "difftrace::review",
+                        error = %crate::error::error_chain(&err),
+                        "could not write the verdict comment; giving up after every retry"
+                    );
+                    return Err(err);
+                }
+                Err(err) => {
+                    attempts_left = attempts_left.saturating_sub(1);
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %crate::error::error_chain(&err),
+                        "could not write the verdict comment; retrying"
+                    );
+                    tokio::time::sleep(VERDICT_RETRY_DELAY).await;
+                }
+            }
+        }
     }
 }
 
@@ -358,17 +465,32 @@ diff --git a/src/beta.rs b/src/beta.rs
         client: Arc<C>,
         gateway: Arc<FakeGateway>,
     ) -> Result<ReviewRunner<C>, Box<dyn std::error::Error>> {
+        make_runner_with(client, gateway, overview())
+    }
+
+    fn make_runner_with<C: ApiClient + 'static>(
+        client: Arc<C>,
+        gateway: Arc<FakeGateway>,
+        pr_overview: PrOverview,
+    ) -> Result<ReviewRunner<C>, Box<dyn std::error::Error>> {
         Ok(ReviewRunner::new(
             client,
             gateway,
             Arc::new(diff_index()?),
-            overview(),
+            pr_overview,
             crate::config::ReviewSettings {
                 batch_files: 1,
                 ..crate::config::ReviewSettings::default()
             },
             None,
         ))
+    }
+
+    fn overview_at_sha(head_sha: &str) -> PrOverview {
+        PrOverview {
+            head_sha: head_sha.to_owned(),
+            ..overview()
+        }
     }
 
     #[test]
@@ -401,43 +523,120 @@ diff --git a/src/beta.rs b/src/beta.rs
     }
 
     #[test]
-    fn only_unreposted_threads_are_slated_for_resolution() {
+    fn only_unmatched_threads_are_slated_for_resolution() {
         let threads = vec![
             ReviewThread {
                 id: "T_KEEP".to_owned(),
+                comment_id: 501,
                 path: "src/alpha.rs".to_owned(),
                 line: Some(2),
                 original_line: Some(2),
             },
             ReviewThread {
                 id: "T_FIXED".to_owned(),
+                comment_id: 502,
                 path: "src/beta.rs".to_owned(),
                 line: Some(13),
                 original_line: Some(13),
             },
             ReviewThread {
                 id: "T_MOVED".to_owned(),
+                comment_id: 503,
                 path: "src/gone.rs".to_owned(),
                 line: None,
                 original_line: Some(40),
             },
         ];
-        let comments = vec![
-            CommentPosition {
+        let slated = threads_to_resolve(&threads, &["T_KEEP".to_owned()]);
+        assert_eq!(slated, vec!["T_FIXED".to_owned(), "T_MOVED".to_owned()]);
+    }
+
+    #[test]
+    fn reply_matching_prefers_the_current_line_then_the_original() {
+        let threads = vec![
+            ReviewThread {
+                id: "T_CURRENT".to_owned(),
+                comment_id: 601,
                 path: "src/alpha.rs".to_owned(),
-                line: 2,
-                side: Side::Right,
-                body: String::new(),
+                line: Some(2),
+                original_line: Some(9),
             },
-            CommentPosition {
+            ReviewThread {
+                id: "T_OUTDATED".to_owned(),
+                comment_id: 602,
                 path: "src/beta.rs".to_owned(),
-                line: 11,
-                side: Side::Right,
-                body: String::new(),
+                line: None,
+                original_line: Some(11),
             },
         ];
-        let slated = threads_to_resolve(&threads, &comments);
-        assert_eq!(slated, vec!["T_FIXED".to_owned(), "T_MOVED".to_owned()]);
+        let comment = |path: &str, line: u64| CommentPosition {
+            path: path.to_owned(),
+            line,
+            side: Side::Right,
+            body: format!("{path}:{line}"),
+        };
+        let (positions, replies, matched) = split_replies(
+            &threads,
+            vec![
+                comment("src/alpha.rs", 2),
+                comment("src/beta.rs", 11),
+                comment("src/gamma.rs", 5),
+            ],
+            "headsha",
+        );
+        assert_eq!(
+            matched,
+            vec!["T_CURRENT".to_owned(), "T_OUTDATED".to_owned()],
+            "the current line matches first, the original line as fallback"
+        );
+        assert_eq!(positions.len(), 1, "only the unmatched comment stays fresh");
+        assert_eq!(
+            positions.first().map(|c| c.path.as_str()),
+            Some("src/gamma.rs")
+        );
+        assert_eq!(replies.len(), 2);
+        assert_eq!(
+            replies.first().map(|(id, _)| *id),
+            Some(601),
+            "the current-line match replies first"
+        );
+        assert_eq!(replies.get(1).map(|(id, _)| *id), Some(602));
+        assert!(
+            replies.first().is_some_and(
+                |(_, body)| body.contains("Re-raised in the review of commit `headsha`.")
+            ),
+            "each reply names the reviewed commit"
+        );
+    }
+
+    #[test]
+    fn verdict_comment_body_wraps_the_render_with_marker_and_footer() {
+        let outcome = ReviewOutcome {
+            summary: crate::findings::ReviewSummary {
+                summary: "One file.".to_owned(),
+                risk_notes: Vec::new(),
+                tests: "Covered.".to_owned(),
+            },
+            findings: Vec::new(),
+            comments: Vec::new(),
+            dropped: Vec::new(),
+            pr: 42,
+            head_sha: "9f3b2c1".to_owned(),
+            posted: false,
+        };
+        let body = verdict_comment_body(&outcome);
+        assert!(body.starts_with("<!-- difftrace:verdict -->\n"));
+        assert!(body.contains("## Verdict"));
+        assert!(body.ends_with("Reviewed commit: `9f3b2c1`"));
+        let render = outcome.render_markdown();
+        assert!(
+            !render.contains("difftrace:verdict"),
+            "the dry-run render must not carry the marker"
+        );
+        assert!(
+            !render.contains("Reviewed commit"),
+            "the dry-run render must not carry the footer"
+        );
     }
 
     #[tokio::test]
@@ -446,12 +645,14 @@ diff --git a/src/beta.rs b/src/beta.rs
         let gateway = Arc::new(FakeGateway::with_threads(vec![
             ReviewThread {
                 id: "T_KEEP".to_owned(),
+                comment_id: 501,
                 path: "src/alpha.rs".to_owned(),
                 line: Some(2),
                 original_line: Some(2),
             },
             ReviewThread {
                 id: "T_FIXED".to_owned(),
+                comment_id: 502,
                 path: "src/beta.rs".to_owned(),
                 line: Some(13),
                 original_line: Some(13),
@@ -467,6 +668,88 @@ diff --git a/src/beta.rs b/src/beta.rs
             vec!["T_FIXED".to_owned()],
             "only the thread whose line was not reposted resolves"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_re_raised_finding_replies_into_its_thread() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let gateway = Arc::new(FakeGateway::with_threads(vec![
+            ReviewThread {
+                id: "T_KEEP".to_owned(),
+                comment_id: 501,
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_FIXED".to_owned(),
+                comment_id: 502,
+                path: "src/beta.rs".to_owned(),
+                line: Some(13),
+                original_line: Some(13),
+            },
+        ]));
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        runner.review_all(false).await?;
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(
+            gateway.posted_replies().len(),
+            1,
+            "the re-raised anchor replies into its thread via the replies endpoint"
+        );
+        let (comment_id, reply_body) = gateway
+            .posted_replies()
+            .first()
+            .cloned()
+            .ok_or("expected a reply")?;
+        assert_eq!(comment_id, 501);
+        assert!(reply_body.contains("Re-raised in the review of commit `headsha`."));
+        assert!(
+            reply_body.contains("**Title**"),
+            "the reply keeps the finding body"
+        );
+        assert_eq!(
+            submission.comments.len(),
+            1,
+            "only the fresh anchor posts a positioned comment"
+        );
+        assert_eq!(
+            submission.comments.first().map(|c| c.line),
+            Some(11),
+            "the beta finding at its own anchor stays positioned"
+        );
+        assert_eq!(gateway.resolved_threads(), vec!["T_FIXED".to_owned()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_shifted_finding_posts_a_new_comment_and_resolves_the_old()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::with_threads(vec![ReviewThread {
+            id: "T_MOVED".to_owned(),
+            comment_id: 503,
+            path: "src/beta.rs".to_owned(),
+            line: None,
+            original_line: Some(13),
+        }]));
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        runner.review_all(false).await?;
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert!(
+            gateway.posted_replies().is_empty(),
+            "an anchor that moved does not reply into the outdated thread"
+        );
+        assert_eq!(
+            submission
+                .comments
+                .iter()
+                .filter(|c| c.path == "src/beta.rs")
+                .count(),
+            1,
+            "the shifted finding posts a fresh positioned comment"
+        );
+        assert_eq!(gateway.resolved_threads(), vec!["T_MOVED".to_owned()]);
         Ok(())
     }
 
@@ -634,20 +917,42 @@ diff --git a/src/beta.rs b/src/beta.rs
         let submission = gateway.submitted().ok_or("expected a submission")?;
         assert_eq!(submission.comments.len(), 1);
         assert_eq!(outcome.dropped.len(), 1);
-        assert!(submission.summary.starts_with("## Verdict"));
-        assert!(
-            submission
-                .summary
-                .contains("🔴 Not good to go — 1 blocking finding:")
-        );
-        assert!(submission.summary.contains("## Risks\n\n(none flagged)"));
-        assert!(submission.summary.contains("One finding"));
-        assert!(submission.summary.contains("alpha.rs:999"));
+        let verdict = gateway
+            .posted_comments()
+            .first()
+            .map(|(_, body)| body.clone())
+            .ok_or("the verdict comment must be posted")?;
+        assert!(verdict.contains("🔴 Not good to go — 1 blocking finding:"));
+        assert!(verdict.contains("## Risks\n\n(none flagged)"));
+        assert!(verdict.contains("One finding"));
+        assert!(verdict.contains("alpha.rs:999"));
         let overstatement = "two findings";
         assert!(
-            !submission.summary.contains(overstatement),
+            !verdict.contains(overstatement),
             "the summary must not count dropped findings"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_posted_review_body_is_the_pointer_not_the_verdict()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        runner.review_all(false).await?;
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(submission.summary, REVIEW_POINTER_BODY);
+        assert!(
+            !submission.summary.contains("## Verdict"),
+            "the verdict lives in the comment, not the review body"
+        );
+        let verdict = gateway
+            .posted_comments()
+            .first()
+            .map(|(_, body)| body.clone())
+            .ok_or("the verdict comment must be posted")?;
+        assert!(verdict.contains("## Verdict"));
+        assert!(verdict.starts_with(VERDICT_MARKER));
         Ok(())
     }
 
@@ -668,8 +973,136 @@ diff --git a/src/beta.rs b/src/beta.rs
             .ok_or("expected a submission to reach the gateway")?;
         assert_eq!(submission.head_sha, "headsha");
         assert_eq!(submission.comments, dry.comments);
-        assert_eq!(submission.summary, dry.render_markdown());
+        assert_eq!(submission.summary, REVIEW_POINTER_BODY);
+        let verdict = post_gateway
+            .posted_comments()
+            .first()
+            .map(|(_, body)| body.clone())
+            .ok_or("the verdict comment must be posted")?;
+        assert_eq!(verdict, verdict_comment_body(&dry));
         assert_eq!(posted.dropped, dry.dropped);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_verdict_comment_is_created_then_edited_not_duplicated()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let first = make_runner_with(
+            Arc::new(scripted_client()),
+            Arc::clone(&gateway),
+            overview_at_sha("firstsha"),
+        )?;
+        first.review_all(false).await?;
+        assert_eq!(
+            gateway.posted_comments().len(),
+            1,
+            "the first run creates exactly one verdict comment"
+        );
+        let second = make_runner_with(
+            Arc::new(scripted_client()),
+            Arc::clone(&gateway),
+            overview_at_sha("secondsha"),
+        )?;
+        second.review_all(false).await?;
+        assert_eq!(
+            gateway.posted_comments().len(),
+            1,
+            "the second run must not create another comment"
+        );
+        let updated = gateway.updated_comments();
+        assert_eq!(
+            updated.len(),
+            1,
+            "the second run edits the comment in place"
+        );
+        let (_, body) = updated.first().cloned().ok_or("expected an update")?;
+        assert!(body.starts_with(VERDICT_MARKER));
+        assert!(
+            body.contains("Reviewed commit: `secondsha`"),
+            "the edit carries the new round's commit"
+        );
+        assert_eq!(gateway.issue_comment_bodies().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_verdict_upsert_exhausting_the_retries_fails_the_run_after_posting()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::with_threads(vec![ReviewThread {
+            id: "T_FIXED".to_owned(),
+            comment_id: 502,
+            path: "src/beta.rs".to_owned(),
+            line: Some(13),
+            original_line: Some(13),
+        }]));
+        gateway.fail_comment_writes(9);
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        let err = runner
+            .review_all(false)
+            .await
+            .err()
+            .ok_or("the exhausted verdict retries must fail the run")?;
+        assert!(
+            !err.to_string().is_empty(),
+            "the failure names the underlying error"
+        );
+        assert!(
+            gateway.submitted().is_some(),
+            "the review itself stands posted; only the verdict comment failed"
+        );
+        assert_eq!(
+            gateway.resolved_threads(),
+            vec!["T_FIXED".to_owned()],
+            "resolution completes even when the verdict write fails"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_reply_degrades_without_failing_the_run_or_resolving()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::with_threads(vec![ReviewThread {
+            id: "T_KEEP".to_owned(),
+            comment_id: 501,
+            path: "src/alpha.rs".to_owned(),
+            line: Some(2),
+            original_line: Some(2),
+        }]));
+        gateway.fail_reply_writes(1);
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        let outcome = runner.review_all(false).await?;
+        assert!(outcome.posted, "a failed reply never fails the run");
+        assert!(
+            gateway.posted_replies().is_empty(),
+            "the reply did not land"
+        );
+        assert!(
+            gateway.resolved_threads().is_empty(),
+            "the still-present finding's thread must stay open for the next re-review"
+        );
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(
+            submission
+                .comments
+                .iter()
+                .filter(|c| c.path == "src/alpha.rs")
+                .count(),
+            0,
+            "the re-raised anchor was carved out for the reply, not reposted"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_verdict_upsert_recovering_on_a_later_retry_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        gateway.fail_comment_writes(2);
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        let outcome = runner.review_all(false).await?;
+        assert!(outcome.posted);
+        assert_eq!(gateway.posted_comments().len(), 1);
         Ok(())
     }
 }

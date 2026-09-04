@@ -10,6 +10,12 @@ use crate::tools::submit::DroppedFinding;
 const FIX_DIRECTIVES: &str = "Read the surrounding code first, apply a minimal focused fix, and cover the behavior change with a test.";
 const ALL_DIRECTIVES: &str = "Read the surrounding code before each fix, keep each change minimal and focused, and cover behavior changes with tests.";
 
+pub(crate) const REVIEW_POINTER_BODY: &str = "🤖 difftrace review — the verdict, summary, and fix prompts live in the difftrace comment on this pull request.";
+
+pub(crate) fn re_raised_reply_body(comment_body: &str, head_sha: &str) -> String {
+    format!("{comment_body}\n\n*Re-raised in the review of commit `{head_sha}`.*")
+}
+
 pub(crate) fn comment_body(finding: &Finding, line: u64) -> String {
     let prompt = format!(
         "Fix this code-review finding.\n\nFile: {}, line {}\nSeverity: {}\nComplexity: {}/5\nTitle: {}\nDetail: {}\n\n{}",
@@ -202,5 +208,23 @@ mod tests {
     fn the_fix_all_section_is_omitted_when_nothing_was_raised() {
         let section = fix_all_section(&[], &[], 42, "sha");
         assert!(section.is_empty());
+    }
+
+    #[test]
+    fn the_pointer_body_is_one_stable_line() {
+        assert_eq!(REVIEW_POINTER_BODY.lines().count(), 1);
+        assert!(REVIEW_POINTER_BODY.contains("verdict"));
+        assert!(REVIEW_POINTER_BODY.contains("difftrace comment"));
+        assert!(
+            !REVIEW_POINTER_BODY.contains('\n'),
+            "the review body must stay a single line"
+        );
+    }
+
+    #[test]
+    fn a_re_raised_reply_carries_the_round_commit() {
+        let body = re_raised_reply_body("the finding body", "9f3b2c1");
+        assert!(body.starts_with("the finding body"));
+        assert!(body.contains("Re-raised in the review of commit `9f3b2c1`."));
     }
 }

@@ -28,6 +28,7 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\
           isResolved\
           comments(first: 1) {\
             nodes {\
+              databaseId\
               author { login }\
               path\
               line\
@@ -40,6 +41,8 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\
     }\
   }\
 }";
+
+const VIEWER_QUERY: &str = "query { viewer { login } }";
 
 const RESOLVE_MUTATION: &str = "\
 mutation($threadId: ID!) {\
@@ -130,6 +133,7 @@ impl From<octocrab::models::issues::Comment> for ExistingIssueComment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewThread {
     pub id: String,
+    pub comment_id: u64,
     pub path: String,
     pub line: Option<u64>,
     pub original_line: Option<u64>,
@@ -199,6 +203,7 @@ struct CommentsWire {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadCommentWire {
+    database_id: u64,
     #[serde(default)]
     author: Option<AuthorWire>,
     path: String,
@@ -211,6 +216,29 @@ struct ThreadCommentWire {
 #[derive(serde::Deserialize)]
 struct AuthorWire {
     login: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewerWire {
+    #[serde(default)]
+    viewer: Option<AuthorWire>,
+}
+
+fn issue_comment_route(owner: &str, repo: &str, comment_id: u64) -> String {
+    format!("/repos/{owner}/{repo}/issues/comments/{comment_id}")
+}
+
+pub(crate) fn own_marker_comment_id(
+    comments: &[ExistingIssueComment],
+    own_login: &str,
+    marker: &str,
+) -> Option<u64> {
+    comments
+        .iter()
+        .filter(|comment| comment.author == own_login && comment.body.contains(marker))
+        .map(|comment| comment.id)
+        .next_back()
 }
 
 fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<ReviewThread>, Option<String>) {
@@ -237,6 +265,7 @@ fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<ReviewThread>, O
             }
             Some(ReviewThread {
                 id: thread.id,
+                comment_id: comment.database_id,
                 path: comment.path,
                 line: comment.line,
                 original_line: comment.original_line,
@@ -282,6 +311,18 @@ pub trait PrGateway: Send + Sync {
     fn resolve_thread(
         &self,
         thread_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
+
+    fn find_own_marker_comment(
+        &self,
+        pr: u64,
+        marker: String,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<u64>, DifftraceError>> + Send + '_>>;
+
+    fn update_issue_comment(
+        &self,
+        comment_id: u64,
+        body: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
 
     fn fetch_issue_comment(
@@ -355,6 +396,18 @@ impl GitHubClient {
 
     fn map_github_error(source: octocrab::Error) -> DifftraceError {
         DifftraceError::GitHubApi { source }
+    }
+
+    async fn own_login(&self) -> Result<String, DifftraceError> {
+        let payload = serde_json::json!({ "query": VIEWER_QUERY });
+        let wire: ViewerWire = self
+            .crab
+            .graphql(&payload)
+            .await
+            .map_err(Self::map_github_error)?;
+        wire.viewer
+            .map(|viewer| viewer.login)
+            .ok_or(DifftraceError::MissingViewerLogin)
     }
 
     fn decode_content(
@@ -488,13 +541,7 @@ impl PrGateway for GitHubClient {
         let owner = self.repo.owner.clone();
         let repo = self.repo.repo.clone();
         Box::pin(async move {
-            let login = self
-                .crab
-                .current()
-                .user()
-                .await
-                .map_err(Self::map_github_error)?
-                .login;
+            let login = self.own_login().await?;
             let mut threads = Vec::new();
             let mut cursor: Option<String> = None;
             loop {
@@ -535,6 +582,51 @@ impl PrGateway for GitHubClient {
             let _: serde_json::Value = self
                 .crab
                 .graphql(&payload)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(())
+        })
+    }
+
+    fn find_own_marker_comment(
+        &self,
+        pr: u64,
+        marker: String,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<u64>, DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let login = self.own_login().await?;
+            let page = self
+                .crab
+                .issues(owner.as_str(), repo.as_str())
+                .list_comments(pr)
+                .send()
+                .await
+                .map_err(Self::map_github_error)?;
+            let comments = self
+                .crab
+                .all_pages(page)
+                .await
+                .map_err(Self::map_github_error)?;
+            let mapped: Vec<ExistingIssueComment> = comments.into_iter().map(From::from).collect();
+            Ok(own_marker_comment_id(&mapped, &login, &marker))
+        })
+    }
+
+    fn update_issue_comment(
+        &self,
+        comment_id: u64,
+        body: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let route = issue_comment_route(&owner, &repo, comment_id);
+            let payload = serde_json::json!({ "body": body });
+            let _: octocrab::models::issues::Comment = self
+                .crab
+                .patch(&route, Some(&payload))
                 .await
                 .map_err(Self::map_github_error)?;
             Ok(())
@@ -849,6 +941,7 @@ mod tests {
                     "id": "T_KEEP",
                     "isResolved": false,
                     "comments": { "nodes": [ {
+                        "databaseId": 501,
                         "author": { "login": "difftrace[bot]" },
                         "path": "src/a.rs", "line": 2, "originalLine": 2
                     } ] }
@@ -857,6 +950,7 @@ mod tests {
                     "id": "T_DONE",
                     "isResolved": true,
                     "comments": { "nodes": [ {
+                        "databaseId": 502,
                         "author": { "login": "difftrace[bot]" },
                         "path": "src/a.rs", "line": 5, "originalLine": 5
                     } ] }
@@ -865,6 +959,7 @@ mod tests {
                     "id": "T_FOREIGN",
                     "isResolved": false,
                     "comments": { "nodes": [ {
+                        "databaseId": 503,
                         "author": { "login": "dana" },
                         "path": "src/b.rs", "line": 7, "originalLine": 7
                     } ] }
@@ -873,6 +968,7 @@ mod tests {
                     "id": "T_OUTDATED",
                     "isResolved": false,
                     "comments": { "nodes": [ {
+                        "databaseId": 504,
                         "author": { "login": "difftrace[bot]" },
                         "path": "src/c.rs", "line": null, "originalLine": 30
                     } ] }
@@ -882,7 +978,10 @@ mod tests {
         let (threads, next) = own_threads_page(wire, "difftrace[bot]");
         assert_eq!(threads.len(), 2);
         assert!(threads.iter().any(|thread| {
-            thread.id == "T_KEEP" && thread.path == "src/a.rs" && thread.line == Some(2)
+            thread.id == "T_KEEP"
+                && thread.comment_id == 501
+                && thread.path == "src/a.rs"
+                && thread.line == Some(2)
         }));
         assert!(
             threads
@@ -932,5 +1031,76 @@ mod tests {
     fn the_resolve_mutation_targets_the_thread() {
         assert!(RESOLVE_MUTATION.contains("resolveReviewThread"));
         assert!(RESOLVE_MUTATION.contains("$threadId"));
+    }
+
+    #[test]
+    fn the_login_comes_from_the_graphql_viewer_query() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(VIEWER_QUERY.contains("viewer"));
+        assert!(VIEWER_QUERY.contains("login"));
+        let wire: ViewerWire = serde_json::from_value(json!({
+            "viewer": { "login": "difftrace[bot]" }
+        }))?;
+        assert_eq!(
+            wire.viewer.map(|viewer| viewer.login),
+            Some("difftrace[bot]".to_owned())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_threads_query_selects_comment_database_ids() {
+        assert!(
+            THREADS_QUERY.contains("databaseId"),
+            "the reply matching feeds on the thread comment's databaseId"
+        );
+    }
+
+    #[test]
+    fn a_marker_comment_is_found_among_own_issue_comments() {
+        let comments = vec![
+            ExistingIssueComment {
+                id: 1,
+                body: "unrelated note".to_owned(),
+                author: "difftrace[bot]".to_owned(),
+            },
+            ExistingIssueComment {
+                id: 2,
+                body: "<!-- difftrace:verdict -->\nfirst".to_owned(),
+                author: "difftrace[bot]".to_owned(),
+            },
+            ExistingIssueComment {
+                id: 3,
+                body: "<!-- difftrace:verdict -->\nnot mine".to_owned(),
+                author: "dana".to_owned(),
+            },
+            ExistingIssueComment {
+                id: 4,
+                body: "<!-- difftrace:verdict -->\nlatest".to_owned(),
+                author: "difftrace[bot]".to_owned(),
+            },
+        ];
+        assert_eq!(
+            own_marker_comment_id(&comments, "difftrace[bot]", "<!-- difftrace:verdict -->"),
+            Some(4),
+            "the latest own marker comment wins"
+        );
+        assert_eq!(
+            own_marker_comment_id(&comments, "someone-else", "<!-- difftrace:verdict -->"),
+            None,
+            "a foreign author's marker never matches"
+        );
+        assert_eq!(
+            own_marker_comment_id(&comments, "difftrace[bot]", "<!-- other:marker -->"),
+            None,
+            "a comment without the marker never matches"
+        );
+    }
+
+    #[test]
+    fn an_issue_comment_update_targets_the_comment_route() {
+        assert_eq!(
+            issue_comment_route("acme", "app", 77),
+            "/repos/acme/app/issues/comments/77"
+        );
     }
 }

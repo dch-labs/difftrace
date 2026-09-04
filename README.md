@@ -54,14 +54,19 @@ Progress goes to stderr; the rendered review (dry run) and the posting
 receipt go to stdout. Exit status is non-zero only on error — a review
 full of findings still exits `0`.
 
-The review body leads with a verdict: good to go exactly when no
-grounded finding is a warning or critical, with blockers listed by
-file and line (dropped findings never block) and a note pointing at
-the fix prompts. The review is submitted as the matching GitHub review
-event — requesting changes while blockers exist, approving when clean
-— and on each re-review, previous difftrace threads whose finding did
-not reappear on the same line are resolved automatically. The body is
-followed by the summary, the risks section
+Each pull request carries one current difftrace verdict comment —
+marked with a hidden `<!-- difftrace:verdict -->` header, created on
+the first review and edited in place on every re-review, with a
+"Reviewed commit" footer naming the round's head SHA. (Overlapping
+runs on the same PR can create a second marker comment; later runs
+edit the newest.) It leads with
+the verdict: good to go exactly when no grounded finding is a warning
+or critical, with blockers listed by file and line (dropped findings
+never block) and a note pointing at the fix prompts. The review
+submission itself is the matching GitHub review event — requesting
+changes while blockers exist, approving when clean — with a one-line
+body pointing at the verdict comment. The verdict comment is followed
+by the summary, the risks section
 (always present, "(none flagged)" when empty), and the test-coverage
 note. One inline comment per grounded finding (each headed by a colored
 severity badge plus a fix-complexity badge on a 1–5 color ramp,
@@ -73,6 +78,14 @@ commit. Findings dropped during grounding — citations outside the
 changed hunks or over the per-file cap — are listed in an HTML-comment
 block and included in the fix-all prompt marked unanchored, so nothing
 is silently discarded.
+
+On a re-review, a finding raised again at the same anchor is posted as
+a reply into its existing thread — each reply naming the commit that
+re-raised it — instead of opening a duplicate, and previous difftrace
+threads whose finding did not reappear (fixed, dropped, or shifted to
+a new line) are resolved automatically. Writing the verdict comment is
+retried and fails the run loudly if every attempt fails, so a missing
+verdict is visible rather than silent.
 
 Every run captures a JSONL trajectory under
 `~/.difftrace/trajectories/` recording the model requests, tool calls,

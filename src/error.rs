@@ -30,6 +30,8 @@ pub enum DifftraceError {
     GitHubInit { source: octocrab::Error },
     #[error("GitHub API call failed: {source}")]
     GitHubApi { source: octocrab::Error },
+    #[error("the GitHub identity is unavailable: the viewer query returned no login")]
+    MissingViewerLogin,
     #[error("reply failed: {message}")]
     Reply { message: String },
     #[error("{path} is a directory or empty entry, not a readable file")]
