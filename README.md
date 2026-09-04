@@ -64,8 +64,10 @@ the verdict: good to go exactly when no grounded finding is a warning
 or critical, with blockers listed by file and line (dropped findings
 never block) and a note pointing at the fix prompts. The review
 submission itself is the matching GitHub review event — requesting
-changes while blockers exist, approving when clean — with a one-line
-body pointing at the verdict comment. The verdict comment is followed
+changes while blockers exist, approving when clean — with a body
+leading that round's verdict (the blocker list) and a pointer to the
+verdict comment for the summary, risks, tests, and fix-all prompt.
+The verdict comment is followed
 by the summary, the risks section
 (always present, "(none flagged)" when empty), and the test-coverage
 note. One inline comment per grounded finding (each headed by a colored
@@ -91,6 +93,20 @@ Every run captures a JSONL trajectory under
 `~/.difftrace/trajectories/` recording the model requests, tool calls,
 and findings as they actually happened; if that directory cannot be
 created, difftrace says so on stderr and proceeds without capture.
+
+## The consumer workflow
+
+[`examples/difftrace-review.yml`](examples/difftrace-review.yml) is the
+reference `GitHub` Actions workflow for running difftrace on a
+repository — reviews on every pull request, `@difftrace`/`/difftrace`
+comment commands through a first-line mention, and per-PR concurrency
+that never lets a comment cancel an in-flight review. Copy it verbatim;
+on every difftrace release, bump the two version+checksum pins (both
+install steps). Setup it assumes: the difftrace `GitHub` App installed
+(`pull-requests: write`, `contents: read`), the `ZAI_API_KEY`,
+`DIFFTRACE_APP_ID`, and `DIFFTRACE_APP_PRIVATE_KEY` secrets, and —
+optionally — a `DIFFTRACE_MODEL` repository variable to steer the model
+away from the default.
 
 ## Configuration
 
