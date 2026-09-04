@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-05
+
+### Changed
+
+- Review bodies no longer carry the verdict: each round's submission
+  body is one neutral line naming the reviewed commit, making the
+  standing marker comment the only verdict surface (verdict, summary,
+  risks, tests, and the copyable fix-all prompt, edited per run) —
+  the CodeRabbit comment model, replacing the verdict-on-review shape
+  whose per-round immutable bodies multiplied verdict-looking posts in
+  the timeline. Pinned by `the_posted_review_body_is_one_neutral_round_line`
+  and `the_round_body_is_one_neutral_line_naming_the_commit`.
+
+### Fixed
+
+- The reference consumer workflow hardens its trust boundary and
+  command scheduling: the fork gate fails closed (only an explicit
+  `false` passes — `true`, `null`, or a missing value no longer reach
+  the credential-minting steps), manual `workflow_dispatch` runs gain
+  the same fork rejection the push path already had, and each comment
+  command runs in its own concurrency group so a newer pending command
+  can no longer evict an older one. Promoted from the maintainer's dch
+  fix after CodeRabbit flagged the first two on the consumer copy.
+
+- Thread resolution works under the app token: `resolveReviewThread`
+  is gated on repo-write access, so an installation token scoped to
+  `contents: read` is rejected with "Resource not accessible by
+  integration" even though every other operation (review submission,
+  replies, comments) succeeds — the canonical consumer workflow now
+  scopes its minted token to `contents: write`, and the App itself
+  must carry Contents: Read and write (installation re-approval
+  required after changing it). The accumulated stale threads on both
+  consumer PRs were resolved manually to verify the mutation under a
+  sufficiently permissioned token.
+
 ## [0.3.2] - 2026-09-05
 
 ### Added
