@@ -14,9 +14,9 @@ use crate::github::CommentPosition;
 use crate::github::ReviewEvent;
 use crate::github::ReviewSubmission;
 use crate::github::ReviewThread;
-use crate::prompts::REVIEW_POINTER_BODY;
 use crate::prompts::fix_all_section;
 use crate::prompts::re_raised_reply_body;
+use crate::prompts::review_round_body;
 use crate::review::ReviewRunner;
 use crate::tools::submit::DroppedFinding;
 use crate::tools::submit::ground_findings;
@@ -99,13 +99,6 @@ fn verdict_comment_body(outcome: &ReviewOutcome) -> String {
         "{VERDICT_MARKER}\n\n{}\n\n---\nReviewed commit: `{}`",
         outcome.render_markdown().trim_end(),
         outcome.head_sha
-    )
-}
-
-fn review_body(outcome: &ReviewOutcome) -> String {
-    format!(
-        "{}\n\n{REVIEW_POINTER_BODY}",
-        verdict_section(&outcome.findings)
     )
 }
 
@@ -259,7 +252,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
             event: review_event(&outcome.findings),
-            summary: review_body(&outcome),
+            summary: review_round_body(&outcome.head_sha),
             comments: positions,
         };
         self.submit(submission).await?;
@@ -942,29 +935,17 @@ diff --git a/src/beta.rs b/src/beta.rs
     }
 
     #[tokio::test]
-    async fn the_posted_review_body_carries_the_verdict_and_points_at_the_comment()
+    async fn the_posted_review_body_is_one_neutral_round_line()
     -> Result<(), Box<dyn std::error::Error>> {
         let gateway = Arc::new(FakeGateway::empty());
         let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
         runner.review_all(false).await?;
         let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(submission.summary, review_round_body("headsha"));
         assert!(
-            submission.summary.starts_with("## Verdict"),
-            "the round's verdict leads the review body — the newest timeline item"
-        );
-        assert!(
-            submission
-                .summary
-                .contains("🔴 Not good to go — 2 blocking findings:"),
-            "the blockers are visible in the review body"
-        );
-        assert!(
-            submission.summary.contains(REVIEW_POINTER_BODY),
-            "the body points at the single summary comment"
-        );
-        assert!(
-            !submission.summary.contains("## Summary"),
-            "the full summary stays in the comment, not the review body"
+            !submission.summary.contains("## Verdict")
+                && !submission.summary.contains("## Summary"),
+            "the review body carries neither verdict nor summary — the standing comment is the only verdict surface"
         );
         let verdict = gateway
             .posted_comments()
@@ -993,7 +974,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             .ok_or("expected a submission to reach the gateway")?;
         assert_eq!(submission.head_sha, "headsha");
         assert_eq!(submission.comments, dry.comments);
-        assert_eq!(submission.summary, review_body(&dry));
+        assert_eq!(submission.summary, review_round_body("headsha"));
         let verdict = post_gateway
             .posted_comments()
             .first()
