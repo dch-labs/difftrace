@@ -44,6 +44,16 @@ jobs:
           case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
 
+      - name: Reject fork pull requests
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.pr }}
+          REPO: ${{ github.repository }}
+        run: |
+          fork=$(gh api "repos/$REPO/pulls/$PR" --jq .head.repo.fork)
+          case "$fork" in false) ;; *) echo "difftrace does not run on fork pull requests" >&2; exit 1;; esac
+
       # The binary is pinned to the tagged v0.3.2 release; bump version and
       # checksum together on every difftrace release.
       - name: Install difftrace v0.3.2
@@ -71,7 +81,7 @@ jobs:
           app-id: ${{ secrets.DIFFTRACE_APP_ID }}
           private-key: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
           permission-pull-requests: write
-          permission-contents: read
+          permission-contents: write
 
       - name: Review the pull request
         run: |
@@ -138,14 +148,14 @@ jobs:
           perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission)
           case "$perm" in admin|write) ;; *) echo "$AUTHOR ($perm) may not trigger difftrace" >&2; exit 1;; esac
           fork=$(gh api "repos/$REPO/pulls/$PR" --jq .head.repo.fork)
-          if [ "$fork" = "true" ]; then echo "difftrace does not run on fork pull requests" >&2; exit 1; fi
+          case "$fork" in false) ;; *) echo "difftrace does not run on fork pull requests" >&2; exit 1;; esac
 
   chat:
     name: Handle a difftrace command
     needs: gate
     runs-on: ubuntu-latest
     concurrency:
-      group: difftrace-chat-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      group: difftrace-chat-${{ github.event.comment.id || github.run_id }}
       cancel-in-progress: false
     if: needs.gate.outputs.skip == ''
     steps:
@@ -185,7 +195,7 @@ jobs:
           app-id: ${{ secrets.DIFFTRACE_APP_ID }}
           private-key: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
           permission-pull-requests: write
-          permission-contents: read
+          permission-contents: write
 
       - name: Run the command
         run: |

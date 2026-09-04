@@ -62,12 +62,12 @@ runs on the same PR can create a second marker comment; later runs
 edit the newest.) It leads with
 the verdict: good to go exactly when no grounded finding is a warning
 or critical, with blockers listed by file and line (dropped findings
-never block) and a note pointing at the fix prompts. The review
-submission itself is the matching GitHub review event — requesting
-changes while blockers exist, approving when clean — with a body
-leading that round's verdict (the blocker list) and a pointer to the
-verdict comment for the summary, risks, tests, and fix-all prompt.
-The verdict comment is followed
+never block) and a note pointing at the fix prompts. It is the only
+verdict surface: each round's review submission carries the matching
+`GitHub` review event — requesting changes while blockers exist,
+approving when clean — with a single neutral body line naming the
+reviewed commit, and its inline findings. The verdict comment is
+followed
 by the summary, the risks section
 (always present, "(none flagged)" when empty), and the test-coverage
 note. One inline comment per grounded finding (each headed by a colored
@@ -102,8 +102,10 @@ repository — reviews on every pull request, `@difftrace`/`/difftrace`
 comment commands through a first-line mention, and per-PR concurrency
 that never lets a comment cancel an in-flight review. Copy it verbatim;
 on every difftrace release, bump the two version+checksum pins (both
-install steps). Setup it assumes: the difftrace `GitHub` App installed
-(`pull-requests: write`, `contents: read`), the `ZAI_API_KEY`,
+install steps). Setup it assumes: the difftrace `GitHub` App installed with
+`pull-requests: write` and `contents: write` (conversation resolution
+requires repo-write on the token — `contents: read` leaves
+`resolveReviewThread` rejected), the `ZAI_API_KEY`,
 `DIFFTRACE_APP_ID`, and `DIFFTRACE_APP_PRIVATE_KEY` secrets, and —
 optionally — a `DIFFTRACE_MODEL` repository variable to steer the model
 away from the default.
