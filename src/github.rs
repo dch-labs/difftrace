@@ -18,38 +18,40 @@ pub use review::Side;
 
 use crate::error::DifftraceError;
 
-const THREADS_QUERY: &str = "\
-query($owner: String!, $name: String!, $number: Int!, $cursor: String) {\
-  repository(owner: $owner, name: $name) {\
-    pullRequest(number: $number) {\
-      reviewThreads(first: 100, after: $cursor) {\
-        nodes {\
-          id\
-          isResolved\
-          comments(first: 1) {\
-            nodes {\
-              databaseId\
-              author { login }\
-              path\
-              line\
-              originalLine\
-            }\
-          }\
-        }\
-        pageInfo { hasNextPage endCursor }\
-      }\
-    }\
-  }\
-}";
+const THREADS_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          id
+          isResolved
+          comments(first: 1) {
+            nodes {
+              databaseId
+              author { login }
+              path
+              line
+              originalLine
+            }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"#;
 
 const VIEWER_QUERY: &str = "query { viewer { login } }";
 
-const RESOLVE_MUTATION: &str = "\
-mutation($threadId: ID!) {\
-  resolveReviewThread(input: { threadId: $threadId }) {\
-    thread { isResolved }\
-  }\
-}";
+const RESOLVE_MUTATION: &str = r#"
+mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread { isResolved }
+  }
+}
+"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoRef {
@@ -1052,6 +1054,51 @@ mod tests {
         assert!(
             THREADS_QUERY.contains("databaseId"),
             "the reply matching feeds on the thread comment's databaseId"
+        );
+    }
+
+    #[test]
+    fn the_graphql_documents_keep_every_field_a_separate_token() {
+        let threads_tokens: Vec<&str> = THREADS_QUERY.split_whitespace().collect();
+        for field in [
+            "id",
+            "isResolved",
+            "databaseId",
+            "author",
+            "path",
+            "line",
+            "originalLine",
+            "pageInfo",
+            "hasNextPage",
+            "endCursor",
+        ] {
+            assert!(
+                threads_tokens.contains(&field),
+                "the threads query must select {field} as its own token"
+            );
+        }
+        let resolve_tokens: Vec<&str> = RESOLVE_MUTATION.split_whitespace().collect();
+        assert!(
+            resolve_tokens
+                .iter()
+                .any(|token| token.starts_with("mutation(")),
+            "the resolve mutation must open with its own operation token"
+        );
+        assert!(
+            resolve_tokens
+                .iter()
+                .any(|token| token.starts_with("resolveReviewThread(")),
+            "the resolve mutation must call the mutation as its own token"
+        );
+        assert!(
+            resolve_tokens.contains(&"isResolved"),
+            "the resolve mutation must select isResolved as its own token"
+        );
+        assert!(
+            VIEWER_QUERY
+                .split_whitespace()
+                .any(|token| token == "viewer"),
+            "the viewer query must keep its field a separate token"
         );
     }
 

@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Clean reviews post again: the create-review request enum for an
+  approving review is `APPROVE`, but difftrace sent `APPROVED` (the
+  response state) — the first live clean review under 0.3.0 was
+  rejected wholesale ("Variable $event … invalid value"). Pinned by
+  `review_events_map_to_their_wire_names`, which now states the
+  request/response distinction.
+- The thread-listing GraphQL query is well-formed: its string
+  constant used Rust backslash line-continuations, which strip the
+  newline and the next line's indentation — `id`, `isResolved`, and
+  `comments` collapsed into the nonexistent field
+  `idisResolvedcomments` and the query 422'd ("Field … doesn't exist").
+  The bug predates 0.3.0 and was masked until the viewer-login fix
+  let the query run for the first time. All GraphQL documents are now
+  raw strings with real newlines, and
+  `the_graphql_documents_keep_every_field_a_separate_token` fails on
+  any future mash.
+
 ## [0.3.0] - 2026-09-04
 
 ### Added

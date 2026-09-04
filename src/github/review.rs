@@ -37,7 +37,7 @@ pub enum ReviewEvent {
 impl ReviewEvent {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Approved => "APPROVED",
+            Self::Approved => "APPROVE",
             Self::ChangesRequested => "REQUEST_CHANGES",
         }
     }
@@ -188,14 +188,18 @@ mod tests {
         );
         assert_eq!(
             value.pointer("/event").and_then(serde_json::Value::as_str),
-            Some("APPROVED")
+            Some("APPROVE")
         );
         Ok(())
     }
 
     #[test]
     fn review_events_map_to_their_wire_names() {
-        assert_eq!(ReviewEvent::Approved.as_str(), "APPROVED");
+        assert_eq!(
+            ReviewEvent::Approved.as_str(),
+            "APPROVE",
+            "the create-review request enum is APPROVE; APPROVED is the response state"
+        );
         assert_eq!(ReviewEvent::ChangesRequested.as_str(), "REQUEST_CHANGES");
     }
 
