@@ -7,6 +7,7 @@ use loopctl::engine::BareLoop;
 use loopctl::engine::Loop;
 use loopctl::engine::RunConfig;
 use loopctl::error::LoopError;
+use loopctl::managers::LoopManagers;
 use loopctl::memory::trajectory::TrajectoryObserver;
 use loopctl::message::Message;
 use loopctl::middleware::OutputLimitMiddleware;
@@ -28,6 +29,10 @@ use crate::review::rubric::ReviewRubric;
 use crate::tools::ReviewScope;
 
 pub(crate) const TOOL_OUTPUT_MAX_CHARS: usize = 16 * 1024;
+
+pub(crate) fn production_managers() -> LoopManagers {
+    LoopManagers::new().with_stream_handler(loopctl::stream::handler::StreamHandler::new())
+}
 
 const SUMMARY_SYSTEM: &str = "\
 You are writing the summary of a completed code review. Given every finding
@@ -153,10 +158,11 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         let registry = self
             .scope
             .batch_registry(Arc::clone(&slot), self.settings.max_findings_per_file);
-        let mut agent = BareLoop::new(
+        let mut agent = BareLoop::new_with_managers(
             Arc::clone(&self.client),
             registry,
             loopctl::config::SessionConfig::default(),
+            production_managers(),
         );
         agent.add_contributor(Box::new(ReviewRubric::new(&self.overview)));
         agent.register_observer(Arc::new(match &self.trajectory_dir {
@@ -234,6 +240,69 @@ Return the corrected JSON now, matching every field type exactly."
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use futures::Stream;
+    use loopctl::api::StreamRequest;
+    use loopctl::api::error::ApiError;
+    use loopctl::stream::StreamEvent;
+    use loopctl::testing::MockApiClient;
+
+    pub(crate) struct FlakyClient {
+        inner: MockApiClient,
+        fail_first: AtomicUsize,
+    }
+
+    impl FlakyClient {
+        pub(crate) fn new(inner: MockApiClient, fail_first: usize) -> Self {
+            Self {
+                inner,
+                fail_first: AtomicUsize::new(fail_first),
+            }
+        }
+    }
+
+    impl loopctl::api::ApiClient for FlakyClient {
+        fn model(&self) -> String {
+            self.inner.model()
+        }
+
+        fn stream_messages(
+            &self,
+            request: &StreamRequest,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send + 'static>> {
+            let failed = self
+                .fail_first
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                .is_ok_and(|previous| previous > 0);
+            if failed {
+                return Box::pin(futures::stream::once(async move {
+                    Err(ApiError::api("stream reset mid-flight"))
+                }));
+            }
+            self.inner.stream_messages(request)
+        }
+
+        fn create_message(
+            &self,
+            request: &StreamRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<loopctl::api::NonStreamingResponse, ApiError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            self.inner.create_message(request)
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use loopctl::testing::MockApiClient;
@@ -244,6 +313,7 @@ mod tests {
 
     use crate::github::PrOverview;
     use crate::tools::fake_gateway::FakeGateway;
+    use test_support::FlakyClient;
 
     fn overview() -> PrOverview {
         PrOverview {
@@ -389,6 +459,37 @@ diff --git a/src/lib.rs b/src/lib.rs
         );
         assert_eq!(response_format.name, ReviewSummary::name());
         assert_eq!(response_format.schema, ReviewSummary::schema());
+    }
+
+    #[test]
+    fn the_production_managers_carry_a_real_retry_ladder() {
+        use loopctl::managers::StreamCapable as _;
+        let managers = production_managers();
+        let handler = managers.stream_handler();
+        assert_eq!(
+            handler.rate_limit_config().max_retries,
+            5,
+            "rate limits back off and retry instead of failing the run"
+        );
+        assert_eq!(handler.retry_config().max_retries, 3);
+        assert!(handler.rate_limit_config().respect_retry_after);
+    }
+
+    #[tokio::test]
+    async fn a_transient_stream_failure_is_retried_by_the_production_ladder()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let inner = MockApiClient::new("review-model").with_responses(vec![
+            tool_call("call_1", "record_findings", json!({ "findings": [] })),
+            text_response("Batch complete."),
+        ]);
+        let client = Arc::new(FlakyClient::new(inner, 1));
+        let runner = runner(client, ReviewSettings::default(), None)?;
+        let findings = runner.review_batch(&["src/lib.rs".to_owned()]).await?;
+        assert!(
+            findings.findings.is_empty(),
+            "the batch must complete after the ladder absorbs the transient failure"
+        );
+        Ok(())
     }
 
     #[test]

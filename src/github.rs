@@ -231,19 +231,27 @@ fn issue_comment_route(owner: &str, repo: &str, comment_id: u64) -> String {
     format!("/repos/{owner}/{repo}/issues/comments/{comment_id}")
 }
 
+fn bot_normalized(login: &str) -> &str {
+    login.strip_suffix("[bot]").unwrap_or(login)
+}
+
 pub(crate) fn own_marker_comment_id(
     comments: &[ExistingIssueComment],
     own_login: &str,
     marker: &str,
 ) -> Option<u64> {
+    let own_login = bot_normalized(own_login);
     comments
         .iter()
-        .filter(|comment| comment.author == own_login && comment.body.contains(marker))
+        .filter(|comment| {
+            bot_normalized(&comment.author) == own_login && comment.body.contains(marker)
+        })
         .map(|comment| comment.id)
         .next_back()
 }
 
 fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<ReviewThread>, Option<String>) {
+    let own_login = bot_normalized(own_login);
     let Some(threads) = wire
         .repository
         .and_then(|repository| repository.pull_request)
@@ -262,7 +270,7 @@ fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<ReviewThread>, O
         .filter_map(|thread| {
             let comment = thread.comments?.nodes.into_iter().next()?;
             let login = comment.author.map(|author| author.login)?;
-            if login != own_login {
+            if bot_normalized(&login) != own_login {
                 return None;
             }
             Some(ReviewThread {
@@ -944,7 +952,7 @@ mod tests {
                     "isResolved": false,
                     "comments": { "nodes": [ {
                         "databaseId": 501,
-                        "author": { "login": "difftrace[bot]" },
+                        "author": { "login": "difftrace" },
                         "path": "src/a.rs", "line": 2, "originalLine": 2
                     } ] }
                 },
@@ -953,7 +961,7 @@ mod tests {
                     "isResolved": true,
                     "comments": { "nodes": [ {
                         "databaseId": 502,
-                        "author": { "login": "difftrace[bot]" },
+                        "author": { "login": "difftrace" },
                         "path": "src/a.rs", "line": 5, "originalLine": 5
                     } ] }
                 },
@@ -971,7 +979,7 @@ mod tests {
                     "isResolved": false,
                     "comments": { "nodes": [ {
                         "databaseId": 504,
-                        "author": { "login": "difftrace[bot]" },
+                        "author": { "login": "difftrace" },
                         "path": "src/c.rs", "line": null, "originalLine": 30
                     } ] }
                 }
@@ -1140,6 +1148,16 @@ mod tests {
             own_marker_comment_id(&comments, "difftrace[bot]", "<!-- other:marker -->"),
             None,
             "a comment without the marker never matches"
+        );
+        let unsuffixed = vec![ExistingIssueComment {
+            id: 7,
+            body: "<!-- difftrace:verdict -->\ngraphql shape".to_owned(),
+            author: "difftrace".to_owned(),
+        }];
+        assert_eq!(
+            own_marker_comment_id(&unsuffixed, "difftrace[bot]", "<!-- difftrace:verdict -->"),
+            Some(7),
+            "a bot-suffixed login matches its unsuffixed author form"
         );
     }
 

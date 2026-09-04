@@ -185,10 +185,11 @@ async fn answer<C: loopctl::api::ApiClient + 'static>(
         inputs.overview.head_sha.clone(),
     ));
     let registry = scope.chat_registry();
-    let mut agent = BareLoop::new(
+    let mut agent = BareLoop::new_with_managers(
         Arc::clone(inputs.client),
         registry,
         loopctl::config::SessionConfig::default(),
+        crate::review::runner::production_managers(),
     );
     agent.add_contributor(Box::new(ReplyRubric::new(inputs.overview)));
     agent.register_observer(Arc::new(match inputs.trajectory_dir {
@@ -486,6 +487,42 @@ mod tests {
             .ok_or("expected the budget exhaustion to fail")?;
         assert!(err.to_string().contains("turn budget"));
         assert!(fake.posted_replies().is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_transient_stream_failure_is_retried_in_the_reply_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let inner = MockApiClient::new("review-model").with_responses(vec![text_response(
+            "Because the guard is dropped before the read completes.",
+        )]);
+        let client = Arc::new(crate::review::runner::test_support::FlakyClient::new(
+            inner, 1,
+        ));
+        let gateway = Arc::new(
+            FakeGateway::empty()
+                .with_review_comment(review_comment(7, None, "bobrykov"))
+                .with_permission("bobrykov", "write"),
+        );
+        let fake = std::sync::Arc::clone(&gateway);
+        let settings = ReviewSettings::default();
+        let overview = overview();
+        let inputs = ReplyInputs {
+            client: &client,
+            gateway: gateway_as_trait(gateway),
+            index: Arc::new(DiffIndex::empty()),
+            overview: &overview,
+            settings: &settings,
+            trajectory_dir: None,
+            pr: 42,
+        };
+        let outcome = run_reply(inputs, ReplyTarget::ReviewComment { id: 7 }).await?;
+        assert!(!outcome.refused);
+        assert_eq!(
+            fake.posted_replies().len(),
+            1,
+            "the reply lands after the ladder absorbs the transient failure"
+        );
         Ok(())
     }
 }

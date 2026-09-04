@@ -10,7 +10,7 @@ use crate::tools::submit::DroppedFinding;
 const FIX_DIRECTIVES: &str = "Read the surrounding code first, apply a minimal focused fix, and cover the behavior change with a test.";
 const ALL_DIRECTIVES: &str = "Read the surrounding code before each fix, keep each change minimal and focused, and cover behavior changes with tests.";
 
-pub(crate) const REVIEW_POINTER_BODY: &str = "🤖 difftrace review — the verdict, summary, and fix prompts live in the difftrace comment on this pull request.";
+pub(crate) const REVIEW_POINTER_BODY: &str = "Summary, risks, test notes, and the fix-all prompt live in the difftrace comment on this pull request.";
 
 pub(crate) fn re_raised_reply_body(comment_body: &str, head_sha: &str) -> String {
     format!("{comment_body}\n\n*Re-raised in the review of commit `{head_sha}`.*")
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn the_pointer_body_is_one_stable_line() {
         assert_eq!(REVIEW_POINTER_BODY.lines().count(), 1);
-        assert!(REVIEW_POINTER_BODY.contains("verdict"));
+        assert!(REVIEW_POINTER_BODY.contains("Summary"));
         assert!(REVIEW_POINTER_BODY.contains("difftrace comment"));
         assert!(
             !REVIEW_POINTER_BODY.contains('\n'),

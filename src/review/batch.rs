@@ -102,6 +102,13 @@ fn verdict_comment_body(outcome: &ReviewOutcome) -> String {
     )
 }
 
+fn review_body(outcome: &ReviewOutcome) -> String {
+    format!(
+        "{}\n\n{REVIEW_POINTER_BODY}",
+        verdict_section(&outcome.findings)
+    )
+}
+
 fn split_replies(
     threads: &[ReviewThread],
     comments: Vec<CommentPosition>,
@@ -252,7 +259,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
             event: review_event(&outcome.findings),
-            summary: REVIEW_POINTER_BODY.to_owned(),
+            summary: review_body(&outcome),
             comments: positions,
         };
         self.submit(submission).await?;
@@ -935,16 +942,29 @@ diff --git a/src/beta.rs b/src/beta.rs
     }
 
     #[tokio::test]
-    async fn the_posted_review_body_is_the_pointer_not_the_verdict()
+    async fn the_posted_review_body_carries_the_verdict_and_points_at_the_comment()
     -> Result<(), Box<dyn std::error::Error>> {
         let gateway = Arc::new(FakeGateway::empty());
         let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
         runner.review_all(false).await?;
         let submission = gateway.submitted().ok_or("expected a submission")?;
-        assert_eq!(submission.summary, REVIEW_POINTER_BODY);
         assert!(
-            !submission.summary.contains("## Verdict"),
-            "the verdict lives in the comment, not the review body"
+            submission.summary.starts_with("## Verdict"),
+            "the round's verdict leads the review body — the newest timeline item"
+        );
+        assert!(
+            submission
+                .summary
+                .contains("🔴 Not good to go — 2 blocking findings:"),
+            "the blockers are visible in the review body"
+        );
+        assert!(
+            submission.summary.contains(REVIEW_POINTER_BODY),
+            "the body points at the single summary comment"
+        );
+        assert!(
+            !submission.summary.contains("## Summary"),
+            "the full summary stays in the comment, not the review body"
         );
         let verdict = gateway
             .posted_comments()
@@ -973,7 +993,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             .ok_or("expected a submission to reach the gateway")?;
         assert_eq!(submission.head_sha, "headsha");
         assert_eq!(submission.comments, dry.comments);
-        assert_eq!(submission.summary, REVIEW_POINTER_BODY);
+        assert_eq!(submission.summary, review_body(&dry));
         let verdict = post_gateway
             .posted_comments()
             .first()
