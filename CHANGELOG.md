@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-05
+
+### Added
+
+- A reference consumer workflow: `examples/difftrace-review.yml` is now
+  the canonical `GitHub` Actions file for running difftrace on a
+  repository — the consumer copies in the loopctl and dch repos are
+  regenerated from it verbatim on every pin bump, converging drift that
+  had grown between the two. It carries the union of their hardening: commit-SHA-pinned
+  third-party actions, a scoped app token, first-line-only mention
+  matching (quoted mentions never fire), per-repo collaborator
+  authorization in a separate gate job, hidden-file trajectory upload,
+  and split concurrency groups so a comment command can no longer
+  cancel an in-flight review (`difftrace-review-*` cancels on new
+  pushes; `difftrace-chat-*` serializes). README documents it as the
+  copy-verbatim source with the release pin-bump procedure.
+
+- Transient provider failures now back off and retry instead of failing
+  the run: the review and reply agent loops carry loopctl's production
+  `StreamHandler` (three transport retries with jittered backoff; five
+  rate-limit retries honoring the server's `Retry-After`), replacing the
+  zero-retry passthrough handler the engine defaults to — the failure
+  mode where a provider 429 killed a run in under a second ("stream
+  failed: rate limit, 0 events processed"). The summary pass remains
+  fail-fast (one direct request per run; model fallback and budget
+  integration are the cascade task's scope). Pinned at both call sites
+  by behavioral tests over a fail-first client wrapper —
+  `a_transient_stream_failure_is_retried_by_the_production_ladder` and
+  `a_transient_stream_failure_is_retried_in_the_reply_path` — each of
+  which fails if its loop is reverted to the engine's zero-retry
+  default construction, alongside the config-shape pin
+  `the_production_managers_carry_a_real_retry_ladder`.
+
+### Changed
+
+- Each review's body now carries that round's verdict — the event-colored
+  blocker list — plus a pointer line, so the newest timeline item always
+  shows the round's decision; the single marker comment keeps the full
+  summary, risks, tests, and fix-all prompt, edited in place (the
+  pointer-only body put the summary below the pointer in the
+  conversation and wasted the most prominent per-round surface). Pinned
+  by `the_posted_review_body_carries_the_verdict_and_points_at_the_comment`.
+
+### Fixed
+
+- Own-thread and marker-comment matching tolerates GitHub's bot-login
+  inconsistency: the GraphQL `viewer` for an app token reports
+  `name[bot]`, while GraphQL thread-comment authors (and some REST
+  surfaces) report the unsuffixed `name` — strict comparison matched
+  zero threads, so the first 0.3.1 run logged `replied=0, resolved=0`
+  despite a successful listing. Both comparisons now normalize away a
+  trailing `[bot]`. Pinned by the rewired wire fixtures (authors in
+  the unsuffixed GraphQL form) and the marker-finder suffix case.
+
 ## [0.3.1] - 2026-09-05
 
 ### Fixed
