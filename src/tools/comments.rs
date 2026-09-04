@@ -102,6 +102,7 @@ mod tests {
             side: Some(crate::github::Side::Left),
             body: "Too early.".to_owned(),
             author: "dana".to_owned(),
+            in_reply_to: None,
         }]);
         let scope = ReviewScope::new(
             Arc::new(gateway.clone()),

@@ -25,7 +25,7 @@ pub struct ReviewRubric {
     frame: String,
 }
 
-fn render_frame(overview: &PrOverview) -> String {
+pub(crate) fn render_frame(overview: &PrOverview) -> String {
     let description = overview
         .description
         .as_deref()

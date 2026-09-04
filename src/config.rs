@@ -36,6 +36,7 @@ pub struct ReviewSettings {
     pub max_findings_per_file: usize,
     pub batch_files: usize,
     pub max_turns: usize,
+    pub reply_max_turns: usize,
 }
 
 impl Default for ReviewSettings {
@@ -44,6 +45,7 @@ impl Default for ReviewSettings {
             max_findings_per_file: 5,
             batch_files: 4,
             max_turns: 16,
+            reply_max_turns: 8,
         }
     }
 }

@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.2] - 2026-09-04
+## [0.2.1] - 2026-09-04
+
+### Added
+
+- Comment commands: `difftrace reply --repo o/r --pr N (--issue-comment
+  ID | --review-comment ID)` answers a question asked in a comment —
+  inline in the same review thread when asked under a finding, as a
+  top-level PR comment @mentioning the asker for conversation
+  questions. Authorization lives in the binary: collaborators
+  (admin/write) and the PR author may invoke; anyone else gets a
+  one-line refusal posted the same way. The reply run is one agent
+  loop with the finding, its file's diff section, and head content as
+  context (a `ReplyRubric` contributor re-emits the chat rules each
+  turn), bounded by the new `review.reply_max_turns` setting (default
+  8), trajectory captured like every run. `@difftrace re-review` needs
+  no binary path — consumer workflows' new `chat` job parses the verb
+  and re-runs the review. `PrGateway` gains the comment surface
+  (fetch issue/review comment, collaborator permission, thread reply,
+  top-level comment). Pinned by the reply suite (in-thread vs
+  top-level targeting, refusal, PR-author authorization, turn-budget
+  exhaustion) and the CLI parse tests (exactly one comment kind).
 
 ### Fixed
 
@@ -17,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `source()` levels down and never reached the log. Pinned by the
   error-chain unit test.
 
-## [0.1.1] - 2026-09-04
+## [0.2.0] - 2026-09-04
 
 ### Added
 

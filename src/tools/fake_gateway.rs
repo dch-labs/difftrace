@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use crate::error::DifftraceError;
 use crate::github::ExistingComment;
+use crate::github::ExistingIssueComment;
 use crate::github::PrGateway;
 use crate::github::PrOverview;
 use crate::github::ReviewSubmission;
@@ -29,6 +30,11 @@ struct Inner {
     requested_comment_lists: Mutex<Vec<u64>>,
     threads: Mutex<Vec<ReviewThread>>,
     resolved: Mutex<Vec<String>>,
+    issue_comment: Mutex<Option<ExistingIssueComment>>,
+    review_comments: Mutex<Vec<ExistingComment>>,
+    permissions: Mutex<Vec<(String, String)>>,
+    posted_replies: Mutex<Vec<(u64, String)>>,
+    posted_comments: Mutex<Vec<(u64, String)>>,
 }
 
 impl FakeGateway {
@@ -75,6 +81,33 @@ impl FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = threads;
         gateway
+    }
+
+    pub(crate) fn with_issue_comment(self, comment: ExistingIssueComment) -> Self {
+        *self
+            .inner
+            .issue_comment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(comment);
+        self
+    }
+
+    pub(crate) fn with_review_comment(self, comment: ExistingComment) -> Self {
+        self.inner
+            .review_comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(comment);
+        self
+    }
+
+    pub(crate) fn with_permission(self, user: &str, permission: &str) -> Self {
+        self.inner
+            .permissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((user.to_owned(), permission.to_owned()));
+        self
     }
 
     pub(crate) fn requested_prs(&self) -> Vec<u64> {
@@ -128,6 +161,22 @@ impl FakeGateway {
     pub(crate) fn resolved_threads(&self) -> Vec<String> {
         self.inner
             .resolved
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn posted_replies(&self) -> Vec<(u64, String)> {
+        self.inner
+            .posted_replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn posted_comments(&self) -> Vec<(u64, String)> {
+        self.inner
+            .posted_comments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -281,6 +330,81 @@ impl PrGateway for FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(thread_id);
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn fetch_issue_comment(
+        &self,
+        comment_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<ExistingIssueComment, DifftraceError>> + Send + '_>>
+    {
+        let comment = self
+            .inner
+            .issue_comment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(
+            async move { comment.ok_or_else(|| missing(&format!("issue comment {comment_id}"))) },
+        )
+    }
+
+    fn fetch_review_comment(
+        &self,
+        comment_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<ExistingComment, DifftraceError>> + Send + '_>> {
+        let comment = self
+            .inner
+            .review_comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|comment| comment.id == comment_id)
+            .cloned();
+        Box::pin(
+            async move { comment.ok_or_else(|| missing(&format!("review comment {comment_id}"))) },
+        )
+    }
+
+    fn commenter_permission(
+        &self,
+        user: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>> {
+        let permission = self
+            .inner
+            .permissions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find(|(name, _)| *name == user)
+            .map_or_else(|| "read".to_owned(), |(_, permission)| permission.clone());
+        Box::pin(async move { Ok(permission) })
+    }
+
+    fn reply_to_review_comment(
+        &self,
+        _pr: u64,
+        comment_id: u64,
+        body: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        self.inner
+            .posted_replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((comment_id, body));
+        Box::pin(async move { Ok(()) })
+    }
+
+    fn post_pr_comment(
+        &self,
+        pr: u64,
+        body: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        self.inner
+            .posted_comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((pr, body));
         Box::pin(async move { Ok(()) })
     }
 }

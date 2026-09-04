@@ -93,6 +93,7 @@ pub struct ExistingComment {
     pub side: Option<Side>,
     pub body: String,
     pub author: String,
+    pub in_reply_to: Option<u64>,
 }
 
 impl From<octocrab::models::pulls::Comment> for ExistingComment {
@@ -104,6 +105,24 @@ impl From<octocrab::models::pulls::Comment> for ExistingComment {
             side: comment.side.as_deref().and_then(Side::from_wire),
             body: comment.body,
             author: comment.user.map(|user| user.login).unwrap_or_default(),
+            in_reply_to: comment.in_reply_to_id.map(|id| *id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingIssueComment {
+    pub id: u64,
+    pub body: String,
+    pub author: String,
+}
+
+impl From<octocrab::models::issues::Comment> for ExistingIssueComment {
+    fn from(comment: octocrab::models::issues::Comment) -> Self {
+        Self {
+            id: *comment.id,
+            body: comment.body.unwrap_or_default(),
+            author: comment.user.login,
         }
     }
 }
@@ -114,6 +133,12 @@ pub struct ReviewThread {
     pub path: String,
     pub line: Option<u64>,
     pub original_line: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct PermissionWire {
+    #[serde(default)]
+    permission: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -257,6 +282,34 @@ pub trait PrGateway: Send + Sync {
     fn resolve_thread(
         &self,
         thread_id: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
+
+    fn fetch_issue_comment(
+        &self,
+        comment_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<ExistingIssueComment, DifftraceError>> + Send + '_>>;
+
+    fn fetch_review_comment(
+        &self,
+        comment_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<ExistingComment, DifftraceError>> + Send + '_>>;
+
+    fn commenter_permission(
+        &self,
+        user: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>>;
+
+    fn reply_to_review_comment(
+        &self,
+        pr: u64,
+        comment_id: u64,
+        body: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
+
+    fn post_pr_comment(
+        &self,
+        pr: u64,
+        body: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
 }
 
@@ -482,6 +535,93 @@ impl PrGateway for GitHubClient {
             let _: serde_json::Value = self
                 .crab
                 .graphql(&payload)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(())
+        })
+    }
+
+    fn fetch_issue_comment(
+        &self,
+        comment_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<ExistingIssueComment, DifftraceError>> + Send + '_>>
+    {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let comment = self
+                .crab
+                .issues(owner.as_str(), repo.as_str())
+                .get_comment(comment_id.into())
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(ExistingIssueComment::from(comment))
+        })
+    }
+
+    fn fetch_review_comment(
+        &self,
+        comment_id: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<ExistingComment, DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let route = format!("/repos/{owner}/{repo}/pulls/comments/{comment_id}");
+            let comment: octocrab::models::pulls::Comment = self
+                .crab
+                .get(route, None::<&()>)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(ExistingComment::from(comment))
+        })
+    }
+
+    fn commenter_permission(
+        &self,
+        user: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let route = format!("/repos/{owner}/{repo}/collaborators/{user}/permission");
+            let permission: PermissionWire = self
+                .crab
+                .get(route, None::<&()>)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(permission.permission)
+        })
+    }
+
+    fn reply_to_review_comment(
+        &self,
+        pr: u64,
+        comment_id: u64,
+        body: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            self.crab
+                .pulls(owner.as_str(), repo.as_str())
+                .reply_to_comment(pr, comment_id.into(), body)
+                .await
+                .map_err(Self::map_github_error)?;
+            Ok(())
+        })
+    }
+
+    fn post_pr_comment(
+        &self,
+        pr: u64,
+        body: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>> {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            self.crab
+                .issues(owner.as_str(), repo.as_str())
+                .create_comment(pr, body)
                 .await
                 .map_err(Self::map_github_error)?;
             Ok(())

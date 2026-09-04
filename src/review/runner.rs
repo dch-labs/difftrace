@@ -27,7 +27,7 @@ use crate::review::logging::LoggingObserver;
 use crate::review::rubric::ReviewRubric;
 use crate::tools::ReviewScope;
 
-const TOOL_OUTPUT_MAX_CHARS: usize = 16 * 1024;
+pub(crate) const TOOL_OUTPUT_MAX_CHARS: usize = 16 * 1024;
 
 const SUMMARY_SYSTEM: &str = "\
 You are writing the summary of a completed code review. Given every finding
@@ -83,6 +83,26 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
 
     pub(crate) fn pr(&self) -> u64 {
         self.scope.pr
+    }
+
+    pub(crate) fn client(&self) -> &Arc<C> {
+        &self.client
+    }
+
+    pub(crate) fn gateway(&self) -> Arc<dyn PrGateway> {
+        Arc::clone(&self.scope.gateway)
+    }
+
+    pub(crate) fn index_arc(&self) -> Arc<DiffIndex> {
+        Arc::clone(&self.scope.index)
+    }
+
+    pub(crate) fn overview_ref(&self) -> &PrOverview {
+        &self.overview
+    }
+
+    pub(crate) fn trajectory_dir_ref(&self) -> Option<&PathBuf> {
+        self.trajectory_dir.as_ref()
     }
 
     pub(crate) fn settings(&self) -> &ReviewSettings {

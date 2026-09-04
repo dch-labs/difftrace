@@ -42,6 +42,14 @@ in a GitHub Action). `DIFFTRACE_MODEL` overrides `provider.model` the
 same way; an empty value counts as unset, and without either the
 provider's default model applies (zai: `glm-4.7`).
 
+Comments starting with `@difftrace` or `/difftrace` trigger commands
+in repos whose workflows listen for them: `re-review` re-runs the full
+review, and anything else asks a question — under a finding, the
+answer lands in that thread; on the PR conversation, it lands as a
+comment mentioning the asker. Collaborators and the PR author may
+invoke; others get a refusal. Chat answers are bounded by
+`review.reply_max_turns` (default 8).
+
 Progress goes to stderr; the rendered review (dry run) and the posting
 receipt go to stdout. Exit status is non-zero only on error — a review
 full of findings still exits `0`.

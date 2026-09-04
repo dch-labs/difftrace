@@ -1,5 +1,7 @@
-//! The command line: `difftrace review --repo owner/repo --pr N`.
+//! The command line: `difftrace review` posts a review, `difftrace
+//! reply` answers a question asked in a comment.
 
+use clap::ArgGroup;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
@@ -9,6 +11,7 @@ use crate::github::RepoRef;
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Review(ReviewArgs),
+    Reply(ReplyArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -32,6 +35,36 @@ pub struct ReviewArgs {
 
     #[arg(long, help = "Render the review to stdout instead of posting it")]
     pub dry_run: bool,
+
+    #[arg(
+        long,
+        help = "Path to a config file (default: ~/.difftrace/config.toml)"
+    )]
+    pub config: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("comment").required(true)))]
+pub struct ReplyArgs {
+    #[arg(long, help = "Repository as owner/repo")]
+    pub repo: String,
+
+    #[arg(long, help = "Pull request number")]
+    pub pr: u64,
+
+    #[arg(
+        long,
+        group = "comment",
+        help = "Answer this conversation comment by id"
+    )]
+    pub issue_comment: Option<u64>,
+
+    #[arg(
+        long,
+        group = "comment",
+        help = "Answer this review-thread comment by id"
+    )]
+    pub review_comment: Option<u64>,
 
     #[arg(
         long,
@@ -69,12 +102,56 @@ mod tests {
             "--dry-run",
         ])
         .map_err(|err| err.to_string())?;
-        let Command::Review(args) = cli.command;
+        let Command::Review(args) = cli.command else {
+            return Err("expected the review subcommand".into());
+        };
         assert_eq!(args.repo, "dch-labs/difftrace");
         assert_eq!(args.pr, 42);
         assert!(args.dry_run);
         assert_eq!(args.config, None);
         Ok(())
+    }
+
+    #[test]
+    fn the_reply_command_parses_exactly_one_comment_kind() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cli = Cli::try_parse_from([
+            "difftrace",
+            "reply",
+            "--repo",
+            "dch-labs/difftrace",
+            "--pr",
+            "42",
+            "--review-comment",
+            "7",
+        ])
+        .map_err(|err| err.to_string())?;
+        let Command::Reply(args) = cli.command else {
+            return Err("expected the reply subcommand".into());
+        };
+        assert_eq!(args.review_comment, Some(7));
+        assert_eq!(args.issue_comment, None);
+        Ok(())
+    }
+
+    #[test]
+    fn the_reply_command_rejects_both_and_neither_comment_kind() {
+        assert!(
+            Cli::try_parse_from([
+                "difftrace",
+                "reply",
+                "--repo",
+                "a/b",
+                "--pr",
+                "1",
+                "--issue-comment",
+                "2",
+                "--review-comment",
+                "3"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["difftrace", "reply", "--repo", "a/b", "--pr", "1"]).is_err());
     }
 
     #[test]

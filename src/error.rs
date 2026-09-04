@@ -30,6 +30,8 @@ pub enum DifftraceError {
     GitHubInit { source: octocrab::Error },
     #[error("GitHub API call failed: {source}")]
     GitHubApi { source: octocrab::Error },
+    #[error("reply failed: {message}")]
+    Reply { message: String },
     #[error("{path} is a directory or empty entry, not a readable file")]
     NotAFile { path: String },
     #[error("cannot decode content of {path}: {source}")]

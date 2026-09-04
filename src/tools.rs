@@ -82,6 +82,21 @@ impl ReviewScope {
         registry.register(submit::SubmitReviewTool::new(scope, max_findings_per_file));
         registry
     }
+
+    #[must_use]
+    pub fn chat_registry(&self) -> ToolRegistry {
+        let scope = Arc::new(Self {
+            gateway: Arc::clone(&self.gateway),
+            index: Arc::clone(&self.index),
+            pr: self.pr,
+            head_sha: self.head_sha.clone(),
+        });
+        let mut registry = ToolRegistry::new();
+        registry.register(overview::OverviewTool::new(Arc::clone(&scope)));
+        registry.register(file_diff::FileDiffTool::new(Arc::clone(&scope)));
+        registry.register(read_file::ReadFileTool::new(scope));
+        registry
+    }
 }
 
 #[cfg(test)]
