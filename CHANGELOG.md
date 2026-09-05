@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-05
+
+### Changed
+
+- Each review round's body now leads with a stat line ("🤖 difftrace
+  reviewed `abc1234` — 4 findings this round; fix prompts below.";
+  clean rounds read "clean round, nothing to fix") and carries **that
+  round's** fix-all prompt — the copy-all block moves off the standing
+  comment, which becomes a cross-round issue registry. Pinned by
+  `the_round_body_is_a_stat_line_with_the_rounds_fix_all` and the
+  round-body integration asserts.
+- The standing comment is a registry of every issue difftrace has ever
+  raised on the pull request: a hidden JSON state block inside the
+  marker comment is merged every run (open issues carry across rounds;
+  threads that no longer match close as `fixed in round N (sha)`;
+  threads resolved outside difftrace record `manually resolved`;
+  unanchored findings join marked unanchored), the Verdict lists all
+  unresolved issues blockers-first with severity and effort badges,
+  and fixed issues render in a bottom "✅ Issue history" section
+  ordered by fix time. PRs with pre-existing difftrace threads
+  bootstrap the registry once from their own comment headers. Pinned
+  by the registry merge suite, the bootstrap parser pins, and
+  `two_rounds_leave_a_registry_with_open_and_fixed_issues`.
+
 ## [0.3.3] - 2026-09-05
 
 ### Changed
