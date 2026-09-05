@@ -321,7 +321,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             .filter(|thread| !thread.resolved)
             .cloned()
             .collect();
-        let registry = self.load_registry(&open_threads).await;
+        let registry = self.load_registry(&open_threads).await?;
         let split = split_replies(&open_threads, outcome.comments.clone(), self.head_sha());
         let dropped: Vec<(Finding, &str)> = outcome
             .dropped
@@ -341,19 +341,20 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             outcome.pr,
             &outcome.head_sha,
         );
-        outcome.round_body = review_round_body(
-            &outcome.head_sha,
-            outcome.findings.len(),
-            outcome.findings.is_empty() && outcome.dropped.is_empty(),
-            &fix_all,
-        );
+        let raised = outcome.findings.len().saturating_add(outcome.dropped.len());
+        outcome.round_body = review_round_body(&outcome.head_sha, raised, raised == 0, &fix_all);
         outcome.standing_body = standing_render(&outcome, &registry);
+        let event = if registry.has_unresolved_blockers() {
+            ReviewEvent::ChangesRequested
+        } else {
+            ReviewEvent::Approved
+        };
         if dry_run {
             return Ok(outcome);
         }
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
-            event: review_event(&outcome.findings),
+            event,
             summary: outcome.round_body.clone(),
             comments: split.positions,
         };
@@ -381,32 +382,31 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         Ok(outcome)
     }
 
-    async fn load_registry(&self, open_threads: &[ReviewThread]) -> Registry {
-        let existing = match self
+    async fn load_registry(
+        &self,
+        open_threads: &[ReviewThread],
+    ) -> Result<Registry, DifftraceError> {
+        let marker = self
             .gateway()
             .find_own_marker_comment(self.pr(), VERDICT_MARKER.to_owned())
             .await
-        {
-            Ok(Some(comment_id)) => self
-                .gateway()
-                .fetch_issue_comment(comment_id)
-                .await
-                .ok()
-                .map(|comment| comment.body),
-            Ok(None) => None,
-            Err(err) => {
+            .inspect_err(|err| {
                 tracing::warn!(
                     target: "difftrace::review",
-                    error = %crate::error::error_chain(&err),
-                    "could not read the previous verdict comment; the registry bootstraps fresh"
+                    error = %crate::error::error_chain(err),
+                    "could not look up the verdict comment; failing before any write"
                 );
-                None
+            })?;
+        match marker {
+            Some(comment_id) => {
+                let comment = self.gateway().fetch_issue_comment(comment_id).await?;
+                if let Some(registry) = extract_registry(&comment.body) {
+                    return Ok(registry);
+                }
+                Ok(self.bootstrap_registry(open_threads).await)
             }
-        };
-        if let Some(registry) = existing.as_deref().and_then(extract_registry) {
-            return registry;
+            None => Ok(self.bootstrap_registry(open_threads).await),
         }
-        self.bootstrap_registry(open_threads).await
     }
 
     async fn bootstrap_registry(&self, open_threads: &[ReviewThread]) -> Registry {
@@ -449,16 +449,15 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                 resolved_sha: None,
             });
         }
-        if let Some(first) = issues.first() {
-            let _ = first;
+        if issues.is_empty() {
+            Registry { round: 0, issues }
+        } else {
             tracing::info!(
                 target: "difftrace::review",
                 issues = issues.len(),
                 "registry bootstrapped from existing threads"
             );
             Registry { round: 1, issues }
-        } else {
-            Registry { round: 0, issues }
         }
     }
 
@@ -636,7 +635,14 @@ diff --git a/src/beta.rs b/src/beta.rs
                 json!({
                     "findings": [
                         finding_json("src/beta.rs", 11),
-                        finding_json("src/beta.rs", 999)
+                        json!({
+                            "file": "src/beta.rs",
+                            "line": 999,
+                            "severity": "warning",
+                            "complexity": 3,
+                            "title": "Second issue",
+                            "body": "Body"
+                        })
                     ]
                 }),
             ),
@@ -1026,7 +1032,7 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert!(standing.contains("`src/alpha.rs:2` — ⚠️ Title (🟡)"));
         assert!(standing.contains("`src/beta.rs:11` — ⚠️ Title (🟡)"));
         assert!(
-            standing.contains("`src/beta.rs` (unanchored) — ⚠️ Title"),
+            standing.contains("`src/beta.rs` (unanchored) — ⚠️ Second issue"),
             "the registry lists unanchored issues too, marked as such"
         );
         assert!(standing.contains("## Summary\nTwo files reviewed."));
@@ -1034,13 +1040,13 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert!(standing.contains("## Tests\nCovered by integration tests."));
         assert!(!standing.contains("Fix all findings"));
         let round = &outcome.round_body;
-        assert!(round.starts_with("🤖 difftrace reviewed `headsha` — 2 findings this round"));
+        assert!(round.starts_with("🤖 difftrace reviewed `headsha` — 3 findings this round"));
         assert!(round.contains("## 🤖 Fix all findings"));
         assert!(round.contains("`src/alpha.rs:2` — ⚠️ Title (🟡)"));
         assert!(round.contains("`src/beta.rs:11` — ⚠️ Title (🟡)"));
-        assert!(
-            round.contains("- `src/beta.rs:999` — ⚠️ Title (🟡, line outside the changed hunks)")
-        );
+        assert!(round.contains(
+            "- `src/beta.rs:999` — ⚠️ Second issue (🟡, line outside the changed hunks)"
+        ));
         assert!(round.contains("PR #42"));
         assert!(round.contains("commit headsha"));
         assert!(round.contains("<summary>Copy the fix-all prompt</summary>"));
@@ -1153,7 +1159,14 @@ diff --git a/src/beta.rs b/src/beta.rs
                 json!({
                     "findings": [
                         finding_json("src/alpha.rs", 2),
-                        finding_json("src/alpha.rs", 999)
+                        json!({
+                            "file": "src/alpha.rs",
+                            "line": 999,
+                            "severity": "warning",
+                            "complexity": 3,
+                            "title": "Second issue",
+                            "body": "Body"
+                        })
                     ]
                 }),
             ),
@@ -1179,16 +1192,15 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert!(verdict.contains("## Risks\n\n(none flagged)"));
         assert!(verdict.contains("One finding"));
         assert!(verdict.contains("alpha.rs:999"));
-        let overstatement = "two findings";
         assert!(
-            !verdict.contains(overstatement),
-            "the summary must not count dropped findings"
+            verdict.contains("## Summary\nOne finding: the beta anchor."),
+            "the model-written summary describes only the grounded findings"
         );
         Ok(())
     }
 
     #[tokio::test]
-    async fn the_posted_review_body_is_one_neutral_round_line()
+    async fn the_posted_review_body_is_the_stat_line_with_the_rounds_fix_all()
     -> Result<(), Box<dyn std::error::Error>> {
         let gateway = Arc::new(FakeGateway::empty());
         let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
@@ -1216,6 +1228,53 @@ diff --git a/src/beta.rs b/src/beta.rs
             .ok_or("the verdict comment must be posted")?;
         assert!(verdict.contains("## Verdict"));
         assert!(verdict.starts_with(VERDICT_MARKER));
+        assert!(verdict.contains("<!-- difftrace:registry "));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unanchored_blocking_finding_still_requests_changes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let summary = json!({
+            "summary": "One dropped finding.",
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call(
+                "call_1",
+                "record_findings",
+                json!({
+                    "findings": [
+                        json!({
+                            "file": "src/lib.rs",
+                            "line": 999,
+                            "severity": "critical",
+                            "complexity": 3,
+                            "title": "Out of hunk",
+                            "body": "Body"
+                        })
+                    ]
+                }),
+            ),
+            text_response("Done."),
+            text_response(&summary.to_string()),
+        ]);
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = make_runner(Arc::new(client), Arc::clone(&gateway))?;
+        runner.review_all(false).await?;
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(
+            submission.event,
+            ReviewEvent::ChangesRequested,
+            "the event and the standing verdict share one blocking source: the merged registry"
+        );
+        let verdict = gateway
+            .posted_comments()
+            .first()
+            .map(|(_, body)| body.clone())
+            .ok_or("the verdict comment must be posted")?;
+        assert!(verdict.contains("🔴 Not good to go — 1 blocking finding"));
         Ok(())
     }
 

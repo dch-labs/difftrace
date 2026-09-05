@@ -54,36 +54,36 @@ Progress goes to stderr; the rendered review (dry run) and the posting
 receipt go to stdout. Exit status is non-zero only on error — a review
 full of findings still exits `0`.
 
-Each pull request carries one current difftrace verdict comment —
-marked with a hidden `<!-- difftrace:verdict -->` header, created on
-the first review and edited in place on every re-review, with a
-"Reviewed commit" footer naming the round's head SHA. (Overlapping
+Each pull request carries one standing difftrace comment — marked with
+a hidden `<!-- difftrace:verdict -->` header, created on the first
+review and edited in place on every re-review, with a "Reviewed
+commit" footer naming the round's head SHA. It is a cross-round issue
+registry: every issue difftrace has ever raised on the pull request,
+kept as hidden JSON inside the comment and merged each run. The
+Verdict section lists all unresolved issues, blockers first, each
+with severity and effort badges — good to go exactly when no
+unresolved issue is a warning or critical, and unanchored (dropped)
+issues count as blockers too. Fixed issues close with the round that
+fixed them and render in a bottom "✅ Issue history" section; threads
+resolved outside difftrace record "manually resolved". (Overlapping
 runs on the same PR can create a second marker comment; later runs
-edit the newest.) It leads with
-the verdict: good to go exactly when no grounded finding is a warning
-or critical, with blockers listed by file and line (dropped findings
-never block) and a note pointing at the fix prompts. It is the only
-verdict surface: each round's review submission carries the matching
-`GitHub` review event — requesting changes while blockers exist,
-approving when clean — with a single neutral body line naming the
-reviewed commit, and its inline findings. The verdict comment is
-followed
-by the summary, the risks section
-(always present, "(none flagged)" when empty), and the test-coverage
-note. Each round's review submission carries the matching `GitHub` review
-event — requesting changes while blockers exist, approving when clean
-— with a body leading on a stat line ("🤖 difftrace reviewed `abc1234`
+edit the newest.) The registry is followed by the summary, the risks
+section (always present, "(none flagged)" when empty), and the
+test-coverage note.
+Each round's review submission carries the matching `GitHub` review
+event — requesting changes while unresolved blockers exist, approving
+when clean, one source of truth with the standing verdict — with a
+body leading on a stat line ("🤖 difftrace reviewed `abc1234`
 — 4 findings this round; fix prompts below.") and that round's fix-all
 prompt, plus one inline comment per grounded finding (each headed by a colored
 severity badge plus a fix-complexity badge on a 1–5 color ramp,
 anchored to the head commit) — each with a collapsed "🤖 Fix prompt"
-section whose fenced block has a copy button — and a "Fix all
-findings" section in the body: a readable report plus a copyable
-prompt covering every raised finding, naming the pull request and head
+section whose fenced block has a copy button. The fix-all report
+covers every raised finding, naming the pull request and head
 commit. Findings dropped during grounding — citations outside the
-changed hunks or over the per-file cap — are listed in an HTML-comment
-block and included in the fix-all prompt marked unanchored, so nothing
-is silently discarded.
+changed hunks or over the per-file cap — join the registry marked
+unanchored and appear in the fix-all prompt, so nothing is silently
+discarded.
 
 On a re-review, a finding raised again at the same anchor is posted as
 a reply into its existing thread — each reply naming the commit that

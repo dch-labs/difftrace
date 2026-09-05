@@ -59,6 +59,12 @@ impl Registry {
         open
     }
 
+    pub(crate) fn has_unresolved_blockers(&self) -> bool {
+        self.issues.iter().any(|issue| {
+            issue.status == IssueStatus::Open && crate::review::batch::is_blocking(issue.severity)
+        })
+    }
+
     pub(crate) fn fixed_history(&self) -> Vec<&Issue> {
         let mut done: Vec<&Issue> = self
             .issues
@@ -88,8 +94,8 @@ impl Registry {
                 issue.title.clone_from(&finding.title);
                 issue.severity = finding.severity;
                 issue.complexity = finding.complexity;
-                if issue.thread_id.is_none() {
-                    issue.thread_id = thread_id.map(String::from);
+                if let Some(id) = thread_id {
+                    issue.thread_id = Some(id.to_owned());
                 }
                 if let Some(flag) = seen.get_mut(i) {
                     *flag = true;
@@ -117,7 +123,6 @@ impl Registry {
         for (finding, _reason) in round.dropped {
             if let Some(i) = self.issues.iter().position(|issue| {
                 issue.status == IssueStatus::Open
-                    && !issue.anchored
                     && issue.file == finding.file
                     && issue.title == finding.title
             }) {
@@ -203,7 +208,9 @@ fn grounded_with_threads<'a>(
 }
 
 pub(crate) fn embed_registry(body: &str, registry: &Registry) -> Result<String, String> {
-    let json = serde_json::to_string(registry).map_err(|err| err.to_string())?;
+    let json = serde_json::to_string(registry)
+        .map_err(|err| err.to_string())?
+        .replace('>', "\\u003e");
     let replacement = format!("{REGISTRY_MARKER}{json} -->");
     if let Some(start) = body.find(REGISTRY_MARKER) {
         let tail = body.get(start..).ok_or("registry start out of range")?;
@@ -472,6 +479,102 @@ mod tests {
         assert_eq!(complexity, 3);
         assert_eq!(title, "Lock dropped early");
         assert!(parse_issue_header("plain text without badges").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn the_embedded_registry_survives_arrows_in_titles_and_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = Registry {
+            round: 1,
+            issues: Vec::new(),
+        };
+        registry.issues.push(Issue {
+            title: "map `-->` to `->`".to_owned(),
+            file: "stop --> drop.rs".to_owned(),
+            ..open_issue("src/x.rs", 1, Severity::Nitpick, "T_X")
+        });
+        let body = "<!-- difftrace:verdict -->\n\n## Verdict\n…".to_owned();
+        let embedded = embed_registry(&body, &registry)?;
+        let start = embedded
+            .find(REGISTRY_MARKER)
+            .ok_or("registry block missing")?
+            .saturating_add(REGISTRY_MARKER.len());
+        let line_end = embedded
+            .get(start..)
+            .and_then(|tail| tail.find('\n'))
+            .map(|rel| start.saturating_add(rel))
+            .ok_or("registry block never ends its line")?;
+        let block = embedded.get(start..line_end).ok_or("block out of range")?;
+        let payload = block
+            .strip_suffix(" -->")
+            .ok_or("block must end with the terminator")?;
+        assert!(
+            !payload.contains("-->"),
+            "no '-->' may appear inside the JSON payload: {payload}"
+        );
+        assert_eq!(
+            extract_registry(&embedded).ok_or("registry must survive arrows")?,
+            registry
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_dropped_reflag_keeps_the_anchored_issue_open() -> Result<(), Box<dyn std::error::Error>> {
+        let registry = Registry {
+            round: 1,
+            issues: vec![open_issue("src/alpha.rs", 2, Severity::Warning, "T_A")],
+        };
+        let dropped_finding = Finding {
+            file: "src/alpha.rs".to_owned(),
+            line: 999,
+            severity: Severity::Warning,
+            complexity: 3,
+            title: "Lock dropped early".to_owned(),
+            body: "…".to_owned(),
+        };
+        let merged = registry.merge(&RoundFindings {
+            head_sha: "round2sha",
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[(dropped_finding, "line outside the changed hunks")],
+            threads: &[thread("T_A", false)],
+        });
+        assert_eq!(
+            merged.issues.len(),
+            1,
+            "an out-of-hunk re-flag must not spawn a second issue or flip the anchored one fixed"
+        );
+        let issue = merged.issues.first().ok_or("issue")?;
+        assert_eq!(issue.status, IssueStatus::Open);
+        assert!(issue.anchored);
+        assert_eq!(issue.last_round, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_thread_match_refreshes_the_stale_thread_id() -> Result<(), Box<dyn std::error::Error>> {
+        let mut seed = open_issue("src/alpha.rs", 2, Severity::Warning, "T_OLD_RESOLVED");
+        seed.thread_id = Some("T_OLD_RESOLVED".to_owned());
+        let registry = Registry {
+            round: 1,
+            issues: vec![seed],
+        };
+        let grounded = vec![finding("src/alpha.rs", 2, Severity::Warning)];
+        let finding_threads = vec![Some("T_NEW".to_owned())];
+        let merged = registry.merge(&RoundFindings {
+            head_sha: "round2sha",
+            grounded: &grounded,
+            finding_threads: &finding_threads,
+            dropped: &[],
+            threads: &[],
+        });
+        assert_eq!(
+            merged.issues.first().ok_or("issue")?.thread_id.as_deref(),
+            Some("T_NEW"),
+            "the issue adopts the live thread so a later fix records as fixed, not manually resolved"
+        );
         Ok(())
     }
 
