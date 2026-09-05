@@ -136,6 +136,7 @@ impl From<octocrab::models::issues::Comment> for ExistingIssueComment {
 pub struct ReviewThread {
     pub id: String,
     pub comment_id: u64,
+    pub resolved: bool,
     pub path: String,
     pub line: Option<u64>,
     pub original_line: Option<u64>,
@@ -266,7 +267,6 @@ fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<ReviewThread>, O
     let mapped = threads
         .nodes
         .into_iter()
-        .filter(|thread| !thread.is_resolved)
         .filter_map(|thread| {
             let comment = thread.comments?.nodes.into_iter().next()?;
             let login = comment.author.map(|author| author.login)?;
@@ -276,6 +276,7 @@ fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<ReviewThread>, O
             Some(ReviewThread {
                 id: thread.id,
                 comment_id: comment.database_id,
+                resolved: thread.is_resolved,
                 path: comment.path,
                 line: comment.line,
                 original_line: comment.original_line,
@@ -313,7 +314,7 @@ pub trait PrGateway: Send + Sync {
         submission: ReviewSubmission,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
 
-    fn own_open_threads(
+    fn own_threads(
         &self,
         pr: u64,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ReviewThread>, DifftraceError>> + Send + '_>>;
@@ -544,7 +545,7 @@ impl PrGateway for GitHubClient {
         )
     }
 
-    fn own_open_threads(
+    fn own_threads(
         &self,
         pr: u64,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ReviewThread>, DifftraceError>> + Send + '_>> {
@@ -986,7 +987,16 @@ mod tests {
             ] , "pageInfo": { "hasNextPage": false } } } }
         }))?;
         let (threads, next) = own_threads_page(wire, "difftrace[bot]");
-        assert_eq!(threads.len(), 2);
+        assert_eq!(
+            threads.len(),
+            3,
+            "resolved threads are listed too — the registry needs their state"
+        );
+        assert!(
+            threads
+                .iter()
+                .any(|thread| thread.id == "T_DONE" && thread.resolved)
+        );
         assert!(threads.iter().any(|thread| {
             thread.id == "T_KEEP"
                 && thread.comment_id == 501

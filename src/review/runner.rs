@@ -124,10 +124,10 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             .await
     }
 
-    pub(crate) async fn own_open_threads(
+    pub(crate) async fn own_threads(
         &self,
     ) -> Result<Vec<crate::github::ReviewThread>, DifftraceError> {
-        self.scope.gateway.own_open_threads(self.scope.pr).await
+        self.scope.gateway.own_threads(self.scope.pr).await
     }
 
     pub(crate) async fn resolve_thread(&self, thread_id: String) -> Result<(), DifftraceError> {

@@ -80,6 +80,15 @@ impl FakeGateway {
         gateway
     }
 
+    pub(crate) fn and_comments(self, comments: Vec<ExistingComment>) -> Self {
+        *self
+            .inner
+            .comments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = comments;
+        self
+    }
+
     pub(crate) fn with_threads(threads: Vec<ReviewThread>) -> Self {
         let gateway = Self::empty();
         *gateway
@@ -362,7 +371,7 @@ impl PrGateway for FakeGateway {
         Box::pin(async move { Ok(()) })
     }
 
-    fn own_open_threads(
+    fn own_threads(
         &self,
         _pr: u64,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ReviewThread>, DifftraceError>> + Send + '_>> {
@@ -448,7 +457,16 @@ impl PrGateway for FakeGateway {
             .issue_comment
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .clone()
+            .or_else(|| {
+                self.inner
+                    .issue_comments
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter()
+                    .find(|comment| comment.id == comment_id)
+                    .cloned()
+            });
         Box::pin(
             async move { comment.ok_or_else(|| missing(&format!("issue comment {comment_id}"))) },
         )

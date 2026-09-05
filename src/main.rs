@@ -121,7 +121,10 @@ async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceErro
     );
     let outcome = runner.review_all(args.dry_run).await?;
     if args.dry_run {
-        println!("{}", outcome.render_markdown().trim_end());
+        println!("{}", outcome.round_body.trim_end());
+        println!();
+        println!("--- difftrace comment ---");
+        println!("{}", outcome.standing_body.trim_end());
         eprintln!(
             "difftrace: dry run — {} inline finding(s) would be posted, {} dropped",
             outcome.comments.len(),

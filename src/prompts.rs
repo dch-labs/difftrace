@@ -10,10 +10,27 @@ use crate::tools::submit::DroppedFinding;
 const FIX_DIRECTIVES: &str = "Read the surrounding code first, apply a minimal focused fix, and cover the behavior change with a test.";
 const ALL_DIRECTIVES: &str = "Read the surrounding code before each fix, keep each change minimal and focused, and cover behavior changes with tests.";
 
-pub(crate) fn review_round_body(head_sha: &str) -> String {
-    format!(
-        "difftrace review round at `{head_sha}` — the verdict, summary, and fix-all prompt live in the difftrace comment on this pull request."
-    )
+pub(crate) fn review_round_body(
+    head_sha: &str,
+    findings: usize,
+    clean: bool,
+    fix_all: &str,
+) -> String {
+    let short = crate::review::registry::short_sha(head_sha);
+    let noun = if findings == 1 { "finding" } else { "findings" };
+    let head = if clean {
+        format!("🤖 difftrace reviewed `{short}` — clean round, nothing to fix.")
+    } else {
+        format!(
+            "🤖 difftrace reviewed `{short}` — {findings} {noun} this round; fix prompts below."
+        )
+    };
+    let pointer = "Verdict, summary, and risks: the difftrace comment on this pull request.";
+    if fix_all.is_empty() {
+        format!("{head}\n\n{pointer}")
+    } else {
+        format!("{head}\n\n{pointer}\n\n{fix_all}")
+    }
 }
 
 pub(crate) fn re_raised_reply_body(comment_body: &str, head_sha: &str) -> String {
@@ -215,15 +232,24 @@ mod tests {
     }
 
     #[test]
-    fn the_round_body_is_one_neutral_line_naming_the_commit() {
-        let body = review_round_body("9f3b2c1");
-        assert_eq!(body.lines().count(), 1);
-        assert!(body.contains("difftrace review round at `9f3b2c1`"));
-        assert!(body.contains("difftrace comment"));
+    fn the_round_body_is_a_stat_line_with_the_rounds_fix_all() {
+        let body = review_round_body("9f3b2c1full", 4, false, "## 🤖 Fix all findings\n…");
+        assert!(body.starts_with(
+            "🤖 difftrace reviewed `9f3b2c1` — 4 findings this round; fix prompts below."
+        ));
         assert!(
-            !body.contains("## Verdict") && !body.contains("## Summary"),
-            "the review body must carry neither verdict nor summary sections"
+            body.contains(
+                "Verdict, summary, and risks: the difftrace comment on this pull request."
+            )
         );
+        assert!(body.contains("## 🤖 Fix all findings"));
+        let clean = review_round_body("9f3b2c1full", 0, true, "");
+        assert!(
+            clean.starts_with("🤖 difftrace reviewed `9f3b2c1` — clean round, nothing to fix.")
+        );
+        assert!(!clean.contains("Fix all findings"));
+        let single = review_round_body("9f3b2c1full", 1, false, "x");
+        assert!(single.contains("— 1 finding this round"));
     }
 
     #[test]

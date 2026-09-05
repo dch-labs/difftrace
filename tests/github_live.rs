@@ -50,7 +50,7 @@ async fn live_pr_overview_and_diff_fetch() -> Result<(), Box<dyn std::error::Err
 }
 
 #[tokio::test]
-async fn live_own_open_threads_lists_under_the_token() -> Result<(), Box<dyn std::error::Error>> {
+async fn live_own_threads_lists_under_the_token() -> Result<(), Box<dyn std::error::Error>> {
     let Some((token, repo, pr)) = live_ready() else {
         return Ok(());
     };
@@ -65,7 +65,7 @@ async fn live_own_open_threads_lists_under_the_token() -> Result<(), Box<dyn std
         },
         None,
     )?;
-    let threads = client.own_open_threads(pr).await?;
+    let threads = client.own_threads(pr).await?;
     assert!(
         threads.iter().all(|thread| !thread.id.is_empty()),
         "every listed thread carries its GraphQL id"

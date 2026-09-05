@@ -7,6 +7,7 @@
 pub mod batch;
 pub mod logging;
 pub mod record;
+pub mod registry;
 pub mod reply;
 pub mod rubric;
 pub mod runner;

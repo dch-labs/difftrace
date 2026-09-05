@@ -70,7 +70,11 @@ reviewed commit, and its inline findings. The verdict comment is
 followed
 by the summary, the risks section
 (always present, "(none flagged)" when empty), and the test-coverage
-note. One inline comment per grounded finding (each headed by a colored
+note. Each round's review submission carries the matching `GitHub` review
+event — requesting changes while blockers exist, approving when clean
+— with a body leading on a stat line ("🤖 difftrace reviewed `abc1234`
+— 4 findings this round; fix prompts below.") and that round's fix-all
+prompt, plus one inline comment per grounded finding (each headed by a colored
 severity badge plus a fix-complexity badge on a 1–5 color ramp,
 anchored to the head commit) — each with a collapsed "🤖 Fix prompt"
 section whose fenced block has a copy button — and a "Fix all
