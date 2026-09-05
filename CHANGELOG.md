@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The reviewer now reviews with memory: every batch's rubric carries
+  the registry's cross-round context (still-open issues and the fix
+  history with their commits), with the rule that open issues must be
+  re-reported at the same location with the same title while a
+  suggestion reversing an earlier round's fix needs explicit
+  justification (pinned by
+  `the_rubric_carries_the_cross_round_history_when_set`,
+  `the_cross_round_section_lists_open_and_fixed_issues`, and
+  `the_rubric_history_adds_the_re_raise_rules_to_the_bare_list`).
+- A verification pass after the batches cross-examines every recorded
+  finding and drops the ones that fail — self-refuting findings,
+  unverifiable factual claims, reversals of settled fixes, or
+  complaints the code's own documentation already answers. Dropped
+  findings land in a visible "Dropped after verification" section with
+  their reasons; they never reach the fix prompts or the registry. A
+  verifier that cannot complete keeps every finding. Disable with
+  `review.verify_findings = false` (pinned by
+  `findings_failing_verification_are_dropped_with_a_reason` and
+  `a_persistently_failing_verification_keeps_every_finding`).
+- A hardened reviewer rubric: no findings whose own analysis concedes
+  the code is deliberate or needs no change, unverifiable cross-repo
+  claims must be marked as assumptions, and documented rationale must
+  be engaged with rather than re-flagged (pinned by
+  `the_rubric_carries_rules_and_frame_every_turn`).
+- Same issue, several locations: findings whose titles match share one
+  inline comment anchored at the first location, with the other spots
+  listed under "Also occurs at" (in the comment, the fix-all report,
+  and the prompt); the registry still tracks every location
+  individually. The review tool now asks the model to reuse the exact
+  same title and severity when the same issue occurs at several
+  locations (pinned by
+  `same_titled_findings_share_one_comment_listing_every_location`,
+  `same_titled_findings_share_one_fix_all_item`,
+  `a_grouped_finding_replies_once_and_registers_every_location`, and
+  `a_grouped_secondary_keeps_its_matching_thread_alive`: a location
+  whose thread recorded the same issue keeps that thread alive through
+  a grouped re-raise).
+- Fix prompts are addressed to coding agents: the collapsed section is
+  "🤖 Fix prompt for coding agents", and every prompt (per-issue and
+  fix-all) opens with a verify-first instruction — check the issue
+  still exists at the named location and say so instead of changing
+  anything if it is already fixed — so re-pasting an old comment into
+  an agent is safe (pinned by
+  `a_comment_body_carries_the_finding_and_a_collapsed_fix_prompt`).
+
+### Changed
+
+- Long lines inside the copyable prompt blocks now word-wrap at 80
+  columns with a hanging indent; the fix-all items put each finding's
+  detail on its own wrapped line instead of one very long line (pinned
+  by `prompt_lines_wrap_at_eighty_columns_with_a_hanging_indent`).
+- A new finding raised at an anchor whose open thread records a
+  different issue now resolves the old thread and opens a fresh one,
+  and the registry records the replaced issue as fixed in that round
+  (with the fixing commit) instead of overwriting it — previously a
+  same-line collision re-raised the thread with the new finding's
+  body, so the replaced issue never appeared as fixed. A finding whose
+  title still matches the recorded issue re-raises into its thread as
+  before; unknown or unparseable titles keep the old behavior.
+  Retirement runs after every reply-match of the round, so a re-raised
+  issue keeps its thread and its history even when a different issue
+  lands on the same anchor in the same review (pinned by
+  `a_different_finding_at_a_threads_location_retires_it`,
+  `a_mismatched_thread_at_a_secondary_location_is_retired`,
+  `a_re_raised_issue_is_not_retired_by_a_different_issue_at_its_anchor`,
+  `merge_records_the_replaced_issue_fixed_when_its_thread_is_retired`,
+  and
+  `a_different_finding_at_the_same_line_resolves_the_old_thread_and_opens_a_new_one`).
+- The comment command for re-running a review is `@difftrace review`
+  (was `re-review`) — shorter to type, same behavior: the chat job's
+  verb parser matches `review` as the first word after the mention
+  (workflow-only; no code pins it).
+
 ## [0.4.1] - 2026-09-05
 
 ### Fixed

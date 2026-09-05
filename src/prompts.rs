@@ -7,8 +7,14 @@ use crate::findings::complexity_badge;
 use crate::findings::complexity_glyph;
 use crate::tools::submit::DroppedFinding;
 
-const FIX_DIRECTIVES: &str = "Read the surrounding code first, apply a minimal focused fix, and cover the behavior change with a test.";
-const ALL_DIRECTIVES: &str = "Read the surrounding code before each fix, keep each change minimal and focused, and cover behavior changes with tests.";
+const PROMPT_LABEL: &str = "Prompt for coding agents:";
+const VERIFY_FIRST: &str = "First check whether this issue still exists at the location below. If it is already fixed or no longer applies, say so and change nothing.";
+const VERIFY_ALL: &str = "Check each item still exists at its location before fixing it; skip anything already fixed or no longer applicable.";
+const FIX_DIRECTIVES: &str = "If the issue still exists: read the surrounding code, apply a minimal focused fix, and cover the behavior change with a test.";
+const ALL_DIRECTIVES: &str = "If an issue still exists: read the surrounding code before each fix, keep each change minimal and focused, and cover behavior changes with tests.";
+
+const WRAP_WIDTH: usize = 80;
+const WRAP_INDENT: &str = "   ";
 
 pub(crate) fn review_round_body(
     head_sha: &str,
@@ -37,24 +43,106 @@ pub(crate) fn re_raised_reply_body(comment_body: &str, head_sha: &str) -> String
     format!("{comment_body}\n\n*Re-raised in the review of commit `{head_sha}`.*")
 }
 
-pub(crate) fn comment_body(finding: &Finding, line: u64) -> String {
+pub(crate) fn grouped_by_title(findings: &[Finding]) -> Vec<(usize, Vec<&Finding>)> {
+    let mut groups: Vec<(String, usize, Vec<&Finding>)> = Vec::new();
+    for (index, finding) in findings.iter().enumerate() {
+        let key = crate::review::registry::normalize_title(&finding.title);
+        match groups.iter_mut().find(|(existing, _, _)| *existing == key) {
+            Some((_, _, group)) => group.push(finding),
+            None => groups.push((key, index, vec![finding])),
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(_, primary, group)| (primary, group))
+        .collect()
+}
+
+fn locations_line(findings: &[&Finding]) -> String {
+    findings
+        .iter()
+        .map(|finding| format!("`{}:{}`", finding.file, finding.line))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn wrap_prompt(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            if line.chars().count() <= WRAP_WIDTH {
+                return line.to_owned();
+            }
+            let mut lines: Vec<String> = Vec::new();
+            let mut current = String::new();
+            for word in line.split_whitespace() {
+                let limit = if lines.is_empty() {
+                    WRAP_WIDTH
+                } else {
+                    WRAP_WIDTH.saturating_sub(WRAP_INDENT.len())
+                };
+                let projected = if current.is_empty() {
+                    word.chars().count()
+                } else {
+                    current
+                        .chars()
+                        .count()
+                        .saturating_add(1)
+                        .saturating_add(word.chars().count())
+                };
+                if projected > limit && !current.is_empty() {
+                    lines.push(std::mem::take(&mut current));
+                }
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+            }
+            if !current.is_empty() {
+                lines.push(current);
+            }
+            let mut wrapped = String::new();
+            for (index, line) in lines.iter().enumerate() {
+                if index > 0 {
+                    wrapped.push('\n');
+                    wrapped.push_str(WRAP_INDENT);
+                }
+                wrapped.push_str(line);
+            }
+            wrapped
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub(crate) fn comment_body(finding: &Finding, line: u64, also: &[&Finding]) -> String {
+    let mut also_in_prompt = String::new();
+    for location in also {
+        also_in_prompt.push_str("\nAlso at: ");
+        also_in_prompt.push_str(&location.file);
+        also_in_prompt.push_str(", line ");
+        also_in_prompt.push_str(&location.line.to_string());
+    }
     let prompt = format!(
-        "Fix this code-review finding.\n\nFile: {}, line {}\nSeverity: {}\nComplexity: {}/5\nTitle: {}\nDetail: {}\n\n{}",
+        "{PROMPT_LABEL}\n\n{VERIFY_FIRST}\n\nFile: {}, line {}\nSeverity: {}\nComplexity: {}/5\nTitle: {}\nDetail: {}{also_in_prompt}\n\n{FIX_DIRECTIVES}",
         finding.file,
         line,
         finding.severity.as_str(),
         finding.complexity,
         finding.title,
         finding.body,
-        FIX_DIRECTIVES,
     );
+    let also_in_body = if also.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nAlso occurs at: {}", locations_line(also))
+    };
     format!(
-        "{} {} **{}**\n\n{}\n\n<details>\n<summary>🤖 Fix prompt</summary>\n\n````text\n{}\n````\n</details>",
+        "{} {} **{}**\n\n{}{also_in_body}\n\n<details>\n<summary>🤖 Fix prompt for coding agents</summary>\n\n````text\n{}\n````\n</details>",
         finding.severity.badge(),
         complexity_badge(finding.complexity),
         finding.title,
         finding.body,
-        prompt,
+        wrap_prompt(&prompt),
     )
 }
 
@@ -67,18 +155,26 @@ pub(crate) fn fix_all_section(
     if findings.is_empty() && dropped.is_empty() {
         return String::new();
     }
-    let grounded = findings
+    let grounded = grouped_by_title(findings)
         .iter()
         .enumerate()
-        .map(|(index, finding)| {
+        .map(|(index, (_, group))| {
+            let Some((primary, also)) = group.split_first() else {
+                return String::new();
+            };
+            let also_suffix = if also.is_empty() {
+                String::new()
+            } else {
+                format!(" — also at {}", locations_line(also))
+            };
             format!(
-                "{}. `{}:{}` — {} {} ({})",
+                "{}. `{}:{}` — {} {} ({}){also_suffix}",
                 index.saturating_add(1),
-                finding.file,
-                finding.line,
-                finding.severity.glyph(),
-                finding.title,
-                complexity_glyph(finding.complexity),
+                primary.file,
+                primary.line,
+                primary.severity.glyph(),
+                primary.title,
+                complexity_glyph(primary.complexity),
             )
         })
         .collect::<Vec<_>>()
@@ -104,8 +200,8 @@ pub(crate) fn fix_all_section(
         format!("\n\nUnanchored (no inline comment posted):\n{entries}")
     };
     format!(
-        "## 🤖 Fix all findings\n{grounded}{unanchored}\n\n<details>\n<summary>Copy the fix-all prompt</summary>\n\n````text\n{}\n````\n</details>",
-        fix_all_prompt(findings, dropped, pr, head_sha),
+        "## 🤖 Fix all findings\n{grounded}{unanchored}\n\n<details>\n<summary>Copy the fix-all prompt for coding agents</summary>\n\n````text\n{}\n````\n</details>",
+        wrap_prompt(&fix_all_prompt(findings, dropped, pr, head_sha)),
     )
 }
 
@@ -115,48 +211,45 @@ fn fix_all_prompt(
     pr: u64,
     head_sha: &str,
 ) -> String {
-    let grounded = findings
-        .iter()
-        .enumerate()
-        .map(|(index, finding)| {
-            format!(
-                "{}. {}:{} [{}] {} — {} (effort {}/5)",
-                index.saturating_add(1),
-                finding.file,
-                finding.line,
-                finding.severity.as_str(),
-                finding.title,
-                finding.body,
-                finding.complexity,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let unanchored = if dropped.is_empty() {
-        String::new()
-    } else {
-        let entries = dropped
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| {
-                format!(
-                    "{}. {}:{} [{}] {} — {} (no inline comment — {}; effort {}/5)",
-                    findings.len().saturating_add(index.saturating_add(1)),
-                    entry.finding.file,
-                    entry.finding.line,
-                    entry.finding.severity.as_str(),
-                    entry.finding.title,
-                    entry.finding.body,
-                    entry.reason,
-                    entry.finding.complexity,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("\n\nUnanchored findings (no inline comment was posted):\n{entries}")
-    };
+    let mut items: Vec<String> = Vec::new();
+    for (index, (_, group)) in grouped_by_title(findings).into_iter().enumerate() {
+        let Some((finding, also)) = group.split_first() else {
+            continue;
+        };
+        let head = format!(
+            "{}. {}:{} [{}] {} (effort {}/5)\n   Detail: {}",
+            index.saturating_add(1),
+            finding.file,
+            finding.line,
+            finding.severity.as_str(),
+            finding.title,
+            finding.complexity,
+            finding.body,
+        );
+        let item = if also.is_empty() {
+            head
+        } else {
+            format!("{head}\n   Also occurs at: {}", locations_line(also))
+        };
+        items.push(item);
+    }
+    for entry in dropped {
+        let finding = &entry.finding;
+        items.push(format!(
+            "{}. {}:{} [{}] {} (effort {}/5) — no inline comment ({}).\n   Detail: {}",
+            items.len().saturating_add(1),
+            finding.file,
+            finding.line,
+            finding.severity.as_str(),
+            finding.title,
+            finding.complexity,
+            entry.reason,
+            finding.body,
+        ));
+    }
     format!(
-        "Fix every finding from the code review of PR #{pr} (commit {head_sha}).\nWork through the list in order:\n\n{grounded}{unanchored}\n\n{ALL_DIRECTIVES}"
+        "{PROMPT_LABEL}\n\nFix every finding from the code review of PR #{pr} (commit {head_sha}).\n{VERIFY_ALL}\nWork through the list in order:\n\n{}\n\n{ALL_DIRECTIVES}",
+        items.join("\n\n"),
     )
 }
 
@@ -176,22 +269,42 @@ mod tests {
         }
     }
 
+    fn titled(file: &str, line: usize, title: &str) -> Finding {
+        Finding {
+            title: title.to_owned(),
+            ..finding(file, line)
+        }
+    }
+
     #[test]
     fn a_comment_body_carries_the_finding_and_a_collapsed_fix_prompt() {
         let finding = finding("src/worker.rs", 9);
-        let body = comment_body(&finding, 123);
+        let body = comment_body(&finding, 123, &[]);
         assert!(body.contains("![warning](https://img.shields.io/badge/warning-orange)"));
         assert!(body.contains("![effort 3](https://img.shields.io/badge/effort_3-yellow)"));
         assert!(body.contains("**Lock dropped early**"));
         assert!(body.contains("The guard is dropped before the read completes."));
-        assert!(body.contains("<details>\n<summary>🤖 Fix prompt</summary>"));
-        assert!(body.contains("````text\nFix this code-review finding."));
+        assert!(
+            body.contains("<details>\n<summary>🤖 Fix prompt for coding agents</summary>"),
+            "the collapsed section names its audience"
+        );
+        assert!(body.contains("````text\nPrompt for coding agents:"));
+        let prompt_text = body.replace("\n   ", " ");
+        assert!(prompt_text.contains(
+            "First check whether this issue still exists at the location below. If it is already fixed or no longer applies, say so and change nothing."
+        ));
         assert!(body.contains("\n````\n</details>"));
         assert!(body.contains("File: src/worker.rs, line 123"));
         assert!(body.contains("Severity: warning"));
         assert!(body.contains("Complexity: 3/5"));
         assert!(body.contains("Title: Lock dropped early"));
-        assert!(body.contains("cover the behavior change with a test."));
+        assert!(prompt_text.contains(
+            "If the issue still exists: read the surrounding code, apply a minimal focused fix, and cover the behavior change with a test."
+        ));
+        assert!(
+            !body.contains("Also occurs at"),
+            "a single-location finding lists no other locations"
+        );
         assert!(
             !body.contains("line 9"),
             "the prompt must cite the anchored comment line, not the raw finding line"
@@ -199,30 +312,86 @@ mod tests {
     }
 
     #[test]
+    fn a_grouped_comment_lists_the_other_locations() {
+        let finding = finding("src/worker.rs", 9);
+        let other = titled("src/queue.rs", 14, "Lock dropped early");
+        let also = vec![&other];
+        let body = comment_body(&finding, 9, &also);
+        assert!(body.contains("Also occurs at: `src/queue.rs:14`"));
+        assert!(body.contains("Also at: src/queue.rs, line 14"));
+    }
+
+    #[test]
     fn the_fix_all_section_reports_and_prompts_every_raised_finding() {
-        let grounded = vec![finding("src/alpha.rs", 2), finding("src/beta.rs", 11)];
+        let grounded = vec![
+            titled("src/alpha.rs", 2, "Lock dropped early"),
+            titled("src/beta.rs", 11, "Retry can outlive shutdown"),
+        ];
         let dropped = vec![DroppedFinding {
-            finding: finding("src/beta.rs", 999),
+            finding: titled("src/beta.rs", 999, "Lock dropped early"),
             reason: "line outside the changed hunks",
         }];
         let section = fix_all_section(&grounded, &dropped, 42, "9f3b2c1");
         assert!(section.contains("## 🤖 Fix all findings"));
         assert!(section.contains("1. `src/alpha.rs:2` — ⚠️ Lock dropped early (🟡)"));
-        assert!(section.contains("2. `src/beta.rs:11` — ⚠️ Lock dropped early (🟡)"));
+        assert!(section.contains("2. `src/beta.rs:11` — ⚠️ Retry can outlive shutdown (🟡)"));
         assert!(section.contains(
             "- `src/beta.rs:999` — ⚠️ Lock dropped early (🟡, line outside the changed hunks)"
         ));
-        assert!(section.contains("<summary>Copy the fix-all prompt</summary>"));
+        assert!(section.contains("<summary>Copy the fix-all prompt for coding agents</summary>"));
         assert!(section.contains("PR #42"));
         assert!(section.contains("commit 9f3b2c1"));
-        assert!(section.contains(
-            "1. src/alpha.rs:2 [warning] Lock dropped early — The guard is dropped before the read completes. (effort 3/5)"
+        let prompt_text = section.replace("\n   ", " ");
+        assert!(
+            prompt_text.contains("1. src/alpha.rs:2 [warning] Lock dropped early (effort 3/5)")
+        );
+        assert!(section.contains("\n   Detail: The guard is dropped"));
+        assert!(prompt_text.contains(
+            "3. src/beta.rs:999 [warning] Lock dropped early (effort 3/5) — no inline comment (line outside the changed hunks)."
         ));
-        assert!(section.contains(
-            "3. src/beta.rs:999 [warning] Lock dropped early — The guard is dropped before the read completes. (no inline comment — line outside the changed hunks; effort 3/5)"
+        assert!(prompt_text.contains(
+            "If an issue still exists: read the surrounding code before each fix, keep each change minimal and focused, and cover behavior changes with tests."
         ));
-        assert!(section.contains("cover behavior changes with tests."));
         assert!(section.contains("\n````\n</details>"));
+    }
+
+    #[test]
+    fn same_titled_findings_share_one_fix_all_item() {
+        let grounded = vec![
+            titled("src/alpha.rs", 2, "Lock dropped early"),
+            titled("src/beta.rs", 11, "Lock dropped early"),
+        ];
+        let section = fix_all_section(&grounded, &[], 42, "sha");
+        assert!(section.contains(
+            "1. `src/alpha.rs:2` — ⚠️ Lock dropped early (🟡) — also at `src/beta.rs:11`"
+        ));
+        assert!(
+            !section.contains("2. "),
+            "a grouped pair renders one item, not two"
+        );
+        assert!(section.contains("\n   Also occurs at: `src/beta.rs:11`"));
+    }
+
+    #[test]
+    fn prompt_lines_wrap_at_eighty_columns_with_a_hanging_indent() {
+        let long = "Detail: ".to_owned() + &"word ".repeat(40);
+        let wrapped = wrap_prompt(&long);
+        for line in wrapped.split('\n') {
+            assert!(
+                line.chars().count() <= 80,
+                "every wrapped line stays within the width: {line}"
+            );
+        }
+        let mut lines = wrapped.split('\n');
+        let first = lines.next().unwrap_or("");
+        assert!(!first.starts_with(' '), "the first line carries no indent");
+        for continuation in lines {
+            assert!(
+                continuation.starts_with("   "),
+                "continuation lines carry the hanging indent"
+            );
+        }
+        assert!(wrapped.contains("word word"), "words stay space-separated");
     }
 
     #[test]
@@ -257,5 +426,35 @@ mod tests {
         let body = re_raised_reply_body("the finding body", "9f3b2c1");
         assert!(body.starts_with("the finding body"));
         assert!(body.contains("Re-raised in the review of commit `9f3b2c1`."));
+    }
+
+    #[test]
+    fn grouping_is_case_insensitive_and_keeps_first_occurrence_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let findings = vec![
+            titled("src/a.rs", 1, "Same Issue"),
+            titled("src/b.rs", 2, "Other issue"),
+            titled("src/c.rs", 3, "same issue "),
+        ];
+        let groups = grouped_by_title(&findings);
+        assert_eq!(groups.len(), 2);
+        let (primary_index, group) = groups.first().cloned().ok_or("no primary group")?;
+        assert_eq!(
+            findings.get(primary_index).map(|f| f.file.as_str()),
+            Some("src/a.rs")
+        );
+        let (primary, also) = group.split_first().ok_or("empty group")?;
+        assert_eq!(primary.file.as_str(), "src/a.rs");
+        assert_eq!(also.len(), 1);
+        assert_eq!(also.first().map(|f| f.file.as_str()), Some("src/c.rs"));
+        let (secondary_index, secondary_group) =
+            groups.get(1).cloned().ok_or("no secondary group")?;
+        assert_eq!(
+            findings.get(secondary_index).map(|f| f.file.as_str()),
+            Some("src/b.rs")
+        );
+        let (_, none) = secondary_group.split_first().ok_or("empty group")?;
+        assert!(none.is_empty());
+        Ok(())
     }
 }

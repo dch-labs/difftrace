@@ -34,6 +34,10 @@ pub enum DifftraceError {
     MissingViewerLogin,
     #[error("reply failed: {message}")]
     Reply { message: String },
+    #[error("the verification pass failed: {source}")]
+    Verify {
+        source: loopctl::structured::StructuredError,
+    },
     #[error("{path} is a directory or empty entry, not a readable file")]
     NotAFile { path: String },
     #[error("cannot decode content of {path}: {source}")]

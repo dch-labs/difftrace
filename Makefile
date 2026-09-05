@@ -5,11 +5,9 @@ ci: fmt check clippy test docs
 check:
 	cargo check --all-features
 
-# the log-capture tests install thread-local tracing subscribers,
-# which is only reliable when the test binaries run serially
 test:
-	cargo test -- --test-threads=1
-	cargo test --all-features -- --test-threads=1
+	cargo test
+	cargo test --all-features
 	cargo test --doc --all-features
 
 clippy:

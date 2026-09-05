@@ -62,9 +62,11 @@ impl LoopObserver for LoggingObserver {
 
 #[cfg(test)]
 pub(crate) mod test_support {
+    use std::cell::RefCell;
     use std::io::Write;
     use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::OnceLock;
 
     #[derive(Clone, Default)]
     pub(crate) struct SharedLogBuffer {
@@ -94,15 +96,60 @@ pub(crate) mod test_support {
         }
     }
 
-    pub(crate) fn install() -> (SharedLogBuffer, tracing::subscriber::DefaultGuard) {
+    // One process-global subscriber routes to the installing thread's buffer.
+    // A thread-local dispatcher races with tracing's shared callsite-interest
+    // cache: a concurrent test evaluating a callsite with no dispatcher
+    // poisons it to "never" and that event is silently lost everywhere. A
+    // global registration rebuilds the cache once, and the routing keeps
+    // parallel installs isolated to their own buffers. A log test on a
+    // multi-thread tokio runtime would see nothing from worker-thread
+    // emissions — log capture assumes the installing thread does the
+    // emitting.
+    static ROUTER: OnceLock<()> = OnceLock::new();
+
+    thread_local! {
+        static BUFFER: RefCell<Option<SharedLogBuffer>> = const { RefCell::new(None) };
+    }
+
+    #[derive(Clone, Copy, Default)]
+    struct RoutedWriter;
+
+    impl Write for RoutedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let routed = BUFFER.with(|slot| slot.borrow().as_ref().cloned());
+            match routed {
+                Some(mut buffer) => buffer.write(buf),
+                None => Ok(buf.len()),
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    pub(crate) struct RoutedGuard;
+
+    impl Drop for RoutedGuard {
+        fn drop(&mut self) {
+            BUFFER.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+
+    pub(crate) fn install() -> (SharedLogBuffer, RoutedGuard) {
+        ROUTER.get_or_init(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+                .with_writer(|| RoutedWriter)
+                .with_ansi(false)
+                .finish();
+            assert!(
+                tracing::subscriber::set_global_default(subscriber).is_ok(),
+                "the process-global log router is already claimed"
+            );
+        });
         let buffer = SharedLogBuffer::default();
-        let writer = buffer.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
-            .with_writer(move || writer.clone())
-            .with_ansi(false)
-            .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        (buffer, guard)
+        BUFFER.with(|slot| *slot.borrow_mut() = Some(buffer.clone()));
+        (buffer, RoutedGuard)
     }
 }

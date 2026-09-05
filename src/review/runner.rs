@@ -19,8 +19,11 @@ use loopctl::structured::StructuredOutput;
 use crate::config::ReviewSettings;
 use crate::diff::DiffIndex;
 use crate::error::DifftraceError;
+use crate::findings::Finding;
 use crate::findings::Findings;
 use crate::findings::ReviewSummary;
+use crate::findings::Verification;
+use crate::findings::VerificationVerdict;
 use crate::github::PrGateway;
 use crate::github::PrOverview;
 use crate::review::RecordFindingsTool;
@@ -39,6 +42,19 @@ You are writing the summary of a completed code review. Given every finding
 the review recorded, write the summary body, the risk notes (one per line),
 and one sentence on test coverage. Be specific and calm; never invent
 findings that are not in the list.";
+
+const VERIFY_SYSTEM: &str = "\
+You are the verifier of a completed code review. Cross-examine every
+finding and drop the ones that do not stand:
+- the finding's own text concedes the code is deliberate, acceptable, or
+  needs no change;
+- the finding asserts facts about files, repos, or conventions it cannot
+  verify from the pull request's materials;
+- the finding reverses a fix from an earlier round without explicit
+  justification in its body;
+- the code's own documentation already answers the complaint.
+Keep every finding that survives. Return exactly one verdict per finding
+index.";
 
 pub struct ReviewRunner<C: loopctl::api::ApiClient> {
     client: Arc<C>,
@@ -65,6 +81,20 @@ fn summary_prompt(findings: &Findings) -> Result<String, DifftraceError> {
     })?;
     Ok(format!(
         "The review recorded these findings:\n{payload}\n\nWrite the review summary."
+    ))
+}
+
+fn verify_prompt(findings: &[Finding], history: &str) -> Result<String, DifftraceError> {
+    let payload = serde_json::to_string(findings).map_err(|err| DifftraceError::Verify {
+        source: loopctl::structured::StructuredError::Deserialize(err),
+    })?;
+    let history_block = if history.is_empty() {
+        String::new()
+    } else {
+        format!("{history}\n\n")
+    };
+    Ok(format!(
+        "The review recorded these findings:\n{payload}\n\n{history_block}Cross-examine every finding and return one verdict per index."
     ))
 }
 
@@ -153,7 +183,11 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         }
     }
 
-    pub async fn review_batch(&self, files: &[String]) -> Result<Findings, DifftraceError> {
+    pub async fn review_batch(
+        &self,
+        files: &[String],
+        history: &str,
+    ) -> Result<Findings, DifftraceError> {
         let slot = RecordFindingsTool::empty_slot();
         let registry = self
             .scope
@@ -164,7 +198,9 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             loopctl::config::SessionConfig::default(),
             production_managers(),
         );
-        agent.add_contributor(Box::new(ReviewRubric::new(&self.overview)));
+        agent.add_contributor(Box::new(
+            ReviewRubric::new(&self.overview).with_history(history.to_owned()),
+        ));
         agent.register_observer(Arc::new(match &self.trajectory_dir {
             Some(dir) => TrajectoryObserver::writing_to(dir),
             None => TrajectoryObserver::in_memory(),
@@ -226,7 +262,58 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
                     tracing::warn!(
                         target: "difftrace::review",
                         error = %source,
-                        "summary schema mismatch; retrying once with the parse error fed back"
+                        "summary schema mismatch; retrying with the parse error fed back"
+                    );
+                    attempts_left = attempts_left.saturating_sub(1);
+                    messages.push(Message::user(format!(
+                        "That JSON did not match the schema: {source}. \
+Return the corrected JSON now, matching every field type exactly."
+                    )));
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn verify(
+        &self,
+        findings: &[Finding],
+        history: &str,
+    ) -> Result<Vec<VerificationVerdict>, DifftraceError> {
+        let mut messages = vec![Message::user(verify_prompt(findings, history)?)];
+        let system = Some(VERIFY_SYSTEM.to_owned());
+        let mut response_format = ResponseFormat::from_type::<Verification>();
+        response_format.strict = false;
+        let options = RequestOptions::new().with_response_format(response_format);
+        let mut attempts_left: u8 = 2;
+        loop {
+            let request = loopctl::api::StreamRequest {
+                messages: messages.clone(),
+                system: system.clone(),
+                tools: None,
+            };
+            let response = self
+                .client
+                .create_message_with_options(&request, options.clone())
+                .await
+                .map_err(|source| DifftraceError::Verify {
+                    source: loopctl::structured::StructuredError::Api(source),
+                })?;
+            let value = self.client.extract_structured(&response.message);
+            match Verification::from_value(value) {
+                Ok(verification) => return Ok(verification.verdicts),
+                Err(source) if attempts_left == 0 => {
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %source,
+                        "verification schema mismatch persisted; keeping every finding"
+                    );
+                    return Ok(Vec::new());
+                }
+                Err(source) => {
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %source,
+                        "verification schema mismatch; retrying with the parse error fed back"
                     );
                     attempts_left = attempts_left.saturating_sub(1);
                     messages.push(Message::user(format!(
@@ -399,9 +486,32 @@ diff --git a/src/lib.rs b/src/lib.rs
             text_response("Batch review complete."),
         ]);
         let runner = runner(Arc::new(client), ReviewSettings::default(), None)?;
-        let findings = runner.review_batch(&["src/lib.rs".to_owned()]).await?;
+        let findings = runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
         assert_eq!(findings.findings.len(), 1);
         assert_eq!(findings.findings.first().ok_or("expected a value")?.line, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn the_verify_prompt_carries_the_findings_and_the_cross_round_history()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let findings = vec![crate::findings::Finding {
+            file: "src/lib.rs".to_owned(),
+            line: 2,
+            severity: crate::findings::Severity::Warning,
+            complexity: 3,
+            title: "Lock dropped early".to_owned(),
+            body: "The guard is dropped.".to_owned(),
+        }];
+        let prompt = verify_prompt(&findings, "Issues already raised on this pull request:")?;
+        assert!(prompt.contains("Lock dropped early"));
+        assert!(prompt.contains("Issues already raised on this pull request:"));
+        assert!(prompt.contains("one verdict per index"));
+        let bare = verify_prompt(&findings, "")?;
+        assert!(
+            !bare.contains("Issues already raised"),
+            "a fresh registry renders no history block"
+        );
         Ok(())
     }
 
@@ -417,7 +527,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             ..ReviewSettings::default()
         };
         let runner = runner(Arc::new(client), settings, None)?;
-        let findings = runner.review_batch(&["src/lib.rs".to_owned()]).await?;
+        let findings = runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
         assert!(findings.findings.is_empty());
         Ok(())
     }
@@ -436,7 +546,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             ReviewSettings::default(),
             Some(dir.clone()),
         )?;
-        runner.review_batch(&["src/lib.rs".to_owned()]).await?;
+        runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
         let entries: Vec<_> = std::fs::read_dir(&dir)?.filter_map(Result::ok).collect();
         let jsonl: Vec<_> = entries
             .iter()
@@ -484,7 +594,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         ]);
         let client = Arc::new(FlakyClient::new(inner, 1));
         let runner = runner(client, ReviewSettings::default(), None)?;
-        let findings = runner.review_batch(&["src/lib.rs".to_owned()]).await?;
+        let findings = runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
         assert!(
             findings.findings.is_empty(),
             "the batch must complete after the ladder absorbs the transient failure"
@@ -652,7 +762,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             ReviewSettings::default(),
             Some(dir.clone()),
         );
-        runner.review_batch(&["src/lib.rs".to_owned()]).await?;
+        runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
         let mut trajectory = String::new();
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;

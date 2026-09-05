@@ -1,6 +1,6 @@
 # difftrace
 
-An AI pull-request reviewer for GitHub, built on
+LLM pull-request reviewer for GitHub, built on
 [loopctl](https://github.com/dch-labs/loopctl).
 
 difftrace parses a pull request's unified diff into an index that decides
@@ -43,7 +43,7 @@ same way; an empty value counts as unset, and without either the
 provider's default model applies (zai: `glm-4.7`).
 
 Comments starting with `@difftrace` or `/difftrace` trigger commands
-in repos whose workflows listen for them: `re-review` re-runs the full
+in repos whose workflows listen for them: `review` re-runs the full
 review, and anything else asks a question — under a finding, the
 answer lands in that thread; on the PR conversation, it lands as a
 comment mentioning the asker. Collaborators and the PR author may
@@ -75,10 +75,16 @@ event — requesting changes while unresolved blockers exist, approving
 when clean, one source of truth with the standing verdict — with a
 body leading on a stat line ("🤖 difftrace reviewed `abc1234`
 — 4 findings this round; fix prompts below.") and that round's fix-all
-prompt, plus one inline comment per grounded finding (each headed by a colored
-severity badge plus a fix-complexity badge on a 1–5 color ramp,
-anchored to the head commit) — each with a collapsed "🤖 Fix prompt"
-section whose fenced block has a copy button. The fix-all report
+prompt, plus one inline comment per distinct grounded issue (each
+headed by a colored severity badge plus a fix-complexity badge on a
+1–5 color ramp, anchored to the head commit). The same issue raised at
+several locations shares one comment: the first location anchors it
+and the rest are listed under "Also occurs at" — in the comment, the
+fix-all report, and the prompt. Each comment carries a collapsed
+"🤖 Fix prompt for coding agents" section whose fenced block has a
+copy button; the prompt opens by telling the agent to verify the
+issue still exists at the named location before changing anything,
+so re-pasting an already-fixed finding is a no-op. The fix-all report
 covers every raised finding, naming the pull request and head
 commit. Findings dropped during grounding — citations outside the
 changed hunks or over the per-file cap — join the registry marked
@@ -89,9 +95,29 @@ On a re-review, a finding raised again at the same anchor is posted as
 a reply into its existing thread — each reply naming the commit that
 re-raised it — instead of opening a duplicate, and previous difftrace
 threads whose finding did not reappear (fixed, dropped, or shifted to
-a new line) are resolved automatically. Writing the verdict comment is
+a new line) are resolved automatically. When a *different* finding
+lands on an anchor whose open thread records another issue, that
+thread is resolved and the new finding opens a fresh one; the replaced
+issue is recorded as fixed in that round rather than overwritten.
+Writing the verdict comment is
 retried and fails the run loudly if every attempt fails, so a missing
 verdict is visible rather than silent.
+
+The reviewer itself reviews with memory and a spine. Every batch sees
+the registry's cross-round context — which issues are still open and
+which were fixed in which round — and is told to re-report still-open
+issues at the same location with the same title (landing in their
+existing threads) rather than opening duplicates, and not to reverse
+an earlier fix without explicit justification.
+Its rules also forbid self-refuting findings (if the analysis concludes
+the code is deliberate or needs no change, it is not a finding),
+require unverifiable claims to be marked as assumptions, and require
+checking a file's documented rationale before flagging it. After the
+batches finish, a verification pass cross-examines every recorded
+finding against those rules; findings that fail are dropped with their
+reasons into a visible "Dropped after verification" section and never
+reach the prompts or the registry. A verification pass that cannot
+complete keeps every finding — an unavailable verifier never vetoes.
 
 Every run captures a JSONL trajectory under
 `~/.difftrace/trajectories/` recording the model requests, tool calls,
@@ -132,6 +158,7 @@ api_base_url = "…"         # optional; GitHub Enterprise API root
 max_findings_per_file = 5  # accepted findings per file (cap receipts both)
 batch_files = 4            # changed files per agent run
 max_turns = 16             # turn budget per batch (soft stop)
+verify_findings = true     # cross-examine findings before posting
 ```
 
 API keys and tokens are never read from the config file — environment

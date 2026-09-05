@@ -187,6 +187,47 @@ impl StructuredOutput for ReviewSummary {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerificationVerdict {
+    pub index: usize,
+    pub keep: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Verification {
+    pub verdicts: Vec<VerificationVerdict>,
+}
+
+impl StructuredOutput for Verification {
+    fn name() -> &'static str {
+        "difftrace_verification"
+    }
+
+    fn schema() -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "verdicts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": { "type": "integer", "minimum": 0 },
+                            "keep": { "type": "boolean" },
+                            "reason": { "type": "string" }
+                        },
+                        "required": ["index", "keep", "reason"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["verdicts"],
+            "additionalProperties": false
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,8 +320,42 @@ mod tests {
     }
 
     #[test]
+    fn the_schema_requires_every_verification_field() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = Verification::schema();
+        let required = schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("schema must carry the required list")?;
+        assert!(
+            required.iter().any(|v| v.as_str() == Some("verdicts")),
+            "schema must require verdicts"
+        );
+        let item_required = schema
+            .pointer("/properties/verdicts/items/required")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("schema must carry the verdict required list")?;
+        for field in ["index", "keep", "reason"] {
+            assert!(
+                item_required.iter().any(|v| v.as_str() == Some(field)),
+                "verdict schema must require {field}"
+            );
+        }
+        let value =
+            serde_json::json!({ "verdicts": [{ "index": 0, "keep": true, "reason": "solid" }] });
+        let verification: Verification = StructuredOutput::from_value(value)?;
+        assert_eq!(verification.verdicts.len(), 1);
+        let bad = serde_json::json!({ "verdicts": [{ "index": 0, "keep": true }] });
+        assert!(<Verification as StructuredOutput>::from_value(bad).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn structured_output_names_are_identifier_safe() {
-        for name in [Findings::name(), ReviewSummary::name()] {
+        for name in [
+            Findings::name(),
+            ReviewSummary::name(),
+            Verification::name(),
+        ] {
             assert!(
                 name.chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),

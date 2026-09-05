@@ -28,6 +28,7 @@ use crate::github::CommentPosition;
 use crate::github::ReviewSubmission;
 use crate::github::Side;
 use crate::prompts::comment_body;
+use crate::prompts::grouped_by_title;
 use crate::tools::ReviewScope;
 
 pub struct SubmitReviewTool {
@@ -52,6 +53,10 @@ pub(crate) struct Grounded {
     pub(crate) findings: Vec<Finding>,
     pub(crate) comments: Vec<CommentPosition>,
     pub(crate) dropped: Vec<DroppedFinding>,
+    // Per finding, the index of the comment carrying it: Some for a
+    // group's primary location, None for locations folded into another
+    // comment's "Also occurs at" list.
+    pub(crate) comment_of_finding: Vec<Option<usize>>,
 }
 
 pub(crate) fn ground_findings(
@@ -59,19 +64,17 @@ pub(crate) fn ground_findings(
     findings: Vec<Finding>,
     max_per_file: usize,
 ) -> Grounded {
-    let mut accepted = Vec::new();
-    let mut comments = Vec::new();
+    let mut accepted: Vec<Finding> = Vec::new();
     let mut dropped = Vec::new();
     let mut per_file_counts = std::collections::BTreeMap::new();
     for finding in findings {
-        let grounded = index.clamp_to_hunk(&finding.file, finding.line);
-        let Some(line) = grounded else {
+        if index.clamp_to_hunk(&finding.file, finding.line).is_none() {
             dropped.push(DroppedFinding {
                 finding,
                 reason: "line outside the changed hunks",
             });
             continue;
-        };
+        }
         let count = per_file_counts
             .entry(finding.file.clone())
             .or_insert(0usize);
@@ -83,18 +86,31 @@ pub(crate) fn ground_findings(
             continue;
         }
         *count = (*count).saturating_add(1);
-        comments.push(CommentPosition {
-            path: finding.file.clone(),
-            line: line as u64,
-            side: Side::Right,
-            body: comment_body(&finding, line as u64),
-        });
         accepted.push(finding);
+    }
+    let groups = grouped_by_title(&accepted);
+    let mut comments = Vec::new();
+    let mut comment_of_finding: Vec<Option<usize>> = vec![None; accepted.len()];
+    for (comment_index, (primary_index, group)) in groups.iter().enumerate() {
+        let Some((primary, also)) = group.split_first() else {
+            continue;
+        };
+        let line = primary.line as u64;
+        comments.push(CommentPosition {
+            path: primary.file.clone(),
+            line,
+            side: Side::Right,
+            body: comment_body(primary, line, also),
+        });
+        if let Some(slot) = comment_of_finding.get_mut(*primary_index) {
+            *slot = Some(comment_index);
+        }
     }
     Grounded {
         findings: accepted,
         comments,
         dropped,
+        comment_of_finding,
     }
 }
 
@@ -165,7 +181,7 @@ impl Tool for SubmitReviewTool {
     }
 
     fn description(&self) -> &'static str {
-        "Submit the finished review: a summary plus inline findings. Each finding must cite a line inside the changed hunks of its file; ungrounded findings are dropped with a receipt."
+        "Submit the finished review: a summary plus inline findings. Each finding must cite a line inside the changed hunks of its file; ungrounded findings are dropped with a receipt. When the same issue occurs at several locations, raise one finding per location and reuse the exact same title and severity for each."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -308,6 +324,47 @@ diff --git a/src/lib.rs b/src/lib.rs
         Ok(())
     }
 
+    #[test]
+    fn same_titled_findings_share_one_comment_listing_every_location()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let index = diff_index()?;
+        let grounded = ground_findings(
+            &index,
+            vec![
+                finding("src/lib.rs", 2),
+                finding("src/lib.rs", 1),
+                finding("src/lib.rs", 3),
+            ],
+            5,
+        );
+        assert_eq!(
+            grounded.findings.len(),
+            3,
+            "the registry still sees every location"
+        );
+        assert_eq!(
+            grounded.comments.len(),
+            1,
+            "one issue raised at several places posts one comment"
+        );
+        let comment = grounded.comments.first().ok_or("expected a comment")?;
+        assert_eq!(comment.path, "src/lib.rs");
+        assert_eq!(comment.line, 2, "the first location anchors the comment");
+        assert!(
+            comment
+                .body
+                .contains("Also occurs at: `src/lib.rs:1`, `src/lib.rs:3`")
+        );
+        assert!(comment.body.contains("Also at: src/lib.rs, line 1"));
+        assert!(comment.body.contains("Also at: src/lib.rs, line 3"));
+        assert_eq!(
+            grounded.comment_of_finding,
+            vec![Some(0), None, None],
+            "only the primary finding maps to the comment"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn a_grounded_finding_is_posted_at_its_anchor() -> Result<(), Box<dyn std::error::Error>>
     {
@@ -327,7 +384,11 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(comment.side, Side::Right);
         assert!(comment.body.contains("badge/warning-orange"));
         assert!(comment.body.contains("**Title**"));
-        assert!(comment.body.contains("<summary>🤖 Fix prompt</summary>"));
+        assert!(
+            comment
+                .body
+                .contains("<summary>🤖 Fix prompt for coding agents</summary>")
+        );
         assert!(comment.body.contains("File: src/lib.rs, line 2"));
         Ok(())
     }

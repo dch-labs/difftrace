@@ -25,6 +25,7 @@ use crate::review::registry::RoundFindings;
 use crate::review::registry::embed_registry;
 use crate::review::registry::extract_registry;
 use crate::review::registry::parse_issue_header;
+use crate::review::registry::same_issue_title;
 use crate::review::registry::short_sha;
 use crate::tools::submit::DroppedFinding;
 use crate::tools::submit::ground_findings;
@@ -48,11 +49,29 @@ pub struct ReviewOutcome {
     pub findings: Vec<Finding>,
     pub comments: Vec<CommentPosition>,
     pub dropped: Vec<DroppedFinding>,
+    pub verified_out: Vec<(Finding, String)>,
     pub pr: u64,
     pub head_sha: String,
     pub posted: bool,
     pub round_body: String,
     pub standing_body: String,
+}
+
+fn verification_note(verified: &[(Finding, String)]) -> String {
+    if verified.is_empty() {
+        return String::new();
+    }
+    let items = verified
+        .iter()
+        .map(|(finding, reason)| {
+            format!(
+                "- `{}:{}` — {} — {}",
+                finding.file, finding.line, finding.title, reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("## Dropped after verification\n{items}")
 }
 
 fn drops_note(dropped: &[DroppedFinding]) -> String {
@@ -165,6 +184,7 @@ fn standing_render(outcome: &ReviewOutcome, registry: &Registry) -> String {
         risks_section(&outcome.summary.risk_notes),
         format!("## Tests\n{}", outcome.summary.tests),
         drops_note(&outcome.dropped),
+        verification_note(&outcome.verified_out),
         history_section(registry),
     ];
     sections
@@ -203,38 +223,162 @@ struct ReplySplit {
     replies: Vec<(u64, String)>,
     matched: Vec<String>,
     finding_threads: Vec<Option<String>>,
+    retired: Vec<String>,
 }
 
 fn split_replies(
     threads: &[ReviewThread],
     comments: Vec<CommentPosition>,
+    also_locations: &[Vec<(String, u64)>],
     head_sha: &str,
+    registry: &Registry,
 ) -> ReplySplit {
     let mut split = ReplySplit {
         positions: Vec::new(),
         replies: Vec::new(),
         matched: Vec::new(),
         finding_threads: Vec::new(),
+        retired: Vec::new(),
     };
-    for comment in comments {
-        let thread = threads.iter().find(|thread| {
-            thread.line.or(thread.original_line) == Some(comment.line)
-                && thread.path == comment.path
-                && !split.matched.contains(&thread.id)
+    let at_anchor = |thread: &ReviewThread, comment: &CommentPosition| {
+        thread.line.or(thread.original_line) == Some(comment.line) && thread.path == comment.path
+    };
+    let at_location = |thread: &ReviewThread, location: &(String, u64)| {
+        thread.path == location.0 && thread.line.or(thread.original_line) == Some(location.1)
+    };
+    let recorded_title = |thread: &ReviewThread| {
+        registry
+            .issues
+            .iter()
+            .find(|issue| issue.thread_id.as_deref() == Some(thread.id.as_str()))
+            .map(|issue| issue.title.as_str())
+    };
+    let titles: Vec<Option<String>> = comments
+        .iter()
+        .map(|comment| parse_issue_header(&comment.body).map(|(_, _, title)| title))
+        .collect();
+    let location_sets: Vec<Vec<(String, u64)>> = comments
+        .iter()
+        .enumerate()
+        .map(|(comment_index, comment)| {
+            let also = also_locations
+                .get(comment_index)
+                .cloned()
+                .unwrap_or_default();
+            std::iter::once((comment.path.clone(), comment.line))
+                .chain(also)
+                .collect()
+        })
+        .collect();
+    // Pass one pairs comments with the threads that already carry the
+    // same issue: the anchor thread takes the group's re-raise, and any
+    // secondary location's matching thread keeps its own reply — a
+    // grouped finding that reappeared must never resolve the thread it
+    // reappeared in.
+    let mut anchor_matches: Vec<Option<usize>> = Vec::new();
+    let mut secondary_matches: Vec<(usize, usize)> = Vec::new();
+    let mut claimed: Vec<String> = Vec::new();
+    for (comment_index, comment) in comments.iter().enumerate() {
+        let anchor = threads.iter().position(|thread| {
+            !claimed.contains(&thread.id)
+                && at_anchor(thread, comment)
+                && same_issue(recorded_title(thread), &comment.body)
         });
-        if let Some(thread) = thread {
+        if let Some(thread) = anchor.and_then(|thread_index| threads.get(thread_index)) {
+            claimed.push(thread.id.clone());
+        }
+        anchor_matches.push(anchor);
+        let Some((_, rest)) = location_sets
+            .get(comment_index)
+            .and_then(|set| set.split_first())
+        else {
+            continue;
+        };
+        for location in rest {
+            for (thread_index, thread) in threads.iter().enumerate() {
+                if claimed.contains(&thread.id) {
+                    continue;
+                }
+                if at_location(thread, location)
+                    && same_issue(recorded_title(thread), &comment.body)
+                {
+                    claimed.push(thread.id.clone());
+                    secondary_matches.push((thread_index, comment_index));
+                }
+            }
+        }
+    }
+    // Pass two retires only the unclaimed threads whose recorded issue
+    // differs from every comment covering their location: retiring
+    // resolves the thread and lets the registry record the old issue as
+    // fixed instead of letting a new issue overwrite it. A thread whose
+    // issue matches any covering comment survives for that comment's
+    // reply, whatever order the model emitted the findings in.
+    for thread in threads {
+        if claimed.contains(&thread.id) {
+            continue;
+        }
+        let Some(recorded) = recorded_title(thread) else {
+            continue;
+        };
+        let covering: Vec<Option<&String>> = comments
+            .iter()
+            .enumerate()
+            .filter(|(comment_index, _)| {
+                location_sets
+                    .get(*comment_index)
+                    .is_some_and(|set| set.iter().any(|location| at_location(thread, location)))
+            })
+            .map(|(comment_index, _)| titles.get(comment_index).and_then(Option::as_ref))
+            .collect();
+        let replaceable = !covering.is_empty()
+            && covering
+                .iter()
+                .all(|title| title.is_none_or(|title| !same_issue_title(recorded, title)));
+        if replaceable {
+            split.retired.push(thread.id.clone());
+        }
+    }
+    for (comment_index, comment) in comments.into_iter().enumerate() {
+        if let Some(thread_index) = anchor_matches.get(comment_index).copied().flatten() {
+            let Some(thread) = threads.get(thread_index) else {
+                continue;
+            };
             split.matched.push(thread.id.clone());
             split.replies.push((
                 thread.comment_id,
                 re_raised_reply_body(&comment.body, head_sha),
             ));
             split.finding_threads.push(Some(thread.id.clone()));
+            for (secondary_index, owner) in &secondary_matches {
+                if *owner != comment_index {
+                    continue;
+                }
+                let Some(secondary) = threads.get(*secondary_index) else {
+                    continue;
+                };
+                split.matched.push(secondary.id.clone());
+                split.replies.push((
+                    secondary.comment_id,
+                    re_raised_reply_body(&comment.body, head_sha),
+                ));
+            }
         } else {
             split.positions.push(comment);
             split.finding_threads.push(None);
         }
     }
     split
+}
+
+fn same_issue(recorded_title: Option<&str>, comment_body: &str) -> bool {
+    let Some((_, _, title)) = parse_issue_header(comment_body) else {
+        return true;
+    };
+    let Some(recorded) = recorded_title else {
+        return true;
+    };
+    same_issue_title(recorded, &title)
 }
 
 fn threads_to_resolve(threads: &[ReviewThread], matched: &[String]) -> Vec<String> {
@@ -258,15 +402,11 @@ fn risks_section(notes: &[String]) -> String {
 }
 
 impl<C: ApiClient + 'static> ReviewRunner<C> {
-    pub async fn review_all(&self, dry_run: bool) -> Result<ReviewOutcome, DifftraceError> {
-        let files = self.file_names();
-        let batches = plan_batches(&files, self.settings().batch_files);
-        tracing::info!(
-            target: "difftrace::review",
-            files = files.len(),
-            batches = batches.len(),
-            "reviewing"
-        );
+    async fn review_batches(
+        &self,
+        batches: &[Vec<String>],
+        history: &str,
+    ) -> Result<Findings, DifftraceError> {
         let mut aggregated = Findings::default();
         for (index, batch) in batches.iter().enumerate() {
             tracing::info!(
@@ -275,7 +415,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                 files = batch.join(", "),
                 "batch started"
             );
-            let findings = self.review_batch(batch).await?;
+            let findings = self.review_batch(batch, history).await?;
             tracing::info!(
                 target: "difftrace::review",
                 batch = index,
@@ -284,27 +424,10 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             );
             aggregated.findings.extend(findings.findings);
         }
-        let grounded = ground_findings(
-            self.index(),
-            aggregated.findings,
-            self.settings().max_findings_per_file,
-        );
-        let summary = self
-            .summarize(&[Findings {
-                findings: grounded.findings.clone(),
-            }])
-            .await?;
-        let mut outcome = ReviewOutcome {
-            summary,
-            findings: grounded.findings,
-            comments: grounded.comments,
-            dropped: grounded.dropped,
-            pr: self.pr(),
-            head_sha: self.head_sha().to_owned(),
-            posted: false,
-            round_body: String::new(),
-            standing_body: String::new(),
-        };
+        Ok(aggregated)
+    }
+
+    pub async fn review_all(&self, dry_run: bool) -> Result<ReviewOutcome, DifftraceError> {
         let all_threads = match self.own_threads().await {
             Ok(threads) => threads,
             Err(err) => {
@@ -322,7 +445,71 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             .cloned()
             .collect();
         let registry = self.load_registry(&open_threads).await?;
-        let split = split_replies(&open_threads, outcome.comments.clone(), self.head_sha());
+        let history = crate::review::rubric::rubric_history(&registry);
+        let verifier_history = crate::review::rubric::cross_round_section(&registry);
+        let files = self.file_names();
+        let batches = plan_batches(&files, self.settings().batch_files);
+        tracing::info!(
+            target: "difftrace::review",
+            files = files.len(),
+            batches = batches.len(),
+            "reviewing"
+        );
+        let mut aggregated = self.review_batches(&batches, &history).await?;
+        let verified_out = self
+            .apply_verification(&mut aggregated, &verifier_history)
+            .await;
+        let grounded = ground_findings(
+            self.index(),
+            aggregated.findings,
+            self.settings().max_findings_per_file,
+        );
+        let comment_of_finding = grounded.comment_of_finding;
+        let summary = self
+            .summarize(&[Findings {
+                findings: grounded.findings.clone(),
+            }])
+            .await?;
+        let mut outcome = ReviewOutcome {
+            summary,
+            findings: grounded.findings,
+            comments: grounded.comments,
+            dropped: grounded.dropped,
+            verified_out,
+            pr: self.pr(),
+            head_sha: self.head_sha().to_owned(),
+            posted: false,
+            round_body: String::new(),
+            standing_body: String::new(),
+        };
+        let also_by_comment: Vec<Vec<(String, u64)>> =
+            crate::prompts::grouped_by_title(&outcome.findings)
+                .iter()
+                .map(|(_, group)| {
+                    let Some((_, rest)) = group.split_first() else {
+                        return Vec::new();
+                    };
+                    rest.iter()
+                        .map(|finding| (finding.file.clone(), finding.line as u64))
+                        .collect()
+                })
+                .collect();
+        let split = split_replies(
+            &open_threads,
+            outcome.comments.clone(),
+            &also_by_comment,
+            self.head_sha(),
+            &registry,
+        );
+        let finding_threads: Vec<Option<String>> = comment_of_finding
+            .iter()
+            .map(|comment_index| {
+                comment_index
+                    .and_then(|index| split.finding_threads.get(index))
+                    .cloned()
+                    .flatten()
+            })
+            .collect();
         let dropped: Vec<(Finding, &str)> = outcome
             .dropped
             .iter()
@@ -331,9 +518,10 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         let registry = registry.merge(&RoundFindings {
             head_sha: self.head_sha(),
             grounded: &outcome.findings,
-            finding_threads: &split.finding_threads,
+            finding_threads: &finding_threads,
             dropped: &dropped,
             threads: &all_threads,
+            retired: &split.retired,
         });
         let fix_all = fix_all_section(
             &outcome.findings,
@@ -380,6 +568,56 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         self.upsert_verdict_comment(body).await?;
         outcome.posted = true;
         Ok(outcome)
+    }
+
+    async fn apply_verification(
+        &self,
+        aggregated: &mut Findings,
+        history: &str,
+    ) -> Vec<(Finding, String)> {
+        if !self.settings().verify_findings || aggregated.findings.is_empty() {
+            return Vec::new();
+        }
+        let verdicts = match self.verify(&aggregated.findings, history).await {
+            Ok(verdicts) => verdicts,
+            Err(err) => {
+                tracing::warn!(
+                    target: "difftrace::review",
+                    error = %crate::error::error_chain(&err),
+                    "verification pass failed; keeping every finding"
+                );
+                return Vec::new();
+            }
+        };
+        let mut removed: Vec<(usize, (Finding, String))> = verdicts
+            .into_iter()
+            .filter(|verdict| !verdict.keep)
+            .filter_map(|verdict| {
+                aggregated
+                    .findings
+                    .get(verdict.index)
+                    .cloned()
+                    .map(|finding| (verdict.index, (finding, verdict.reason)))
+            })
+            .collect();
+        // Remove highest index first so the lower indices stay valid;
+        // duplicate drop-verdicts on one index collapse to one removal.
+        removed.sort_by_key(|(index, _)| std::cmp::Reverse(*index));
+        removed.dedup_by(|a, b| a.0 == b.0);
+        let mut verified_out = Vec::new();
+        for (index, (finding, reason)) in removed {
+            aggregated.findings.remove(index);
+            verified_out.push((finding, reason));
+        }
+        verified_out.reverse();
+        if !verified_out.is_empty() {
+            tracing::info!(
+                target: "difftrace::review",
+                dropped = verified_out.len(),
+                "findings dropped after verification"
+            );
+        }
+        verified_out
     }
 
     async fn load_registry(
@@ -611,7 +849,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             "line": line,
             "severity": severity,
             "complexity": 3,
-            "title": "Title",
+            "title": format!("Title in {file}"),
             "body": "Body"
         })
     }
@@ -670,6 +908,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             pr_overview,
             crate::config::ReviewSettings {
                 batch_files: 1,
+                verify_findings: false,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -777,7 +1016,12 @@ diff --git a/src/beta.rs b/src/beta.rs
                 comment("src/beta.rs", 11),
                 comment("src/gamma.rs", 5),
             ],
+            &[Vec::new(), Vec::new(), Vec::new()],
             "headsha",
+            &Registry {
+                round: 0,
+                issues: Vec::new(),
+            },
         );
         let (positions, replies, matched) = (&split.positions, &split.replies, &split.matched);
         assert_eq!(
@@ -812,6 +1056,388 @@ diff --git a/src/beta.rs b/src/beta.rs
             ],
             "each grounded finding carries its matched thread for the registry"
         );
+        assert!(
+            split.retired.is_empty(),
+            "a re-raise never retires the thread it replies into"
+        );
+    }
+
+    #[test]
+    fn a_different_finding_at_a_threads_location_retires_it() {
+        let threads = vec![ReviewThread {
+            id: "T_OLD".to_owned(),
+            comment_id: 601,
+            resolved: false,
+            path: "src/alpha.rs".to_owned(),
+            line: Some(2),
+            original_line: Some(2),
+        }];
+        let registry = Registry {
+            round: 1,
+            issues: vec![Issue {
+                title: "Probe path is not portable".to_owned(),
+                file: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                severity: Severity::Warning,
+                complexity: 3,
+                anchored: true,
+                status: IssueStatus::Open,
+                thread_id: Some("T_OLD".to_owned()),
+                raised_round: 1,
+                raised_sha: String::new(),
+                last_round: 1,
+                resolved_round: None,
+                resolved_sha: None,
+            }],
+        };
+        let comment = CommentPosition {
+            path: "src/alpha.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: "![warning](https://img.shields.io/badge/warning-orange) ![effort 1](https://img.shields.io/badge/effort_1-blue) **Manifest scraping is brittle**\n\nThe sed extraction breaks.".to_owned(),
+        };
+        let split = split_replies(&threads, vec![comment], &[], "headsha", &registry);
+        assert!(
+            split.replies.is_empty(),
+            "a different issue must not be replied into the old thread"
+        );
+        assert_eq!(
+            split.retired,
+            vec!["T_OLD".to_owned()],
+            "the replaced issue's thread is retired for resolution"
+        );
+        assert_eq!(split.matched, Vec::<String>::new());
+        assert_eq!(
+            split.finding_threads,
+            vec![None],
+            "the fresh issue opens a new thread"
+        );
+        assert_eq!(
+            split.positions.len(),
+            1,
+            "the fresh issue is posted as a new comment"
+        );
+    }
+
+    #[test]
+    fn the_same_title_still_re_raises_into_its_thread() {
+        let threads = vec![ReviewThread {
+            id: "T_OLD".to_owned(),
+            comment_id: 601,
+            resolved: false,
+            path: "src/alpha.rs".to_owned(),
+            line: Some(2),
+            original_line: Some(2),
+        }];
+        let registry = Registry {
+            round: 1,
+            issues: vec![Issue {
+                title: "Manifest scraping is brittle".to_owned(),
+                file: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                severity: Severity::Warning,
+                complexity: 3,
+                anchored: true,
+                status: IssueStatus::Open,
+                thread_id: Some("T_OLD".to_owned()),
+                raised_round: 1,
+                raised_sha: String::new(),
+                last_round: 1,
+                resolved_round: None,
+                resolved_sha: None,
+            }],
+        };
+        let comment = CommentPosition {
+            path: "src/alpha.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: "![warning](https://img.shields.io/badge/warning-orange) ![effort 1](https://img.shields.io/badge/effort_1-blue) **manifest scraping is brittle**\n\nStill present.".to_owned(),
+        };
+        let split = split_replies(&threads, vec![comment], &[], "headsha", &registry);
+        assert_eq!(
+            split.matched,
+            vec!["T_OLD".to_owned()],
+            "title comparison ignores case, so the re-raise lands in the thread"
+        );
+        assert!(split.retired.is_empty());
+        assert_eq!(split.replies.len(), 1);
+        assert!(split.positions.is_empty());
+    }
+
+    #[test]
+    fn a_mismatched_thread_at_a_secondary_location_is_retired() {
+        let threads = vec![
+            ReviewThread {
+                id: "T_ANCHOR".to_owned(),
+                comment_id: 601,
+                resolved: false,
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_STALE".to_owned(),
+                comment_id: 602,
+                resolved: false,
+                path: "src/beta.rs".to_owned(),
+                line: Some(5),
+                original_line: Some(5),
+            },
+        ];
+        let registry = Registry {
+            round: 1,
+            issues: vec![
+                Issue {
+                    title: "Group issue".to_owned(),
+                    file: "src/alpha.rs".to_owned(),
+                    line: Some(2),
+                    severity: Severity::Warning,
+                    complexity: 3,
+                    anchored: true,
+                    status: IssueStatus::Open,
+                    thread_id: Some("T_ANCHOR".to_owned()),
+                    raised_round: 1,
+                    raised_sha: String::new(),
+                    last_round: 1,
+                    resolved_round: None,
+                    resolved_sha: None,
+                },
+                Issue {
+                    title: "Old different issue".to_owned(),
+                    file: "src/beta.rs".to_owned(),
+                    line: Some(5),
+                    severity: Severity::Warning,
+                    complexity: 3,
+                    anchored: true,
+                    status: IssueStatus::Open,
+                    thread_id: Some("T_STALE".to_owned()),
+                    raised_round: 1,
+                    raised_sha: String::new(),
+                    last_round: 1,
+                    resolved_round: None,
+                    resolved_sha: None,
+                },
+            ],
+        };
+        let comment = CommentPosition {
+            path: "src/alpha.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: "![warning](https://img.shields.io/badge/warning-orange) ![effort 1](https://img.shields.io/badge/effort_1-blue) **Group issue**\n\nStill present.".to_owned(),
+        };
+        let split = split_replies(
+            &threads,
+            vec![comment],
+            &[vec![("src/beta.rs".to_owned(), 5)]],
+            "headsha",
+            &registry,
+        );
+        assert_eq!(
+            split.matched,
+            vec!["T_ANCHOR".to_owned()],
+            "the anchor's thread still carries the group"
+        );
+        assert_eq!(
+            split.retired,
+            vec!["T_STALE".to_owned()],
+            "a secondary location's different issue is retired, not overwritten"
+        );
+    }
+
+    #[test]
+    fn all_mismatched_threads_at_an_anchor_are_retired() {
+        let threads = vec![
+            ReviewThread {
+                id: "T_ONE".to_owned(),
+                comment_id: 601,
+                resolved: false,
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_TWO".to_owned(),
+                comment_id: 602,
+                resolved: false,
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+        ];
+        let registry = Registry {
+            round: 1,
+            issues: vec![
+                Issue {
+                    title: "First old issue".to_owned(),
+                    file: "src/alpha.rs".to_owned(),
+                    line: Some(2),
+                    severity: Severity::Warning,
+                    complexity: 3,
+                    anchored: true,
+                    status: IssueStatus::Open,
+                    thread_id: Some("T_ONE".to_owned()),
+                    raised_round: 1,
+                    raised_sha: String::new(),
+                    last_round: 1,
+                    resolved_round: None,
+                    resolved_sha: None,
+                },
+                Issue {
+                    title: "Second old issue".to_owned(),
+                    file: "src/alpha.rs".to_owned(),
+                    line: Some(2),
+                    severity: Severity::Warning,
+                    complexity: 3,
+                    anchored: true,
+                    status: IssueStatus::Open,
+                    thread_id: Some("T_TWO".to_owned()),
+                    raised_round: 1,
+                    raised_sha: String::new(),
+                    last_round: 1,
+                    resolved_round: None,
+                    resolved_sha: None,
+                },
+            ],
+        };
+        let comment = CommentPosition {
+            path: "src/alpha.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: "![warning](https://img.shields.io/badge/warning-orange) ![effort 1](https://img.shields.io/badge/effort_1-blue) **Brand new issue**\n\nFresh complaint.".to_owned(),
+        };
+        let split = split_replies(&threads, vec![comment], &[], "headsha", &registry);
+        assert!(split.replies.is_empty());
+        assert_eq!(
+            split.retired,
+            vec!["T_ONE".to_owned(), "T_TWO".to_owned()],
+            "every same-anchor thread recording a different issue is retired"
+        );
+    }
+
+    #[test]
+    fn a_re_raised_issue_is_not_retired_by_a_different_issue_at_its_anchor() {
+        let threads = vec![ReviewThread {
+            id: "T_Y".to_owned(),
+            comment_id: 601,
+            resolved: false,
+            path: "src/lib.rs".to_owned(),
+            line: Some(2),
+            original_line: Some(2),
+        }];
+        let registry = Registry {
+            round: 1,
+            issues: vec![Issue {
+                title: "Off-by-one".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                line: Some(2),
+                severity: Severity::Warning,
+                complexity: 3,
+                anchored: true,
+                status: IssueStatus::Open,
+                thread_id: Some("T_Y".to_owned()),
+                raised_round: 1,
+                raised_sha: String::new(),
+                last_round: 1,
+                resolved_round: None,
+                resolved_sha: None,
+            }],
+        };
+        let comment = |title: &str, body: &str| CommentPosition {
+            path: "src/lib.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: format!(
+                "![warning](https://img.shields.io/badge/warning-orange) ![effort 1](https://img.shields.io/badge/effort_1-blue) **{title}**\n\n{body}"
+            ),
+        };
+        let comments = vec![
+            comment("Unused import", "The import is unused."),
+            comment("Off-by-one", "The loop runs one short."),
+        ];
+        let split = split_replies(&threads, comments, &[], "headsha", &registry);
+        assert_eq!(
+            split.matched,
+            vec!["T_Y".to_owned()],
+            "the re-raised issue keeps its thread whatever the emission order"
+        );
+        assert!(
+            split.retired.is_empty(),
+            "a same-title re-raise must never retire its own thread"
+        );
+        assert_eq!(split.replies.len(), 1);
+        assert_eq!(
+            split.positions.len(),
+            1,
+            "only the different issue opens a fresh thread"
+        );
+    }
+
+    #[test]
+    fn a_grouped_secondary_keeps_its_matching_thread_alive() {
+        let threads = vec![
+            ReviewThread {
+                id: "T_ANCHOR".to_owned(),
+                comment_id: 601,
+                resolved: false,
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_BETA".to_owned(),
+                comment_id: 602,
+                resolved: false,
+                path: "src/beta.rs".to_owned(),
+                line: Some(5),
+                original_line: Some(5),
+            },
+        ];
+        let mut registry = Registry {
+            round: 1,
+            issues: Vec::new(),
+        };
+        for (title, thread) in [("Shared issue", "T_ANCHOR"), ("Shared issue", "T_BETA")] {
+            registry.issues.push(Issue {
+                title: title.to_owned(),
+                file: if thread == "T_ANCHOR" {
+                    "src/alpha.rs".to_owned()
+                } else {
+                    "src/beta.rs".to_owned()
+                },
+                line: Some(if thread == "T_ANCHOR" { 2 } else { 5 }),
+                severity: Severity::Warning,
+                complexity: 3,
+                anchored: true,
+                status: IssueStatus::Open,
+                thread_id: Some(thread.to_owned()),
+                raised_round: 1,
+                raised_sha: String::new(),
+                last_round: 1,
+                resolved_round: None,
+                resolved_sha: None,
+            });
+        }
+        let comment = CommentPosition {
+            path: "src/alpha.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: "![warning](https://img.shields.io/badge/warning-orange) ![effort 1](https://img.shields.io/badge/effort_1-blue) **Shared issue**\n\nStill present.".to_owned(),
+        };
+        let split = split_replies(
+            &threads,
+            vec![comment],
+            &[vec![("src/beta.rs".to_owned(), 5)]],
+            "headsha",
+            &registry,
+        );
+        assert_eq!(
+            split.matched,
+            vec!["T_ANCHOR".to_owned(), "T_BETA".to_owned()],
+            "every location whose issue reappeared keeps its thread"
+        );
+        assert_eq!(split.replies.len(), 2, "both threads carry the re-raise");
+        assert!(split.retired.is_empty());
+        assert!(split.positions.is_empty());
     }
 
     #[test]
@@ -831,6 +1457,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             posted: false,
             round_body: String::new(),
             standing_body: String::new(),
+            verified_out: Vec::new(),
         };
         let registry = Registry {
             round: 2,
@@ -938,7 +1565,7 @@ diff --git a/src/beta.rs b/src/beta.rs
         assert_eq!(comment_id, 501);
         assert!(reply_body.contains("Re-raised in the review of commit `headsha`."));
         assert!(
-            reply_body.contains("**Title**"),
+            reply_body.contains("**Title in src/alpha.rs**"),
             "the reply keeps the finding body"
         );
         assert_eq!(
@@ -1029,8 +1656,8 @@ diff --git a/src/beta.rs b/src/beta.rs
         let standing = &outcome.standing_body;
         assert!(standing.starts_with("## Verdict"));
         assert!(standing.contains("🔴 Not good to go — 3 blocking findings"));
-        assert!(standing.contains("`src/alpha.rs:2` — ⚠️ Title (🟡)"));
-        assert!(standing.contains("`src/beta.rs:11` — ⚠️ Title (🟡)"));
+        assert!(standing.contains("`src/alpha.rs:2` — ⚠️ Title in src/alpha.rs (🟡)"));
+        assert!(standing.contains("`src/beta.rs:11` — ⚠️ Title in src/beta.rs (🟡)"));
         assert!(
             standing.contains("`src/beta.rs` (unanchored) — ⚠️ Second issue"),
             "the registry lists unanchored issues too, marked as such"
@@ -1042,14 +1669,14 @@ diff --git a/src/beta.rs b/src/beta.rs
         let round = &outcome.round_body;
         assert!(round.starts_with("🤖 difftrace reviewed `headsha` — 3 findings this round"));
         assert!(round.contains("## 🤖 Fix all findings"));
-        assert!(round.contains("`src/alpha.rs:2` — ⚠️ Title (🟡)"));
-        assert!(round.contains("`src/beta.rs:11` — ⚠️ Title (🟡)"));
+        assert!(round.contains("`src/alpha.rs:2` — ⚠️ Title in src/alpha.rs (🟡)"));
+        assert!(round.contains("`src/beta.rs:11` — ⚠️ Title in src/beta.rs (🟡)"));
         assert!(round.contains(
             "- `src/beta.rs:999` — ⚠️ Second issue (🟡, line outside the changed hunks)"
         ));
         assert!(round.contains("PR #42"));
         assert!(round.contains("commit headsha"));
-        assert!(round.contains("<summary>Copy the fix-all prompt</summary>"));
+        assert!(round.contains("<summary>Copy the fix-all prompt for coding agents</summary>"));
         Ok(())
     }
 
@@ -1543,6 +2170,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             overview(),
             crate::config::ReviewSettings {
                 batch_files: 1,
+                verify_findings: false,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -1661,6 +2289,382 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert_eq!(
             registry.round, 2,
             "bootstrap counts as round one, this run is two"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_grouped_finding_replies_once_and_registers_every_location()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::with_threads(vec![thread_at(Some(2), 2)]));
+        let round = runner(
+            Arc::new(MockApiClient::new("review-model").with_responses(vec![
+                tool_call(
+                    "c1",
+                    json!({ "findings": [finding_json(2), finding_json(3)] }),
+                ),
+                text_response("Done."),
+                text_response(&summary_json()),
+            ])),
+            Arc::clone(&gateway),
+        )?;
+        let outcome = round.review_all(false).await?;
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert!(
+            submission.comments.is_empty(),
+            "the grouped comment replies into the existing thread instead of posting fresh"
+        );
+        assert_eq!(
+            gateway.posted_replies().len(),
+            1,
+            "one reply carries the whole group"
+        );
+        assert!(
+            gateway
+                .posted_replies()
+                .first()
+                .is_some_and(|(_, body)| body.contains("Also occurs at: `src/lib.rs:3`")),
+            "the reply lists the secondary location"
+        );
+        let comment = gateway
+            .posted_comments()
+            .first()
+            .map(|(_, body)| body.clone())
+            .ok_or("the standing comment must be posted")?;
+        let registry = extract_registry(&comment).ok_or("registry must embed")?;
+        assert_eq!(
+            registry.issues.len(),
+            2,
+            "each location of the group is a registry issue"
+        );
+        let thread_id = thread_at(Some(2), 2).id;
+        assert_eq!(
+            registry
+                .issues
+                .first()
+                .ok_or("primary")?
+                .thread_id
+                .as_deref(),
+            Some(thread_id.as_str()),
+            "the primary location keeps the thread"
+        );
+        assert_eq!(
+            registry.issues.get(1).ok_or("secondary")?.thread_id,
+            None,
+            "the secondary location posted no thread of its own"
+        );
+        assert!(outcome.standing_body.contains("`src/lib.rs:3`"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn findings_failing_verification_are_dropped_with_a_reason()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call(
+                "c1",
+                json!({ "findings": [
+                    {
+                        "file": "src/lib.rs",
+                        "line": 2,
+                        "severity": "warning",
+                        "complexity": 3,
+                        "title": "Real issue",
+                        "body": "The guard is dropped."
+                    },
+                    {
+                        "file": "src/lib.rs",
+                        "line": 3,
+                        "severity": "suggestion",
+                        "complexity": 2,
+                        "title": "Conceded issue",
+                        "body": "This is deliberate; no change required."
+                    }
+                ] }),
+            ),
+            text_response("Done."),
+            text_response(
+                json!({ "verdicts": [
+                    { "index": 0, "keep": true, "reason": "solid" },
+                    {
+                        "index": 1,
+                        "keep": false,
+                        "reason": "the finding's own text concedes no change is needed"
+                    }
+                ] })
+                .to_string()
+                .as_str(),
+            ),
+            text_response(&summary_json()),
+        ]);
+        let gateway_handle = Arc::clone(&gateway);
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway_for_runner,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_files: 1,
+                verify_findings: true,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(false).await?;
+        assert_eq!(
+            outcome.comments.len(),
+            1,
+            "the conceded finding posts no comment"
+        );
+        assert!(
+            outcome
+                .findings
+                .iter()
+                .all(|finding| finding.title != "Conceded issue"),
+            "the conceded finding is not actionable"
+        );
+        assert_eq!(outcome.verified_out.len(), 1);
+        let (_, reason) = outcome.verified_out.first().cloned().ok_or("a verdict")?;
+        assert!(reason.contains("concedes no change"));
+        assert!(
+            outcome
+                .standing_body
+                .contains("## Dropped after verification")
+        );
+        assert!(outcome.standing_body.contains("Conceded issue"));
+        assert!(
+            !outcome.round_body.contains("Conceded issue"),
+            "the fix-all prompt carries only kept findings"
+        );
+        let comment = gateway
+            .posted_comments()
+            .first()
+            .map(|(_, body)| body.clone())
+            .ok_or("the standing comment must be posted")?;
+        let registry = extract_registry(&comment).ok_or("registry must embed")?;
+        assert_eq!(
+            registry.issues.len(),
+            1,
+            "a verification failure never becomes a registry issue"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multiple_verification_drops_remove_every_dropped_index_without_panicking()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let finding = |line: usize, title: &str| {
+            json!({
+                "file": "src/lib.rs",
+                "line": line,
+                "severity": "warning",
+                "complexity": 2,
+                "title": title,
+                "body": "The detail."
+            })
+        };
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call(
+                "c1",
+                json!({ "findings": [
+                    finding(1, "Issue one"),
+                    finding(2, "Issue two"),
+                    finding(3, "Issue three")
+                ] }),
+            ),
+            text_response("Done."),
+            text_response(
+                json!({ "verdicts": [
+                    { "index": 0, "keep": false, "reason": "concedes no change" },
+                    { "index": 1, "keep": false, "reason": "premise unverifiable" },
+                    { "index": 1, "keep": false, "reason": "premise unverifiable" }
+                ] })
+                .to_string()
+                .as_str(),
+            ),
+            text_response(&summary_json()),
+        ]);
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_files: 1,
+                verify_findings: true,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(false).await?;
+        assert_eq!(
+            outcome.comments.len(),
+            1,
+            "only the surviving finding posts a comment"
+        );
+        assert_eq!(
+            outcome.findings.first().map(|f| f.title.as_str()),
+            Some("Issue three"),
+            "the only kept finding survives"
+        );
+        assert_eq!(
+            outcome.verified_out.len(),
+            2,
+            "a duplicate drop-verdict collapses to one removal"
+        );
+        assert_eq!(
+            outcome
+                .verified_out
+                .iter()
+                .map(|(finding, _)| finding.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Issue one", "Issue two"],
+            "drops are listed in finding order"
+        );
+        assert!(
+            outcome
+                .standing_body
+                .contains("## Dropped after verification")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_persistently_failing_verification_keeps_every_finding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call(
+                "c1",
+                json!({ "findings": [
+                    {
+                        "file": "src/lib.rs",
+                        "line": 2,
+                        "severity": "warning",
+                        "complexity": 3,
+                        "title": "First kept issue",
+                        "body": "The guard is dropped."
+                    },
+                    {
+                        "file": "src/lib.rs",
+                        "line": 3,
+                        "severity": "warning",
+                        "complexity": 2,
+                        "title": "Second kept issue",
+                        "body": "The anchor moved."
+                    }
+                ] }),
+            ),
+            text_response("Done."),
+            text_response("that is not JSON"),
+            text_response("still not JSON"),
+            text_response(&summary_json()),
+        ]);
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_files: 1,
+                verify_findings: true,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(false).await?;
+        assert!(
+            outcome.verified_out.is_empty(),
+            "an unavailable verifier never vetoes findings"
+        );
+        assert_eq!(outcome.comments.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_different_finding_at_the_same_line_resolves_the_old_thread_and_opens_a_new_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let header = "![warning](https://img.shields.io/badge/warning-orange) ![effort 3](https://img.shields.io/badge/effort_3-yellow) **Lock dropped early**";
+        let old_thread = ReviewThread {
+            id: "T_OLD".to_owned(),
+            comment_id: 902,
+            resolved: false,
+            path: "src/lib.rs".to_owned(),
+            line: Some(2),
+            original_line: Some(2),
+        };
+        let gateway = Arc::new(
+            FakeGateway::with_threads(vec![old_thread]).and_comments(vec![
+                crate::github::ExistingComment {
+                    id: 902,
+                    path: "src/lib.rs".to_owned(),
+                    line: Some(2),
+                    side: Some(Side::Right),
+                    body: format!("{header}\n\nThe guard is dropped."),
+                    author: "difftrace[bot]".to_owned(),
+                    in_reply_to: None,
+                },
+            ]),
+        );
+        let round = runner(
+            Arc::new(MockApiClient::new("review-model").with_responses(vec![
+                tool_call(
+                    "c1",
+                    json!({
+                        "findings": [{
+                            "file": "src/lib.rs",
+                            "line": 2,
+                            "severity": "warning",
+                            "complexity": 2,
+                            "title": "Anchor drifted",
+                            "body": "The anchor moved."
+                        }]
+                    }),
+                ),
+                text_response("Done."),
+                text_response(&summary_json()),
+            ])),
+            Arc::clone(&gateway),
+        )?;
+        let outcome = round.review_all(false).await?;
+        assert_eq!(
+            gateway.resolved_threads(),
+            vec!["T_OLD".to_owned()],
+            "the replaced issue's thread is resolved"
+        );
+        assert!(
+            gateway.posted_replies().is_empty(),
+            "nothing is replied into the replaced issue's thread"
+        );
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(
+            submission.comments.len(),
+            1,
+            "the fresh issue is posted as a new thread"
+        );
+        let comment = gateway
+            .posted_comments()
+            .first()
+            .map(|(_, body)| body.clone())
+            .ok_or("the standing comment must be posted")?;
+        let registry = extract_registry(&comment).ok_or("registry must embed")?;
+        assert_eq!(registry.issues.len(), 2);
+        let replaced = registry.issues.first().ok_or("old issue")?;
+        assert_eq!(replaced.title, "Lock dropped early");
+        assert_eq!(replaced.status, IssueStatus::Fixed);
+        assert_eq!(replaced.resolved_round, Some(2));
+        assert_eq!(replaced.resolved_sha.as_deref(), Some("headsha"));
+        let raised = registry.issues.get(1).ok_or("fresh issue")?;
+        assert_eq!(raised.title, "Anchor drifted");
+        assert_eq!(raised.status, IssueStatus::Open);
+        assert_eq!(raised.raised_round, 2);
+        assert_eq!(raised.thread_id, None);
+        assert!(
+            outcome.standing_body.contains("✅ ~~Lock dropped early~~"),
+            "the replaced issue appears in the history section"
         );
         Ok(())
     }

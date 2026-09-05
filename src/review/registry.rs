@@ -46,6 +46,7 @@ pub(crate) struct RoundFindings<'a> {
     pub finding_threads: &'a [Option<String>],
     pub dropped: &'a [(Finding, &'a str)],
     pub threads: &'a [ReviewThread],
+    pub retired: &'a [String],
 }
 
 impl Registry {
@@ -85,7 +86,7 @@ impl Registry {
         let mut seen: Vec<bool> = self.issues.iter().map(|_| false).collect();
 
         for (finding, thread_id) in grounded_with_threads(round.grounded, round.finding_threads) {
-            let index = self.match_open_index(finding, thread_id);
+            let index = self.match_open_index(finding, thread_id, round.retired);
             if let Some(i) = index {
                 let Some(issue) = self.issues.get_mut(i) else {
                     continue;
@@ -179,7 +180,12 @@ impl Registry {
         self
     }
 
-    fn match_open_index(&self, finding: &Finding, thread_id: Option<&str>) -> Option<usize> {
+    fn match_open_index(
+        &self,
+        finding: &Finding,
+        thread_id: Option<&str>,
+        retired: &[String],
+    ) -> Option<usize> {
         if let Some(id) = thread_id
             && let Some(i) = self.issues.iter().position(|issue| {
                 issue.status == IssueStatus::Open && issue.thread_id.as_deref() == Some(id)
@@ -192,8 +198,22 @@ impl Registry {
                 && issue.anchored
                 && issue.file == finding.file
                 && issue.line == Some(finding.line as u64)
+                && same_issue_title(&issue.title, &finding.title)
+                && issue
+                    .thread_id
+                    .as_deref()
+                    .is_none_or(|id| !retired.iter().any(|retired_id| retired_id == id))
         })
     }
+}
+
+// The shared issue-identity key: trimmed, case-folded over Unicode.
+pub(crate) fn normalize_title(title: &str) -> String {
+    title.trim().to_lowercase()
+}
+
+pub(crate) fn same_issue_title(a: &str, b: &str) -> bool {
+    normalize_title(a) == normalize_title(b)
 }
 
 fn grounded_with_threads<'a>(
@@ -328,6 +348,7 @@ mod tests {
             finding_threads: &finding_threads,
             dropped: &dropped,
             threads: &[thread("T_A", false)],
+            retired: &[],
         });
         assert_eq!(merged.round, 2);
         let fixed = merged.issues.first().ok_or("expected an issue")?;
@@ -356,11 +377,84 @@ mod tests {
             finding_threads: &finding_threads,
             dropped: &dropped,
             threads: &[thread("T_A", false)],
+            retired: &[],
         });
         let issue = merged.issues.first().ok_or("expected an issue")?;
         assert_eq!(issue.status, IssueStatus::Open);
         assert_eq!(issue.last_round, 2);
         assert!(issue.resolved_sha.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn merge_records_the_replaced_issue_fixed_when_its_thread_is_retired()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = Registry {
+            round: 1,
+            issues: vec![open_issue("src/alpha.rs", 2, Severity::Warning, "T_A")],
+        };
+        let mut fresh = finding("src/alpha.rs", 2, Severity::Warning);
+        fresh.title = "A different issue".to_owned();
+        let grounded = vec![fresh];
+        let finding_threads = vec![None];
+        let dropped: Vec<(Finding, &str)> = Vec::new();
+        let retired = vec!["T_A".to_owned()];
+        let merged = registry.merge(&RoundFindings {
+            head_sha: "round2sha",
+            grounded: &grounded,
+            finding_threads: &finding_threads,
+            dropped: &dropped,
+            threads: &[thread("T_A", false)],
+            retired: &retired,
+        });
+        let replaced = merged.issues.first().ok_or("expected the old issue")?;
+        assert_eq!(
+            replaced.status,
+            IssueStatus::Fixed,
+            "the retired thread's issue is fixed, not overwritten"
+        );
+        assert_eq!(replaced.title, "Lock dropped early");
+        assert_eq!(replaced.resolved_sha.as_deref(), Some("round2sha"));
+        assert_eq!(replaced.resolved_round, Some(2));
+        let raised = merged.issues.get(1).ok_or("expected the fresh issue")?;
+        assert_eq!(raised.status, IssueStatus::Open);
+        assert_eq!(raised.title, "A different issue");
+        assert_eq!(raised.thread_id, None);
+        assert_eq!(raised.raised_round, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_does_not_glue_a_differently_titled_finding_through_the_positional_arm()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = Registry {
+            round: 1,
+            issues: vec![open_issue("src/alpha.rs", 2, Severity::Warning, "T_A")],
+        };
+        let mut other = finding("src/alpha.rs", 2, Severity::Warning);
+        other.title = "A different issue".to_owned();
+        let grounded = vec![other];
+        let finding_threads = vec![None];
+        let dropped: Vec<(Finding, &str)> = Vec::new();
+        let merged = registry.merge(&RoundFindings {
+            head_sha: "round2sha",
+            grounded: &grounded,
+            finding_threads: &finding_threads,
+            dropped: &dropped,
+            threads: &[],
+            retired: &[],
+        });
+        let held = merged.issues.first().ok_or("expected the open issue")?;
+        assert_eq!(
+            held.status,
+            IssueStatus::Fixed,
+            "not re-raised, the issue is recorded fixed — never overwritten"
+        );
+        assert_eq!(held.title, "Lock dropped early");
+        assert_eq!(held.resolved_sha.as_deref(), Some("round2sha"));
+        let raised = merged.issues.get(1).ok_or("expected the fresh issue")?;
+        assert_eq!(raised.status, IssueStatus::Open);
+        assert_eq!(raised.title, "A different issue");
         Ok(())
     }
 
@@ -377,6 +471,7 @@ mod tests {
             finding_threads: &[],
             dropped: &[],
             threads: &[thread("T_A", true)],
+            retired: &[],
         });
         let issue = merged.issues.first().ok_or("expected an issue")?;
         assert_eq!(issue.status, IssueStatus::ManuallyResolved);
@@ -418,6 +513,7 @@ mod tests {
             finding_threads: &[],
             dropped: &[(dropped_finding, "line outside the changed hunks")],
             threads: &[],
+            retired: &[],
         });
         let issue = merged.issues.first().ok_or("expected an issue")?;
         assert_eq!(issue.status, IssueStatus::Open);
@@ -540,6 +636,7 @@ mod tests {
             finding_threads: &[],
             dropped: &[(dropped_finding, "line outside the changed hunks")],
             threads: &[thread("T_A", false)],
+            retired: &[],
         });
         assert_eq!(
             merged.issues.len(),
@@ -569,6 +666,7 @@ mod tests {
             finding_threads: &finding_threads,
             dropped: &[],
             threads: &[],
+            retired: &[],
         });
         assert_eq!(
             merged.issues.first().ok_or("issue")?.thread_id.as_deref(),
