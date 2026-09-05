@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-05
+
+### Fixed
+
+- Review-round hardening of the registry: the review event now derives
+  from the merged registry's unresolved blockers — one source of truth
+  with the standing verdict, so an unanchored blocking finding still
+  requests changes (pinned by
+  `an_unanchored_blocking_finding_still_requests_changes`); a verdict
+  comment that cannot be read fails the run before any write rather
+  than resetting the registry; `>` is escaped in the embedded JSON so
+  file names and titles containing `-->` cannot truncate it
+  (`the_embedded_registry_survives_arrows_in_titles_and_files`); a
+  finding re-flagged with an out-of-hunk citation keeps its anchored
+  issue open instead of churning fixed→re-raised
+  (`a_dropped_reflag_keeps_the_anchored_issue_open`); and an issue's
+  thread identity refreshes on every re-raise so a later fix records
+  `fixed in round N` rather than a stale `manually resolved`
+  (`a_thread_match_refreshes_the_stale_thread_id`). The round-body
+  stat line counts every raised finding of the round, grounded and
+  unanchored.
+
 ## [0.4.0] - 2026-09-05
 
 ### Changed
