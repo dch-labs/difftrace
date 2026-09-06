@@ -1,6 +1,6 @@
 [package]
 name = "difftrace"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "An AI pull-request reviewer for GitHub, built on loopctl"
@@ -24,7 +24,7 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures = "0.3"
-loopctl = { git = "https://github.com/dch-labs/loopctl", features = ["anthropic", "openai", "streaming", "testing", "zai"] }
+loopctl = { git = "https://github.com/dch-labs/loopctl", rev = "v0.3.1", features = ["anthropic", "openai", "streaming", "testing", "zai"] }
 octocrab = "0.54"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

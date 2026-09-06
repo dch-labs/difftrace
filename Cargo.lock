@@ -447,7 +447,7 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
 name = "difftrace"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64",
  "clap",
@@ -1211,8 +1211,8 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "loopctl"
-version = "0.3.0"
-source = "git+https://github.com/dch-labs/loopctl#275943d5f01d493f2e9b82222dfd1517f6898460"
+version = "0.3.1"
+source = "git+https://github.com/dch-labs/loopctl?rev=v0.3.1#b29879147077d1bc0b66f46a64eb4e6a495a9b93"
 dependencies = [
  "async-stream",
  "bytes",

@@ -5,7 +5,70 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0] - 2026-09-06
+
+### Added
+
+- Cross-review memory: `difftrace review --memory <file>` loads a
+  project-memory file into the reviewer's rubric (quoted as data) and
+  appends a per-commit learning section after each posted review — which
+  commit, clean or findings, raised and fixed titles. The reference
+  workflow persists the file with `actions/cache` keyed by repository
+  and pull request, so the reviewer remembers previous rounds and
+  previous PRs (pinned by `load_returns_none_for_a_missing_or_empty_file`,
+  `append_prunes_and_keeps_the_newest_sections`, and
+  `a_learning_section_names_the_commit_state_and_titles`).
+- Evidence packs: every batch's prompt now carries the final content of
+  each changed file at the reviewed commit — full for files that fit
+  the cap, ±40-line windows around the hunks for large ones — quoted
+  as untrusted data, so the reviewer reasons over the real file instead
+  of choosing whether to fetch it (pinned by
+  `a_small_file_rides_in_full`,
+  `a_large_file_becomes_windows_around_its_hunks`, and
+  `an_unreadable_file_degrades_to_a_note`).
+- A miss-hunt second pass: when the first pass records no blocking
+  finding, the batches re-run with an adversarial framing (lifecycle
+  transitions, unchanged or test code the change activates, terminal
+  actions on the wrong path) and any surviving findings ride the normal
+  verification and grounding pipeline. Disable with
+  `review.miss_hunt = false` (pinned by
+  `a_clean_first_pass_triggers_the_miss_hunt`,
+  `a_blocking_first_pass_skips_the_miss_hunt`, and
+  `the_hunt_rubric_argues_against_a_clean_first_pass`).
+- A hunt finding that repeats a first-pass finding (same file, line,
+  and title) is dropped instead of double-counting the round and the
+  fix-all prompt (pinned by
+  `a_hunt_finding_repeating_the_first_pass_is_dropped`).
+- A run that posts the review but then errors records an
+  "(errored)" memory section, so the memory file reflects the round
+  even when the verdict write failed.
+
+### Changed
+
+- Cross-review memory records an incomplete round as `(incomplete)`
+  with the unreviewed file list, never as clean — a round that could
+  not read every file does not teach the next round that the change
+  was read (pinned by
+  `a_learning_section_names_the_commit_state_and_titles`).
+- Batch resilience: a reviewer run that cannot complete a batch
+  (provider outage, stream timeout) retries the batch once, then
+  records it in a visible "⚠️ Unreviewed files" section of the standing
+  comment instead of failing the whole review — the batches that did
+  complete still post their findings and verdict. A round with
+  unreviewed files never posts approval: the review is submitted as a
+  neutral `COMMENT` with an "Approval withheld" verdict, the round
+  body drops the clean-round wording, and the memory section records
+  the round as incomplete (pinned by
+  `a_round_with_unreviewed_files_does_not_post_approval`).
+- `ReviewSettings` no longer implements `Copy` (it now carries the
+  runtime memory content) — source-breaking for downstream `Copy`
+  users; rides the next minor bump.
+- Two reviewer rubric rules: lifecycle outcome typing (trace every
+  stop/shutdown path end to end — which branch returns, which terminal
+  action fires; a normal stop never shares a terminal action with a
+  forced exit) and test-code grading (test code that can kill
+  processes, race signals, or corrupt the environment is
+  warning-grade).
 
 ## [0.5.0] - 2026-09-06
 
