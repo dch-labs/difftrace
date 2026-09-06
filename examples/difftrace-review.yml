@@ -110,6 +110,7 @@ jobs:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
           DIFFTRACE_MAX_TOKENS: '32768'
+          DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 
@@ -256,6 +257,7 @@ jobs:
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
           DIFFTRACE_MAX_TOKENS: '32768'
+          DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 

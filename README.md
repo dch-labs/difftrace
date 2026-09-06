@@ -39,7 +39,8 @@ The `DIFFTRACE_PROFILE` environment variable overrides
 `provider.profile` without a config file — the natural mechanism in CI,
 where no `~/.difftrace/config.toml` exists (e.g. `DIFFTRACE_PROFILE=zai`
 in a GitHub Action). `DIFFTRACE_MODEL` overrides `provider.model` the
-same way, as does `DIFFTRACE_MAX_TOKENS` for `provider.max_tokens`; an
+same way, as do `DIFFTRACE_MAX_TOKENS` for `provider.max_tokens` and
+`DIFFTRACE_STREAM_TIMEOUT_SECS` for `review.stream_timeout_secs`; an
 empty value counts as unset, and without either the provider's default
 model applies (zai: `glm-4.7`).
 

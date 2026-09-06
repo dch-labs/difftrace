@@ -41,6 +41,7 @@ pub struct ReviewSettings {
     pub verify_findings: bool,
     pub miss_hunt: bool,
     pub memory_content: Option<String>,
+    pub stream_timeout_secs: u64,
 }
 
 impl Default for ReviewSettings {
@@ -53,6 +54,7 @@ impl Default for ReviewSettings {
             verify_findings: true,
             miss_hunt: true,
             memory_content: None,
+            stream_timeout_secs: 900,
         }
     }
 }
@@ -93,6 +95,20 @@ impl DifftraceConfig {
                 ));
             }
             self.provider.max_tokens = Some(parsed);
+        }
+        if let Some(secs) = std::env::var("DIFFTRACE_STREAM_TIMEOUT_SECS")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            let parsed = secs.trim().parse::<u64>().map_err(|_| {
+                DifftraceError::Cli(format!("invalid DIFFTRACE_STREAM_TIMEOUT_SECS: {secs}"))
+            })?;
+            if parsed == 0 {
+                return Err(DifftraceError::Cli(
+                    "DIFFTRACE_STREAM_TIMEOUT_SECS must be at least 1".to_owned(),
+                ));
+            }
+            self.review.stream_timeout_secs = parsed;
         }
         Ok(())
     }
@@ -249,6 +265,34 @@ mod tests {
             "names the constraint: {err}"
         );
         env.remove("DIFFTRACE_MAX_TOKENS");
+        Ok(())
+    }
+
+    #[test]
+    fn the_stream_timeout_env_override_reaches_the_review_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_STREAM_TIMEOUT_SECS"]);
+        env.set("DIFFTRACE_STREAM_TIMEOUT_SECS", "1200");
+        let mut config = DifftraceConfig::default();
+        config.apply_env_overrides()?;
+        assert_eq!(config.review.stream_timeout_secs, 1_200);
+        env.remove("DIFFTRACE_STREAM_TIMEOUT_SECS");
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_stream_timeout_override_is_an_error() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_STREAM_TIMEOUT_SECS"]);
+        env.set("DIFFTRACE_STREAM_TIMEOUT_SECS", "0");
+        let mut config = DifftraceConfig::default();
+        let Err(err) = config.apply_env_overrides() else {
+            return Err("expected a zero stream timeout to fail".into());
+        };
+        assert!(
+            err.to_string().contains("DIFFTRACE_STREAM_TIMEOUT_SECS"),
+            "names the variable: {err}"
+        );
+        env.remove("DIFFTRACE_STREAM_TIMEOUT_SECS");
         Ok(())
     }
 

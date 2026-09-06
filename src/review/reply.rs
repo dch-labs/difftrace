@@ -283,7 +283,7 @@ async fn answer<C: loopctl::api::ApiClient + 'static>(
         Arc::clone(inputs.client),
         registry,
         loopctl::config::SessionConfig::default(),
-        crate::review::runner::production_managers(),
+        crate::review::runner::production_managers(inputs.settings.stream_timeout_secs),
     );
     agent.add_contributor(Box::new(ReplyRubric::new(inputs.overview, mode)));
     agent.register_observer(Arc::new(match inputs.trajectory_dir {

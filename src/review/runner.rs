@@ -33,8 +33,14 @@ use crate::tools::ReviewScope;
 
 pub(crate) const TOOL_OUTPUT_MAX_CHARS: usize = 16 * 1024;
 
-pub(crate) fn production_managers() -> LoopManagers {
-    LoopManagers::new().with_stream_handler(loopctl::stream::handler::StreamHandler::new())
+pub(crate) fn production_managers(stream_timeout_secs: u64) -> LoopManagers {
+    let handler = loopctl::stream::handler::StreamHandler::new().with_timeout_config(
+        loopctl::stream::handler::StreamTimeoutConfig {
+            total_stream_timeout: std::time::Duration::from_secs(stream_timeout_secs),
+            ..loopctl::stream::handler::StreamTimeoutConfig::default()
+        },
+    );
+    LoopManagers::new().with_stream_handler(handler)
 }
 
 const SUMMARY_SYSTEM: &str = "\
@@ -211,7 +217,7 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             Arc::clone(&self.client),
             registry,
             loopctl::config::SessionConfig::default(),
-            production_managers(),
+            production_managers(self.settings.stream_timeout_secs),
         );
         let rubric = if hunt {
             ReviewRubric::hunt(&self.overview)
@@ -691,7 +697,7 @@ diff --git a/src/lib.rs b/src/lib.rs
     #[test]
     fn the_production_managers_carry_a_real_retry_ladder() {
         use loopctl::managers::StreamCapable as _;
-        let managers = production_managers();
+        let managers = production_managers(900);
         let handler = managers.stream_handler();
         assert_eq!(
             handler.rate_limit_config().max_retries,
@@ -700,6 +706,11 @@ diff --git a/src/lib.rs b/src/lib.rs
         );
         assert_eq!(handler.retry_config().max_retries, 3);
         assert!(handler.rate_limit_config().respect_retry_after);
+        assert_eq!(
+            handler.timeout_config().total_stream_timeout,
+            std::time::Duration::from_mins(15),
+            "the configured stream budget reaches the handler"
+        );
     }
 
     #[tokio::test]
