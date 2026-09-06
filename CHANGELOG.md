@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-07
+
+### Added
+
+- `provider.max_tokens` (env `DIFFTRACE_MAX_TOKENS`) sets the
+  per-response output budget on Anthropic-protocol providers; the
+  reference workflow ships 32768 and takes effect with this release —
+  earlier binaries ignore the variable and run at the provider
+  default, so the workflow's version+checksum pins must be bumped in
+  the same release. The provider default of 8192 is
+  unusable for thinking models — a model can burn the whole budget on
+  reasoning before emitting anything usable.
+
+### Changed
+
+- A batch whose final turn reaches the output budget, or that ends
+  without a single `record_findings` call, fails into the retry path
+  and lands in the "⚠️ Unreviewed files" section — a truncated think
+  can no longer masquerade as a clean review, and such a round
+  withholds approval and records `(incomplete)` memory instead of
+  approving (pinned by `a_truncated_batch_is_recorded_unreviewed_instead_of_approved`,
+  `a_final_turn_truncated_at_the_output_budget_fails_the_batch`, and
+  `a_run_out_of_turns_without_a_verdict_is_not_a_clean_review`).
+- Evidence packs: lockfiles and generated files render as a one-line
+  change summary instead of thousands of windowed lines, and no single
+  file may take more than half the pack — one fat file no longer
+  starves every file after it (pinned by
+  `a_lockfile_is_summarized_not_inlined` and the share assertions in
+  `the_joined_pack_stays_under_the_total_cap`).
+- The `list_review_comments` tool drops bot-authored comments and
+  truncates human bodies to bounded excerpts — another reviewer bot's
+  embedded tool output can no longer ride the whole conversation
+  (pinned by `bot_comments_are_dropped_and_human_bodies_stay_bounded`).
+- Each batch's cross-round history is scoped to its own files, so an
+  open issue on another batch's file no longer drags a batch off its
+  files to chase context (pinned by
+  `the_batch_history_only_names_the_batchs_own_files`); the miss hunt
+  skips batches the first pass could not complete (pinned by
+  `the_hunt_skips_batches_the_first_pass_could_not_complete`).
+- The verdict comment is upserted before the review is submitted, so
+  it sits above the round's review entry and its inline comments on
+  the conversation timeline; a verdict write that cannot land warns
+  and falls open instead of blocking the review (pinned by
+  `the_verdict_comment_goes_up_before_the_review_is_submitted` and
+  `a_verdict_comment_that_cannot_be_written_does_not_block_the_review`).
+
 ## [0.6.0] - 2026-09-06
 
 ### Added
