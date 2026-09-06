@@ -66,7 +66,34 @@ fn locations_line(findings: &[&Finding]) -> String {
         .join(", ")
 }
 
-fn wrap_prompt(text: &str) -> String {
+pub(crate) fn fence_for(payload: &str) -> String {
+    let longest = payload
+        .lines()
+        .map(|line| {
+            line.trim_start()
+                .chars()
+                .take_while(|ch| *ch == '`')
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    "`".repeat(longest.saturating_add(1).max(4))
+}
+
+const PLAN_DIRECTIVES: &str = "Implement the plan below step by step. First check each step still applies — skip anything already done or no longer relevant and say so — and keep each change minimal.";
+
+pub(crate) fn plan_post_body(plan: &str) -> String {
+    let prompt = format!(
+        "{PROMPT_LABEL}\n\n{PLAN_DIRECTIVES}\n\n{}",
+        wrap_prompt(plan)
+    );
+    let fence = fence_for(&prompt);
+    format!(
+        "{plan}\n\n<details>\n<summary>🤖 Plan prompt for coding agents</summary>\n\n{fence}text\n{prompt}\n{fence}\n</details>"
+    )
+}
+
+pub(crate) fn wrap_prompt(text: &str) -> String {
     text.split('\n')
         .map(|line| {
             if line.chars().count() <= WRAP_WIDTH {
@@ -136,13 +163,14 @@ pub(crate) fn comment_body(finding: &Finding, line: u64, also: &[&Finding]) -> S
     } else {
         format!("\n\nAlso occurs at: {}", locations_line(also))
     };
+    let wrapped = wrap_prompt(&prompt);
+    let fence = fence_for(&wrapped);
     format!(
-        "{} {} **{}**\n\n{}{also_in_body}\n\n<details>\n<summary>🤖 Fix prompt for coding agents</summary>\n\n````text\n{}\n````\n</details>",
+        "{} {} **{}**\n\n{}{also_in_body}\n\n<details>\n<summary>🤖 Fix prompt for coding agents</summary>\n\n{fence}text\n{wrapped}\n{fence}\n</details>",
         finding.severity.badge(),
         complexity_badge(finding.complexity),
         finding.title,
         finding.body,
-        wrap_prompt(&prompt),
     )
 }
 
@@ -199,9 +227,10 @@ pub(crate) fn fix_all_section(
             .join("\n");
         format!("\n\nUnanchored (no inline comment posted):\n{entries}")
     };
+    let wrapped = wrap_prompt(&fix_all_prompt(findings, dropped, pr, head_sha));
+    let fence = fence_for(&wrapped);
     format!(
-        "## 🤖 Fix all findings\n{grounded}{unanchored}\n\n<details>\n<summary>Copy the fix-all prompt for coding agents</summary>\n\n````text\n{}\n````\n</details>",
-        wrap_prompt(&fix_all_prompt(findings, dropped, pr, head_sha)),
+        "## 🤖 Fix all findings\n{grounded}{unanchored}\n\n<details>\n<summary>Copy the fix-all prompt for coding agents</summary>\n\n{fence}text\n{wrapped}\n{fence}\n</details>"
     )
 }
 
@@ -370,6 +399,28 @@ mod tests {
             "a grouped pair renders one item, not two"
         );
         assert!(section.contains("\n   Also occurs at: `src/beta.rs:11`"));
+    }
+
+    #[test]
+    fn a_payload_with_longer_backtick_runs_gets_a_taller_fence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(fence_for("plain text"), "````");
+        assert_eq!(fence_for("````\nscanned"), "`````");
+        let mut body_finding = finding("src/worker.rs", 9);
+        body_finding.body = "code:\n````\nraw stays inside".to_owned();
+        let rendered = comment_body(&body_finding, 9, &[]);
+        assert!(
+            rendered.contains("`````text"),
+            "the fence grows past the payload's longest backtick run"
+        );
+        let (_, after_open) = rendered
+            .split_once("`````text\n")
+            .ok_or("expected the taller fence")?;
+        let (inside, _) = after_open
+            .split_once("\n`````\n</details>")
+            .ok_or("expected the taller close")?;
+        assert!(inside.contains("````"), "the payload line survives inside");
+        Ok(())
     }
 
     #[test]

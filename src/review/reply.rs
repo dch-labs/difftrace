@@ -154,7 +154,11 @@ pub(crate) async fn run_reply<C: loopctl::api::ApiClient + 'static>(
         });
     }
     let answer = answer(&inputs, &context, mode).await?;
-    post_answer(&inputs.gateway, inputs.pr, &target, &context.author, answer).await?;
+    let posted = match mode {
+        ReplyMode::Chat => answer,
+        ReplyMode::Plan => crate::prompts::plan_post_body(&answer),
+    };
+    post_answer(&inputs.gateway, inputs.pr, &target, &context.author, posted).await?;
     Ok(ReplyOutcome {
         refused: false,
         target: target.label(),
@@ -892,6 +896,31 @@ mod tests {
         .await?;
         assert!(!outcome.refused);
         assert_eq!(fake.posted_replies().len(), 1);
+        let (_, posted) = fake
+            .posted_replies()
+            .first()
+            .cloned()
+            .ok_or("a posted plan")?;
+        assert!(
+            posted.contains("Restore the guard"),
+            "the plan is readable in the thread"
+        );
+        assert!(
+            posted.contains("<summary>🤖 Plan prompt for coding agents</summary>"),
+            "the plan carries the collapsed copy block"
+        );
+        assert!(
+            posted.contains("````text\nPrompt for coding agents:"),
+            "the block opens with the four-backtick fence"
+        );
+        assert!(posted.contains("skip anything already done"));
+        let (_, inside) = posted
+            .split_once("Plan prompt for coding agents")
+            .ok_or("expected the copy block")?;
+        assert!(
+            inside.contains("Restore the guard"),
+            "the fenced prompt embeds the plan"
+        );
         Ok(())
     }
 

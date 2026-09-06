@@ -23,9 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `@difftrace plan` under a finding produces a step-by-step fix plan
   for it — numbered steps naming files and lines, how to verify, and
   risks — from a planning-specific prompt that reads the code but
-  never claims to change it. On the PR conversation `plan` degrades to
-  a question; the CLI rejects a conversation-targeted `plan` with a
-  hint (pinned by `a_thread_reply_carries_the_earlier_turns`,
+  never claims to change it. The plan posts with a collapsible
+  "🤖 Plan prompt for coding agents" copy block (verify-first, like
+  the fix prompts), so it pastes straight into an agent. On the PR
+  conversation `plan` degrades to a question; the CLI rejects a
+  conversation-targeted `plan` with a hint (pinned by `a_thread_reply_carries_the_earlier_turns`,
   `a_plan_prompt_names_the_finding_and_asks_for_steps`,
   `a_plan_command_posts_into_the_thread`,
   `a_plan_on_the_conversation_is_rejected_with_a_hint`, and

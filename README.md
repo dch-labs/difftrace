@@ -45,7 +45,8 @@ provider's default model applies (zai: `glm-4.7`).
 Comments starting with `@difftrace` or `/difftrace` trigger commands
 in repos whose workflows listen for them: `review` re-runs the full
 review, `plan` (under a finding) produces a step-by-step fix plan for
-that finding — files and lines to touch, how to verify, risks — and
+that finding — files and lines to touch, how to verify, risks — posted
+with a collapsible copy-prompt block addressed to coding agents, and
 anything else asks a question. Replies and plans see the earlier turns
 of their thread (or the recent conversation trail) — quoted into the
 prompt as untrusted comment text, not instructions — so follow-up
