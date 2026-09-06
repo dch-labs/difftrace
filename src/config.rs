@@ -30,7 +30,7 @@ pub struct GitHubConfig {
     pub api_base_url: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ReviewSettings {
     pub max_findings_per_file: usize,
@@ -38,6 +38,8 @@ pub struct ReviewSettings {
     pub max_turns: usize,
     pub reply_max_turns: usize,
     pub verify_findings: bool,
+    pub miss_hunt: bool,
+    pub memory_content: Option<String>,
 }
 
 impl Default for ReviewSettings {
@@ -48,6 +50,8 @@ impl Default for ReviewSettings {
             max_turns: 16,
             reply_max_turns: 8,
             verify_findings: true,
+            miss_hunt: true,
+            memory_content: None,
         }
     }
 }

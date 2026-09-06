@@ -64,9 +64,14 @@ pub struct ReviewRunner<C: loopctl::api::ApiClient> {
     trajectory_dir: Option<PathBuf>,
 }
 
-fn batch_prompt(files: &[String]) -> String {
+fn batch_prompt(files: &[String], evidence: &str, hunt: bool) -> String {
     let list = files.join("\n");
-    format!("Review these changed files:\n{list}")
+    let ask = if hunt {
+        "A first pass recorded no blocking findings in these files. Argue against that: hunt for what it missed."
+    } else {
+        "Review these changed files:"
+    };
+    format!("{ask}\n{list}\n\n{evidence}")
 }
 
 fn summary_response_format() -> ResponseFormat {
@@ -187,6 +192,8 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         &self,
         files: &[String],
         history: &str,
+        evidence: &str,
+        hunt: bool,
     ) -> Result<Findings, DifftraceError> {
         let slot = RecordFindingsTool::empty_slot();
         let registry = self
@@ -198,8 +205,15 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             loopctl::config::SessionConfig::default(),
             production_managers(),
         );
+        let rubric = if hunt {
+            ReviewRubric::hunt(&self.overview)
+        } else {
+            ReviewRubric::new(&self.overview)
+        };
         agent.add_contributor(Box::new(
-            ReviewRubric::new(&self.overview).with_history(history.to_owned()),
+            rubric
+                .with_history(history.to_owned())
+                .with_memory(self.settings.memory_content.clone()),
         ));
         agent.register_observer(Arc::new(match &self.trajectory_dir {
             Some(dir) => TrajectoryObserver::writing_to(dir),
@@ -214,7 +228,8 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
 
         let mut run_config = RunConfig::default();
         run_config.max_turns = self.settings.max_turns;
-        match agent.run(&batch_prompt(files), &run_config).await {
+        let prompt = batch_prompt(files, evidence, hunt);
+        match agent.run(&prompt, &run_config).await {
             Ok(_) | Err(LoopError::MaxTurnsExceeded { .. }) => {}
             Err(source) => return Err(DifftraceError::ReviewRun { source }),
         }
@@ -374,6 +389,14 @@ pub(crate) mod test_support {
             self.inner.stream_messages(request)
         }
 
+        fn stream_messages_with_options(
+            &self,
+            request: &StreamRequest,
+            _options: loopctl::structured::RequestOptions,
+        ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent, ApiError>> + Send + 'static>> {
+            self.stream_messages(request)
+        }
+
         fn create_message(
             &self,
             request: &StreamRequest,
@@ -385,6 +408,20 @@ pub(crate) mod test_support {
             >,
         > {
             self.inner.create_message(request)
+        }
+
+        fn create_message_with_options(
+            &self,
+            request: &StreamRequest,
+            options: loopctl::structured::RequestOptions,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = Result<loopctl::api::NonStreamingResponse, ApiError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            self.inner.create_message_with_options(request, options)
         }
     }
 }
@@ -486,7 +523,9 @@ diff --git a/src/lib.rs b/src/lib.rs
             text_response("Batch review complete."),
         ]);
         let runner = runner(Arc::new(client), ReviewSettings::default(), None)?;
-        let findings = runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
+        let findings = runner
+            .review_batch(&["src/lib.rs".to_owned()], "", "", false)
+            .await?;
         assert_eq!(findings.findings.len(), 1);
         assert_eq!(findings.findings.first().ok_or("expected a value")?.line, 2);
         Ok(())
@@ -527,7 +566,9 @@ diff --git a/src/lib.rs b/src/lib.rs
             ..ReviewSettings::default()
         };
         let runner = runner(Arc::new(client), settings, None)?;
-        let findings = runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
+        let findings = runner
+            .review_batch(&["src/lib.rs".to_owned()], "", "", false)
+            .await?;
         assert!(findings.findings.is_empty());
         Ok(())
     }
@@ -546,7 +587,9 @@ diff --git a/src/lib.rs b/src/lib.rs
             ReviewSettings::default(),
             Some(dir.clone()),
         )?;
-        runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
+        runner
+            .review_batch(&["src/lib.rs".to_owned()], "", "", false)
+            .await?;
         let entries: Vec<_> = std::fs::read_dir(&dir)?.filter_map(Result::ok).collect();
         let jsonl: Vec<_> = entries
             .iter()
@@ -594,7 +637,9 @@ diff --git a/src/lib.rs b/src/lib.rs
         ]);
         let client = Arc::new(FlakyClient::new(inner, 1));
         let runner = runner(client, ReviewSettings::default(), None)?;
-        let findings = runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
+        let findings = runner
+            .review_batch(&["src/lib.rs".to_owned()], "", "", false)
+            .await?;
         assert!(
             findings.findings.is_empty(),
             "the batch must complete after the ladder absorbs the transient failure"
@@ -762,7 +807,9 @@ diff --git a/src/lib.rs b/src/lib.rs
             ReviewSettings::default(),
             Some(dir.clone()),
         );
-        runner.review_batch(&["src/lib.rs".to_owned()], "").await?;
+        runner
+            .review_batch(&["src/lib.rs".to_owned()], "", "", false)
+            .await?;
         let mut trajectory = String::new();
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;

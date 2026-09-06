@@ -39,10 +39,13 @@ jobs:
       - name: Resolve the pull request number
         id: pr
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           PR: ${{ inputs.pr || github.event.pull_request.number }}
         run: |
           case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)" >> "$GITHUB_OUTPUT"
 
       - name: Reject fork pull requests
         if: github.event_name == 'workflow_dispatch'
@@ -83,9 +86,18 @@ jobs:
           permission-pull-requests: write
           permission-contents: write
 
+      - name: Restore the review memory
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.difftrace/memory
+          key: difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-${{ steps.pr.outputs.sha }}
+          restore-keys: |
+            difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-
+            difftrace-mem-${{ github.repository }}-
+
       - name: Review the pull request
         run: |
-          difftrace review --repo "$REPO" --pr "$PR"
+          difftrace review --repo "$REPO" --pr "$PR" --memory "$HOME/.difftrace/memory/learnings.md"
         env:
           PR: ${{ steps.pr.outputs.pr }}
           REPO: ${{ github.repository }}
@@ -165,10 +177,13 @@ jobs:
       - name: Resolve the pull request number
         id: pr
         env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)" >> "$GITHUB_OUTPUT"
 
       # The binary is pinned to the tagged v0.5.0 release; bump version and
       # checksum together on every difftrace release.
@@ -199,10 +214,19 @@ jobs:
           permission-pull-requests: write
           permission-contents: write
 
+      - name: Restore the review memory
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.difftrace/memory
+          key: difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-${{ steps.pr.outputs.sha }}
+          restore-keys: |
+            difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-
+            difftrace-mem-${{ github.repository }}-
+
       - name: Run the command
         run: |
           if [ "$VERB" = "review" ]; then
-            difftrace review --repo "$REPO" --pr "$PR"
+            difftrace review --repo "$REPO" --pr "$PR" --memory "$HOME/.difftrace/memory/learnings.md"
           elif [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "review" ]; then
             difftrace plan --repo "$REPO" --pr "$PR" --review-comment "$COMMENT_ID"
           elif [ "$COMMENT_KIND" = "issue" ]; then

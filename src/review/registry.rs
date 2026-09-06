@@ -253,7 +253,8 @@ pub(crate) fn extract_registry(body: &str) -> Option<Registry> {
     serde_json::from_str(rest.get(0..end)?).ok()
 }
 
-pub(crate) fn short_sha(sha: &str) -> String {
+#[must_use]
+pub fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 

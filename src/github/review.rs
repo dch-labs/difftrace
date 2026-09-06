@@ -32,6 +32,7 @@ impl Side {
 pub enum ReviewEvent {
     Approved,
     ChangesRequested,
+    Commented,
 }
 
 impl ReviewEvent {
@@ -39,6 +40,7 @@ impl ReviewEvent {
         match self {
             Self::Approved => "APPROVE",
             Self::ChangesRequested => "REQUEST_CHANGES",
+            Self::Commented => "COMMENT",
         }
     }
 }

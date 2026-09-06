@@ -22,7 +22,7 @@ const OWN_LOGIN: &str = "difftrace[bot]";
 #[derive(Default)]
 struct Inner {
     overview: Mutex<Option<PrOverview>>,
-    file: Mutex<Option<(String, String)>>,
+    files: Mutex<Vec<(String, String)>>,
     comments: Mutex<Vec<ExistingComment>>,
     submitted: Mutex<Option<ReviewSubmission>>,
     submit_calls: Mutex<usize>,
@@ -62,13 +62,22 @@ impl FakeGateway {
 
     pub(crate) fn with_file(path: &str, content: &str) -> Self {
         let gateway = Self::empty();
-        *gateway
-            .inner
-            .file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((path.to_owned(), content.to_owned()));
         gateway
+            .inner
+            .files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((path.to_owned(), content.to_owned()));
+        gateway
+    }
+
+    pub(crate) fn and_file(self, path: &str, content: &str) -> Self {
+        self.inner
+            .files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((path.to_owned(), content.to_owned()));
+        self
     }
 
     pub(crate) fn with_comments(comments: Vec<ExistingComment>) -> Self {
@@ -301,17 +310,12 @@ impl PrGateway for FakeGateway {
             .push((path.clone(), git_ref));
         let configured = self
             .inner
-            .file
+            .files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|(p, content)| {
-                if *p == path {
-                    content.clone()
-                } else {
-                    String::new()
-                }
-            });
+            .iter()
+            .find(|(stored, _)| *stored == path)
+            .map(|(_, content)| content.clone());
         Box::pin(async move {
             match configured {
                 Some(content) if !content.is_empty() => Ok(content),

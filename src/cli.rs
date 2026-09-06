@@ -43,6 +43,12 @@ pub struct ReviewArgs {
         help = "Path to a config file (default: ~/.difftrace/config.toml)"
     )]
     pub config: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        help = "Cross-review memory file: loaded into the review, appended after posting"
+    )]
+    pub memory: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Args)]

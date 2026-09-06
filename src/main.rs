@@ -118,7 +118,11 @@ async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceErro
         index.len(),
         config.review.batch_files
     );
+    if let Some(path) = &args.memory {
+        config.review.memory_content = difftrace::review::memory::load(path);
+    }
     let trajectory_dir = trajectory_dir();
+    let head_sha = overview.head_sha.clone();
     let runner = ReviewRunner::new(
         client,
         std::sync::Arc::clone(&gateway) as std::sync::Arc<dyn PrGateway>,
@@ -127,7 +131,47 @@ async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceErro
         config.review,
         trajectory_dir,
     );
-    let outcome = runner.review_all(args.dry_run).await?;
+    let reviewed = runner.review_all(args.dry_run).await;
+    let outcome = match reviewed {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            // The round failed before completing; the review itself may
+            // or may not already stand on GitHub. Record the round
+            // either way, without claiming a posting that did not
+            // happen.
+            if !args.dry_run
+                && let Some(path) = &args.memory
+            {
+                let errored = format!(
+                    "\n## review {} (errored)\n- the round errored; whether a review posted is not recorded\n",
+                    difftrace::review::registry::short_sha(&head_sha)
+                );
+                if let Err(append_err) = difftrace::review::memory::append(path, &errored) {
+                    eprintln!("difftrace: cannot update the memory file: {append_err}");
+                }
+            }
+            return Err(err);
+        }
+    };
+    if !args.dry_run
+        && let Some(path) = &args.memory
+    {
+        let raised: Vec<String> = outcome
+            .findings
+            .iter()
+            .chain(outcome.verified_out.iter().map(|(finding, _)| finding))
+            .map(|finding| finding.title.clone())
+            .collect();
+        let section = difftrace::review::memory::learning_section(
+            &outcome.head_sha,
+            &raised,
+            &outcome.fixed_this_round,
+            &outcome.unreviewed_batches,
+        );
+        if let Err(err) = difftrace::review::memory::append(path, &section) {
+            eprintln!("difftrace: cannot update the memory file: {err}");
+        }
+    }
     if args.dry_run {
         println!("{}", outcome.round_body.trim_end());
         println!();

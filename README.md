@@ -110,7 +110,28 @@ Writing the verdict comment is
 retried and fails the run loudly if every attempt fails, so a missing
 verdict is visible rather than silent.
 
-The reviewer itself reviews with memory and a spine. Every batch sees
+The reviewer itself reviews with evidence, memory, and a spine. Pass
+`--memory <file>` and the review loads a cross-review memory file into
+the reviewer's rubric — quoted as data, like comment history — and
+appends a per-commit learning section after each posted review (which
+commit, clean or findings, raised and fixed titles). The reference
+workflow backs the file with `actions/cache`, so the memory survives
+between runs per repository and pull request. Every
+batch's prompt carries an evidence pack assembled by difftrace — the
+final content of each changed file at the reviewed commit (full, or
+windows around the hunks for large files), quoted as untrusted data —
+so review does not depend on the model choosing to fetch context. And
+when the first pass records no blocking finding, a second hunt pass
+re-runs the batches with an adversarial framing — lifecycle
+transitions, unchanged or test code the change activates, terminal
+actions on the wrong path — so a clean verdict is argued for, not
+assumed. A reviewer run that cannot complete a batch (provider outage)
+retries once, then records the batch as unreviewed in a visible
+section instead of failing the whole review — a partial review with a
+stated gap beats no review, and a round with unreviewed files never
+posts approval: the verdict reads "Approval withheld" and the review
+is submitted as a neutral comment that cannot satisfy branch
+protection. Every batch sees
 the registry's cross-round context — which issues are still open and
 which were fixed in which round — and is told to re-report still-open
 issues at the same location with the same title (landing in their

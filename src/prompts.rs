@@ -26,6 +26,10 @@ pub(crate) fn review_round_body(
     let noun = if findings == 1 { "finding" } else { "findings" };
     let head = if clean {
         format!("🤖 difftrace reviewed `{short}` — clean round, nothing to fix.")
+    } else if findings == 0 {
+        format!(
+            "🤖 difftrace reviewed `{short}` — no findings in the files it reviewed; the round is incomplete."
+        )
     } else {
         format!(
             "🤖 difftrace reviewed `{short}` — {findings} {noun} this round; fix prompts below."

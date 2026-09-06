@@ -5,7 +5,9 @@
 //! output.
 
 pub mod batch;
+pub mod evidence;
 pub mod logging;
+pub mod memory;
 pub mod record;
 pub mod registry;
 pub mod reply;
@@ -13,6 +15,9 @@ pub mod rubric;
 pub mod runner;
 
 pub use batch::ReviewOutcome;
+pub use memory::append;
+pub use memory::learning_section;
+pub use memory::load;
 pub use record::RecordFindingsTool;
 pub use reply::ReplyMode;
 pub use reply::ReplyOutcome;
