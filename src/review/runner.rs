@@ -62,6 +62,7 @@ pub struct ReviewRunner<C: loopctl::api::ApiClient> {
     overview: PrOverview,
     settings: ReviewSettings,
     trajectory_dir: Option<PathBuf>,
+    output_budget: Option<u32>,
 }
 
 fn batch_prompt(files: &[String], evidence: &str, hunt: bool) -> String {
@@ -185,7 +186,14 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             overview,
             settings,
             trajectory_dir,
+            output_budget: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_output_budget(mut self, budget: Option<u32>) -> Self {
+        self.output_budget = budget;
+        self
     }
 
     pub async fn review_batch(
@@ -229,9 +237,29 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         let mut run_config = RunConfig::default();
         run_config.max_turns = self.settings.max_turns;
         let prompt = batch_prompt(files, evidence, hunt);
-        match agent.run(&prompt, &run_config).await {
-            Ok(_) | Err(LoopError::MaxTurnsExceeded { .. }) => {}
+        let run = match agent.run(&prompt, &run_config).await {
+            Ok(run) => Some(run),
+            Err(LoopError::MaxTurnsExceeded { .. }) => None,
             Err(source) => return Err(DifftraceError::ReviewRun { source }),
+        };
+        if let (Some(budget), Some(run)) = (self.output_budget, run.as_ref())
+            && let Some(final_turn) = run.turns.last()
+        {
+            tracing::info!(
+                target: "difftrace::review",
+                output_tokens = final_turn.output_tokens,
+                tool_calls = final_turn.tool_calls.len(),
+                "batch run ended"
+            );
+            if final_turn.tool_calls.is_empty() && final_turn.output_tokens >= u64::from(budget) {
+                tracing::warn!(
+                    target: "difftrace::review",
+                    output_tokens = final_turn.output_tokens,
+                    budget,
+                    "the batch's final turn was truncated at the output budget"
+                );
+                return Err(DifftraceError::ReviewTruncated { budget });
+            }
         }
         let recorded = slot
             .lock()
@@ -242,7 +270,14 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
                 },
             })?
             .clone();
-        Ok(recorded.unwrap_or_default())
+        if let Some(findings) = recorded {
+            return Ok(findings);
+        }
+        tracing::warn!(
+            target: "difftrace::review",
+            "the batch run ended without a single record_findings call"
+        );
+        Err(DifftraceError::ReviewNoVerdict)
     }
 
     pub async fn summarize(&self, batches: &[Findings]) -> Result<ReviewSummary, DifftraceError> {
@@ -555,7 +590,8 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[tokio::test]
-    async fn a_budget_exhausted_batch_stops_cleanly() -> Result<(), Box<dyn std::error::Error>> {
+    async fn a_run_out_of_turns_without_a_verdict_is_not_a_clean_review()
+    -> Result<(), Box<dyn std::error::Error>> {
         let client = MockApiClient::new("review-model").with_responses(vec![tool_call(
             "call_1",
             "get_file_diff",
@@ -566,6 +602,44 @@ diff --git a/src/lib.rs b/src/lib.rs
             ..ReviewSettings::default()
         };
         let runner = runner(Arc::new(client), settings, None)?;
+        let err = runner
+            .review_batch(&["src/lib.rs".to_owned()], "", "", false)
+            .await
+            .err()
+            .ok_or("a run that never recorded findings must fail the batch")?;
+        assert!(err.to_string().contains("without ever recording findings"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_final_turn_truncated_at_the_output_budget_fails_the_batch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The mock reports 25 output tokens per turn; 10 reads as truncated.
+        let client = MockApiClient::new("review-model").with_responses(vec![text_response("…")]);
+        let runner =
+            runner(Arc::new(client), ReviewSettings::default(), None)?.with_output_budget(Some(10));
+        let err = runner
+            .review_batch(&["src/lib.rs".to_owned()], "", "", false)
+            .await
+            .err()
+            .ok_or("a final turn at the budget must fail the batch")?;
+        assert!(
+            err.to_string()
+                .contains("truncated at the 10-token output budget"),
+            "the failure names the truncation: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_final_turn_under_the_budget_with_a_verdict_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call("call_1", "record_findings", json!({ "findings": [] })),
+            text_response("Clean batch."),
+        ]);
+        let runner =
+            runner(Arc::new(client), ReviewSettings::default(), None)?.with_output_budget(Some(64));
         let findings = runner
             .review_batch(&["src/lib.rs".to_owned()], "", "", false)
             .await?;

@@ -24,6 +24,20 @@ const NO_AUTH_KEY: &str = "ollama";
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 
+const DEFAULT_OUTPUT_BUDGET: u32 = 8192;
+
+#[must_use]
+pub fn enforced_output_budget(cfg: &DifftraceConfig) -> Option<u32> {
+    match cfg.provider.profile {
+        ProviderProfile::Anthropic | ProviderProfile::Zai => Some(budget(cfg)),
+        ProviderProfile::OpenAi | ProviderProfile::Ollama => None,
+    }
+}
+
+fn budget(cfg: &DifftraceConfig) -> u32 {
+    cfg.provider.max_tokens.unwrap_or(DEFAULT_OUTPUT_BUDGET)
+}
+
 pub enum DifftraceClient {
     Anthropic(AnthropicClient),
     OpenAi(OpenAiClient),
@@ -115,7 +129,9 @@ pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceE
     match provider.profile {
         ProviderProfile::Anthropic => {
             let key = env_key("ANTHROPIC_API_KEY")?;
-            let mut builder = AnthropicClient::builder().with_api_key(key);
+            let mut builder = AnthropicClient::builder()
+                .with_api_key(key)
+                .with_max_tokens(budget(cfg));
             if let Some(model) = &provider.model {
                 builder = builder.with_model(model.clone());
             }
@@ -143,7 +159,9 @@ pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceE
         }
         ProviderProfile::Zai => {
             let key = env_key_with_alias("ZAI_API_KEY", "ZHIPUAI_API_KEY")?;
-            let mut builder = loopctl::provider::zai_builder().with_api_key(key);
+            let mut builder = loopctl::provider::zai_builder()
+                .with_api_key(key)
+                .with_max_tokens(budget(cfg));
             if let Some(model) = &provider.model {
                 builder = builder.with_model(model.clone());
             }
@@ -206,9 +224,26 @@ mod tests {
                 profile,
                 model: Some("test-model".to_owned()),
                 base_url: None,
+                max_tokens: None,
             },
             ..DifftraceConfig::default()
         }
+    }
+
+    #[test]
+    fn the_output_budget_is_enforced_where_the_provider_takes_one() {
+        assert_eq!(
+            enforced_output_budget(&cfg(ProviderProfile::Anthropic)),
+            Some(8192)
+        );
+        assert_eq!(
+            enforced_output_budget(&cfg(ProviderProfile::Zai)),
+            Some(8192)
+        );
+        assert_eq!(enforced_output_budget(&cfg(ProviderProfile::OpenAi)), None);
+        let mut configured = cfg(ProviderProfile::Zai);
+        configured.provider.max_tokens = Some(32_768);
+        assert_eq!(enforced_output_budget(&configured), Some(32_768));
     }
 
     #[test]

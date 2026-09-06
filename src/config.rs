@@ -22,6 +22,7 @@ pub struct ProviderConfig {
     pub profile: ProviderProfile,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -78,6 +79,20 @@ impl DifftraceConfig {
             .filter(|value| !value.is_empty())
         {
             self.provider.model = Some(model);
+        }
+        if let Some(tokens) = std::env::var("DIFFTRACE_MAX_TOKENS")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            let parsed = tokens.trim().parse::<u32>().map_err(|_| {
+                DifftraceError::Cli(format!("invalid DIFFTRACE_MAX_TOKENS: {tokens}"))
+            })?;
+            if parsed == 0 {
+                return Err(DifftraceError::Cli(
+                    "DIFFTRACE_MAX_TOKENS must be at least 1".to_owned(),
+                ));
+            }
+            self.provider.max_tokens = Some(parsed);
         }
         Ok(())
     }
@@ -200,6 +215,40 @@ mod tests {
         config.apply_env_overrides()?;
         assert_eq!(config.provider.profile, ProviderProfile::Zai);
         env.remove("DIFFTRACE_PROFILE");
+        Ok(())
+    }
+
+    #[test]
+    fn the_max_tokens_env_override_parses_into_the_provider_config()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_MAX_TOKENS"]);
+        env.set("DIFFTRACE_MAX_TOKENS", "32768");
+        let mut config = DifftraceConfig::default();
+        config.apply_env_overrides()?;
+        assert_eq!(config.provider.max_tokens, Some(32_768));
+        env.remove("DIFFTRACE_MAX_TOKENS");
+        Ok(())
+    }
+
+    #[test]
+    fn an_invalid_max_tokens_override_is_an_error() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_MAX_TOKENS"]);
+        env.set("DIFFTRACE_MAX_TOKENS", "lots");
+        let mut config = DifftraceConfig::default();
+        let Err(err) = config.apply_env_overrides() else {
+            return Err("expected an invalid token count to fail".into());
+        };
+        assert!(err.to_string().contains("DIFFTRACE_MAX_TOKENS"));
+        env.set("DIFFTRACE_MAX_TOKENS", "0");
+        let mut config = DifftraceConfig::default();
+        let Err(err) = config.apply_env_overrides() else {
+            return Err("expected a zero budget to be rejected".into());
+        };
+        assert!(
+            err.to_string().contains("at least 1"),
+            "names the constraint: {err}"
+        );
+        env.remove("DIFFTRACE_MAX_TOKENS");
         Ok(())
     }
 

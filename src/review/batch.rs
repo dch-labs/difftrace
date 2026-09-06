@@ -427,8 +427,9 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
     async fn hunt_misses(
         &self,
         batches: &[Vec<String>],
-        history: &str,
+        registry: &Registry,
         aggregated: &mut Findings,
+        skip: &[String],
     ) -> Vec<String> {
         if !self.settings().miss_hunt
             || aggregated
@@ -442,10 +443,12 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             target: "difftrace::review",
             "first pass recorded no blocking findings; hunting for misses"
         );
-        let (hunted, unreviewed) = self.review_batches(batches, history, true).await;
-        // The hunt is not told what the first pass found: drop its
-        // findings that repeat an aggregate entry (same file, line, and
-        // title) so a re-reported issue is not double-counted.
+        let huntable: Vec<Vec<String>> = batches
+            .iter()
+            .filter(|batch| !skip.contains(&batch.join(", ")))
+            .cloned()
+            .collect();
+        let (hunted, unreviewed) = self.review_batches(&huntable, registry, true).await;
         for finding in hunted.findings {
             let duplicate = aggregated.findings.iter().any(|existing| {
                 existing.file == finding.file
@@ -472,13 +475,14 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
     async fn review_batches(
         &self,
         batches: &[Vec<String>],
-        history: &str,
+        registry: &Registry,
         hunt: bool,
     ) -> (Findings, Vec<String>) {
         let mut aggregated = Findings::default();
         let mut unreviewed: Vec<String> = Vec::new();
         for (index, batch) in batches.iter().enumerate() {
             let evidence = self.evidence_for(batch).await;
+            let history = crate::review::rubric::rubric_history_for_files(registry, batch);
             let stage = if hunt {
                 "hunt batch started"
             } else {
@@ -492,7 +496,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             );
             let mut attempted: Option<Findings> = None;
             for attempt in 0..2usize {
-                match self.review_batch(batch, history, &evidence, hunt).await {
+                match self.review_batch(batch, &history, &evidence, hunt).await {
                     Ok(findings) => {
                         attempted = Some(findings);
                         break;
@@ -533,16 +537,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
 
     async fn round_context(
         &self,
-    ) -> Result<
-        (
-            Vec<ReviewThread>,
-            Vec<ReviewThread>,
-            Registry,
-            String,
-            String,
-        ),
-        DifftraceError,
-    > {
+    ) -> Result<(Vec<ReviewThread>, Vec<ReviewThread>, Registry, String), DifftraceError> {
         let all_threads = match self.own_threads().await {
             Ok(threads) => threads,
             Err(err) => {
@@ -560,20 +555,12 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             .cloned()
             .collect();
         let registry = self.load_registry(&open_threads).await?;
-        let history = crate::review::rubric::rubric_history(&registry);
         let verifier_history = crate::review::rubric::cross_round_section(&registry);
-        Ok((
-            all_threads,
-            open_threads,
-            registry,
-            history,
-            verifier_history,
-        ))
+        Ok((all_threads, open_threads, registry, verifier_history))
     }
 
     pub async fn review_all(&self, dry_run: bool) -> Result<ReviewOutcome, DifftraceError> {
-        let (all_threads, open_threads, registry, history, verifier_history) =
-            self.round_context().await?;
+        let (all_threads, open_threads, registry, verifier_history) = self.round_context().await?;
         let files = self.file_names();
         let batches = plan_batches(&files, self.settings().batch_files);
         tracing::info!(
@@ -583,11 +570,13 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             "reviewing"
         );
         let (mut aggregated, first_pass_unreviewed) =
-            self.review_batches(&batches, &history, false).await;
+            self.review_batches(&batches, &registry, false).await;
         let mut unreviewed = first_pass_unreviewed;
-        // A batch that failed both passes appears in both lists; keep
-        // one entry per batch.
-        for batch in self.hunt_misses(&batches, &history, &mut aggregated).await {
+        let hunt_skipped = unreviewed.clone();
+        for batch in self
+            .hunt_misses(&batches, &registry, &mut aggregated, &hunt_skipped)
+            .await
+        {
             if !unreviewed.contains(&batch) {
                 unreviewed.push(batch);
             }
@@ -687,13 +676,12 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         } else if outcome.unreviewed_batches.is_empty() {
             ReviewEvent::Approved
         } else {
-            // Files went unreviewed, so the round cannot vouch for the
-            // change: a neutral review never satisfies branch protection.
             ReviewEvent::Commented
         };
         if dry_run {
             return Ok(outcome);
         }
+        self.post_verdict_comment(&outcome, &registry).await;
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
             event,
@@ -717,9 +705,6 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             resolved = resolved.len(),
             "resolved previous threads"
         );
-        let body = verdict_comment_body(&outcome, &registry)
-            .map_err(|message| DifftraceError::Reply { message })?;
-        self.upsert_verdict_comment(body).await?;
         outcome.posted = true;
         Ok(outcome)
     }
@@ -875,6 +860,27 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             replied = posted,
             "replied into re-raised threads"
         );
+    }
+
+    async fn post_verdict_comment(&self, outcome: &ReviewOutcome, registry: &Registry) {
+        let body = match verdict_comment_body(outcome, registry) {
+            Ok(body) => body,
+            Err(message) => {
+                tracing::warn!(
+                    target: "difftrace::review",
+                    error = message,
+                    "could not render the verdict comment; posting the review without it"
+                );
+                return;
+            }
+        };
+        if let Err(err) = self.upsert_verdict_comment(body).await {
+            tracing::warn!(
+                target: "difftrace::review",
+                error = %crate::error::error_chain(&err),
+                "could not upsert the verdict comment; posting the review without it"
+            );
+        }
     }
 
     async fn upsert_verdict_comment(&self, body: String) -> Result<(), DifftraceError> {
@@ -2153,7 +2159,7 @@ diff --git a/src/beta.rs b/src/beta.rs
     }
 
     #[tokio::test]
-    async fn a_verdict_upsert_exhausting_the_retries_fails_the_run_after_posting()
+    async fn a_verdict_comment_that_cannot_be_written_does_not_block_the_review()
     -> Result<(), Box<dyn std::error::Error>> {
         let gateway = Arc::new(FakeGateway::with_threads(vec![ReviewThread {
             id: "T_FIXED".to_owned(),
@@ -2165,19 +2171,13 @@ diff --git a/src/beta.rs b/src/beta.rs
         }]));
         gateway.fail_comment_writes(9);
         let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
-        let err = runner
-            .review_all(false)
-            .await
-            .err()
-            .ok_or("the exhausted verdict retries must fail the run")?;
-        assert!(
-            !err.to_string().is_empty(),
-            "the failure names the underlying error"
-        );
+        let outcome = runner.review_all(false).await?;
         assert!(
             gateway.submitted().is_some(),
-            "the review itself stands posted; only the verdict comment failed"
+            "the review posts even though every verdict write failed"
         );
+        assert!(outcome.posted);
+        assert!(gateway.posted_comments().is_empty());
         assert_eq!(
             gateway.resolved_threads(),
             vec!["T_FIXED".to_owned()],
@@ -2231,6 +2231,20 @@ diff --git a/src/beta.rs b/src/beta.rs
         let outcome = runner.review_all(false).await?;
         assert!(outcome.posted);
         assert_eq!(gateway.posted_comments().len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_verdict_comment_goes_up_before_the_review_is_submitted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = make_runner(Arc::new(scripted_client()), Arc::clone(&gateway))?;
+        runner.review_all(false).await?;
+        assert_eq!(
+            gateway.call_order(),
+            vec!["verdict", "review"],
+            "the verdict sits above the round's review entry on the timeline"
+        );
         Ok(())
     }
 }
@@ -3077,6 +3091,79 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
     }
 
     #[tokio::test]
+    async fn a_truncated_batch_is_recorded_unreviewed_instead_of_approved()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let gateway_handle = std::sync::Arc::clone(&gateway);
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
+        // Text-only turns at a 10-token budget read as truncated thinks:
+        // the silent-approval incident, pinned end to end.
+        let inner = MockApiClient::new("review-model").with_responses(vec![
+            text_response("…"),
+            text_response("…"),
+            text_response(&summary_json()),
+        ]);
+        let runner = ReviewRunner::new(
+            Arc::new(inner),
+            gateway_for_runner,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_files: 1,
+                verify_findings: false,
+                miss_hunt: true,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        )
+        .with_output_budget(Some(10));
+        let outcome = runner.review_all(false).await?;
+        let submission = gateway.submitted().ok_or("expected a submission")?;
+        assert_eq!(
+            submission.event,
+            ReviewEvent::Commented,
+            "a round that could not read its files never approves"
+        );
+        assert_eq!(outcome.unreviewed_batches, vec!["src/lib.rs".to_owned()]);
+        assert!(outcome.standing_body.contains("Approval withheld"));
+        assert!(outcome.findings.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_hunt_skips_batches_the_first_pass_could_not_complete()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let gateway_handle = std::sync::Arc::clone(&gateway);
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
+        let runner = ReviewRunner::new(
+            Arc::new(StreamFailingClient),
+            gateway_for_runner,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings::default(),
+            None,
+        );
+        let mut aggregated = Findings::default();
+        let hunted = runner
+            .hunt_misses(
+                &[vec!["src/lib.rs".to_owned()]],
+                &Registry {
+                    round: 1,
+                    issues: Vec::new(),
+                },
+                &mut aggregated,
+                &["src/lib.rs".to_owned()],
+            )
+            .await;
+        assert!(
+            hunted.is_empty(),
+            "a batch that already failed twice is not hunted a third time"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_batch_whose_runs_fail_is_recorded_unreviewed_and_the_review_continues()
     -> Result<(), Box<dyn std::error::Error>> {
         let gateway = Arc::new(FakeGateway::empty());
@@ -3096,7 +3183,14 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             None,
         );
         let (findings, unreviewed) = runner
-            .review_batches(&[vec!["src/lib.rs".to_owned()]], "", false)
+            .review_batches(
+                &[vec!["src/lib.rs".to_owned()]],
+                &Registry {
+                    round: 1,
+                    issues: Vec::new(),
+                },
+                false,
+            )
             .await;
         assert!(findings.findings.is_empty());
         assert_eq!(unreviewed, vec!["src/lib.rs".to_owned()]);

@@ -58,13 +58,35 @@ skip it.";
 
 const FIX_HISTORY_CAP: usize = 12;
 
-// The registry as a compact cross-round context: still-open issues,
-// then the fix history (most recent first, capped). Empty when the
-// registry has nothing yet.
 #[must_use]
 pub(crate) fn cross_round_section(registry: &Registry) -> String {
-    let open = registry.unresolved();
-    if open.is_empty() && registry.issues.is_empty() {
+    cross_round_section_filtered(registry, None)
+}
+
+#[must_use]
+pub(crate) fn rubric_history_for_files(registry: &Registry, files: &[String]) -> String {
+    let list = cross_round_section_filtered(registry, Some(files));
+    if list.is_empty() {
+        return list;
+    }
+    format!("{list}\n\n{REVIEWER_HISTORY_RULES}")
+}
+
+fn cross_round_section_filtered(registry: &Registry, files: Option<&[String]>) -> String {
+    let in_scope = |file: &str| files.is_none_or(|scope| scope.iter().any(|owned| owned == file));
+    let open: Vec<_> = registry
+        .unresolved()
+        .into_iter()
+        .filter(|issue| in_scope(&issue.file))
+        .collect();
+    let fixed_history = registry.fixed_history();
+    let fixed: Vec<_> = fixed_history
+        .iter()
+        .filter(|issue| in_scope(&issue.file))
+        .rev()
+        .take(FIX_HISTORY_CAP)
+        .collect();
+    if open.is_empty() && fixed.is_empty() {
         return String::new();
     }
     let mut lines: Vec<String> = vec!["Issues already raised on this pull request:".to_owned()];
@@ -77,7 +99,7 @@ pub(crate) fn cross_round_section(registry: &Registry) -> String {
             issue.title, issue.file
         ));
     }
-    for issue in registry.fixed_history().iter().rev().take(FIX_HISTORY_CAP) {
+    for issue in fixed {
         let round = issue.resolved_round.unwrap_or(0);
         let line = if issue.status == crate::review::registry::IssueStatus::ManuallyResolved {
             format!("- Manually resolved in round {round}: \"{}\"", issue.title)
@@ -92,17 +114,6 @@ pub(crate) fn cross_round_section(registry: &Registry) -> String {
         lines.push(line);
     }
     lines.join("\n")
-}
-
-// The reviewer's variant: the bare list plus the mechanism-compatible
-// re-raise rules.
-#[must_use]
-pub(crate) fn rubric_history(registry: &Registry) -> String {
-    let list = cross_round_section(registry);
-    if list.is_empty() {
-        return list;
-    }
-    format!("{list}\n\n{REVIEWER_HISTORY_RULES}")
 }
 
 const HUNT_RULES: &str = "You are the second reviewer of a batch whose first pass recorded no \
@@ -474,7 +485,12 @@ mod tests {
                 resolved_sha: None,
             }],
         };
-        let history = rubric_history(&registry);
+        let files: Vec<String> = registry
+            .issues
+            .iter()
+            .map(|issue| issue.file.clone())
+            .collect();
+        let history = rubric_history_for_files(&registry, &files);
         assert!(
             history.contains("- Manually resolved in round 2: \"Manually closed\""),
             "a manually-resolved issue does not render as fixed with a commit"
@@ -486,8 +502,102 @@ mod tests {
         assert!(history.contains("reverses one of"));
         registry.issues.clear();
         assert!(
-            rubric_history(&registry).is_empty(),
+            rubric_history_for_files(&registry, &["src/anything.rs".to_owned()]).is_empty(),
             "a fresh registry renders no history and no rules"
+        );
+    }
+
+    #[test]
+    fn the_batch_history_only_names_the_batchs_own_files() {
+        use crate::review::registry::IssueStatus;
+        let registry = Registry {
+            round: 2,
+            issues: vec![
+                crate::review::registry::Issue {
+                    title: "Own file issue".to_owned(),
+                    file: "src/mine.rs".to_owned(),
+                    line: Some(4),
+                    severity: crate::findings::Severity::Warning,
+                    complexity: 2,
+                    anchored: true,
+                    status: IssueStatus::Open,
+                    thread_id: None,
+                    raised_round: 1,
+                    raised_sha: String::new(),
+                    last_round: 2,
+                    resolved_round: None,
+                    resolved_sha: None,
+                },
+                crate::review::registry::Issue {
+                    title: "Other file issue".to_owned(),
+                    file: "src/theirs.rs".to_owned(),
+                    line: Some(9),
+                    severity: crate::findings::Severity::Critical,
+                    complexity: 3,
+                    anchored: true,
+                    status: IssueStatus::Open,
+                    thread_id: None,
+                    raised_round: 1,
+                    raised_sha: String::new(),
+                    last_round: 2,
+                    resolved_round: None,
+                    resolved_sha: None,
+                },
+            ],
+        };
+        let history = rubric_history_for_files(&registry, &["src/mine.rs".to_owned()]);
+        assert!(history.contains("Own file issue"));
+        assert!(
+            !history.contains("Other file issue"),
+            "an open issue on another batch's file never drags this batch off its own files"
+        );
+        let empty = rubric_history_for_files(&registry, &["src/unrelated.rs".to_owned()]);
+        assert!(
+            empty.is_empty(),
+            "a batch whose files own no issues is not handed a dangling header and re-raise rules"
+        );
+    }
+
+    #[test]
+    fn the_fix_history_cap_applies_after_the_batch_scope() {
+        use crate::review::registry::IssueStatus;
+        let mut issues = vec![crate::review::registry::Issue {
+            title: "Mine, oldest".to_owned(),
+            file: "src/mine.rs".to_owned(),
+            line: Some(3),
+            severity: crate::findings::Severity::Warning,
+            complexity: 2,
+            anchored: true,
+            status: IssueStatus::Fixed,
+            thread_id: None,
+            raised_round: 1,
+            raised_sha: String::new(),
+            last_round: 2,
+            resolved_round: Some(2),
+            resolved_sha: Some("b2bb699dc1c7c4cb28db9adf619b58ce7d965d52".to_owned()),
+        }];
+        for round in 3..=14 {
+            issues.push(crate::review::registry::Issue {
+                title: format!("Elsewhere round {round}"),
+                file: "src/theirs.rs".to_owned(),
+                line: Some(7),
+                severity: crate::findings::Severity::Nitpick,
+                complexity: 1,
+                anchored: true,
+                status: IssueStatus::Fixed,
+                thread_id: None,
+                raised_round: 2,
+                raised_sha: String::new(),
+                last_round: round,
+                resolved_round: Some(round),
+                resolved_sha: Some("b2bb699dc1c7c4cb28db9adf619b58ce7d965d52".to_owned()),
+            });
+        }
+        let registry = Registry { round: 14, issues };
+        let history = rubric_history_for_files(&registry, &["src/mine.rs".to_owned()]);
+        assert!(
+            history.contains("Mine, oldest"),
+            "twelve newer fixes on other files do not crowd this batch's own fix out of its history"
         );
     }
 }

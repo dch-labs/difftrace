@@ -43,6 +43,7 @@ struct Inner {
     fail_comment_writes: Mutex<usize>,
     fail_reply_writes: Mutex<usize>,
     next_comment_id: Mutex<u64>,
+    calls: Mutex<Vec<&'static str>>,
 }
 
 impl FakeGateway {
@@ -209,6 +210,14 @@ impl FakeGateway {
             .clone()
     }
 
+    pub(crate) fn call_order(&self) -> Vec<&'static str> {
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub(crate) fn posted_comments(&self) -> Vec<(u64, String)> {
         self.inner
             .posted_comments
@@ -361,6 +370,11 @@ impl PrGateway for FakeGateway {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = (*guard).saturating_add(1);
         }
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push("review");
         let fail = {
             let mut guard = self
                 .inner
@@ -458,6 +472,11 @@ impl PrGateway for FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((comment_id, body));
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push("verdict");
         Box::pin(async move { Ok(()) })
     }
 
@@ -592,6 +611,11 @@ impl PrGateway for FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((pr, body));
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push("verdict");
         Box::pin(async move { Ok(()) })
     }
 }

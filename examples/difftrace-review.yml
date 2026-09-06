@@ -39,7 +39,7 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.head.repo.fork != true)
     steps:
-      - name: Resolve the pull request number
+      - name: Resolve the pull request number and head
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,7 +48,9 @@ jobs:
         run: |
           case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
-          echo "sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)" >> "$GITHUB_OUTPUT"
+          sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          case "$sha" in ''|*[!0-9a-f]*) echo "invalid head sha: $sha" >&2; exit 1;; esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       - name: Reject fork pull requests
         if: github.event_name == 'workflow_dispatch'
@@ -107,6 +109,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
+          DIFFTRACE_MAX_TOKENS: '32768'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 
@@ -181,7 +184,7 @@ jobs:
     if: needs.gate.outputs.skip == ''
     steps:
 
-      - name: Resolve the pull request number
+      - name: Resolve the pull request number and head
         id: pr
         env:
           GH_TOKEN: ${{ github.token }}
@@ -190,7 +193,9 @@ jobs:
         run: |
           case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
-          echo "sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)" >> "$GITHUB_OUTPUT"
+          sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          case "$sha" in ''|*[!0-9a-f]*) echo "invalid head sha: $sha" >&2; exit 1;; esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
       # The binary is pinned to the tagged v0.6.0 release; bump version and
       # checksum together on every difftrace release.
@@ -250,6 +255,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
+          DIFFTRACE_MAX_TOKENS: '32768'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 

@@ -55,6 +55,14 @@ pub enum DifftraceError {
     #[error("review run failed: {source}")]
     ReviewRun { source: loopctl::error::LoopError },
 
+    #[error(
+        "the batch's final turn was truncated at the {budget}-token output budget before producing a verdict"
+    )]
+    ReviewTruncated { budget: u32 },
+
+    #[error("the reviewer run ended without ever recording findings — no verdict was produced")]
+    ReviewNoVerdict,
+
     #[error("summary generation failed: {source}")]
     Summary {
         source: loopctl::structured::StructuredError,

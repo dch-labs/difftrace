@@ -123,6 +123,7 @@ async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceErro
     }
     let trajectory_dir = trajectory_dir();
     let head_sha = overview.head_sha.clone();
+    let output_budget = difftrace::provider::enforced_output_budget(&config);
     let runner = ReviewRunner::new(
         client,
         std::sync::Arc::clone(&gateway) as std::sync::Arc<dyn PrGateway>,
@@ -130,7 +131,8 @@ async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceErro
         overview,
         config.review,
         trajectory_dir,
-    );
+    )
+    .with_output_budget(output_budget);
     let reviewed = runner.review_all(args.dry_run).await;
     let outcome = match reviewed {
         Ok(outcome) => outcome,

@@ -39,8 +39,9 @@ The `DIFFTRACE_PROFILE` environment variable overrides
 `provider.profile` without a config file — the natural mechanism in CI,
 where no `~/.difftrace/config.toml` exists (e.g. `DIFFTRACE_PROFILE=zai`
 in a GitHub Action). `DIFFTRACE_MODEL` overrides `provider.model` the
-same way; an empty value counts as unset, and without either the
-provider's default model applies (zai: `glm-4.7`).
+same way, as does `DIFFTRACE_MAX_TOKENS` for `provider.max_tokens`; an
+empty value counts as unset, and without either the provider's default
+model applies (zai: `glm-4.7`).
 
 Comments starting with `@difftrace` or `/difftrace` trigger commands
 in repos whose workflows listen for them: `review` re-runs the full
@@ -63,7 +64,9 @@ full of findings still exits `0`.
 
 Each pull request carries one standing difftrace comment — marked with
 a hidden `<!-- difftrace:verdict -->` header, created on the first
-review and edited in place on every re-review, with a "Reviewed
+review and edited in place on every re-review, posted before each
+round's review so it sits above the review entry and its inline
+comments, with a "Reviewed
 commit" footer naming the round's head SHA. It is a cross-round issue
 registry: every issue difftrace has ever raised on the pull request,
 kept as hidden JSON inside the comment and merged each run. The
@@ -107,8 +110,9 @@ lands on an anchor whose open thread records another issue, that
 thread is resolved and the new finding opens a fresh one; the replaced
 issue is recorded as fixed in that round rather than overwritten.
 Writing the verdict comment is
-retried and fails the run loudly if every attempt fails, so a missing
-verdict is visible rather than silent.
+retried, and a verdict that still cannot be written warns and falls
+open — the review posts rather than a broken comment write hiding the
+round; the gap is visible in the run log.
 
 The reviewer itself reviews with evidence, memory, and a spine. Pass
 `--memory <file>` and the review loads a cross-review memory file into
@@ -119,21 +123,25 @@ workflow backs the file with `actions/cache`, so the memory survives
 between runs per repository and pull request. Every
 batch's prompt carries an evidence pack assembled by difftrace — the
 final content of each changed file at the reviewed commit (full, or
-windows around the hunks for large files), quoted as untrusted data —
+windows around the hunks for large files; lockfiles render as a
+one-line change summary and no single file may take more than half
+the pack), quoted as untrusted data —
 so review does not depend on the model choosing to fetch context. And
 when the first pass records no blocking finding, a second hunt pass
 re-runs the batches with an adversarial framing — lifecycle
 transitions, unchanged or test code the change activates, terminal
 actions on the wrong path — so a clean verdict is argued for, not
-assumed. A reviewer run that cannot complete a batch (provider outage)
-retries once, then records the batch as unreviewed in a visible
-section instead of failing the whole review — a partial review with a
-stated gap beats no review, and a round with unreviewed files never
-posts approval: the verdict reads "Approval withheld" and the review
-is submitted as a neutral comment that cannot satisfy branch
+assumed. A reviewer run that cannot complete a batch (provider outage,
+or a final turn truncated at the output budget before any verdict was
+recorded) retries once, then records the batch as unreviewed in a
+visible section instead of failing the whole review — a partial review
+with a stated gap beats no review, and a round with unreviewed files
+never posts approval: the verdict reads "Approval withheld" and the
+review is submitted as a neutral comment that cannot satisfy branch
 protection. Every batch sees
-the registry's cross-round context — which issues are still open and
-which were fixed in which round — and is told to re-report still-open
+the registry's cross-round context for its own files — which issues
+are still open and which were fixed in which round — and is told to
+re-report still-open
 issues at the same location with the same title (landing in their
 existing threads) rather than opening duplicates, and not to reverse
 an earlier fix without explicit justification.
@@ -177,6 +185,9 @@ away from the default.
 profile = "zai"      # anthropic | openai | zai | ollama
 model = "glm-4.7"  # optional; ollama requires it; zai defaults to glm-4.7
 base_url = "…"             # optional endpoint override
+max_tokens = 32768         # optional per-response output budget (anthropic
+                           # and zai; default 8192 — raise it for thinking
+                           # models, which burn the budget on reasoning)
 
 [github]
 api_base_url = "…"         # optional; GitHub Enterprise API root
