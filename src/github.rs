@@ -228,6 +228,10 @@ struct ViewerWire {
     viewer: Option<AuthorWire>,
 }
 
+fn issue_comments_route(owner: &str, repo: &str, pr: u64) -> String {
+    format!("/repos/{owner}/{repo}/issues/{pr}/comments?per_page=20&sort=created&direction=desc")
+}
+
 fn issue_comment_route(owner: &str, repo: &str, comment_id: u64) -> String {
     format!("/repos/{owner}/{repo}/issues/comments/{comment_id}")
 }
@@ -340,6 +344,11 @@ pub trait PrGateway: Send + Sync {
         &self,
         comment_id: u64,
     ) -> Pin<Box<dyn Future<Output = Result<ExistingIssueComment, DifftraceError>> + Send + '_>>;
+
+    fn issue_comments(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ExistingIssueComment>, DifftraceError>> + Send + '_>>;
 
     fn fetch_review_comment(
         &self,
@@ -659,6 +668,28 @@ impl PrGateway for GitHubClient {
                 .await
                 .map_err(Self::map_github_error)?;
             Ok(ExistingIssueComment::from(comment))
+        })
+    }
+
+    fn issue_comments(
+        &self,
+        pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ExistingIssueComment>, DifftraceError>> + Send + '_>>
+    {
+        let owner = self.repo.owner.clone();
+        let repo = self.repo.repo.clone();
+        Box::pin(async move {
+            let route = issue_comments_route(&owner, &repo, pr);
+            let mut comments: Vec<octocrab::models::issues::Comment> = self
+                .crab
+                .get(route, None::<&()>)
+                .await
+                .map_err(Self::map_github_error)?;
+            comments.reverse();
+            Ok(comments
+                .into_iter()
+                .map(ExistingIssueComment::from)
+                .collect())
         })
     }
 
@@ -1176,6 +1207,14 @@ mod tests {
         assert_eq!(
             issue_comment_route("acme", "app", 77),
             "/repos/acme/app/issues/comments/77"
+        );
+    }
+
+    #[test]
+    fn the_issue_comments_listing_targets_the_newest_first_page() {
+        assert_eq!(
+            issue_comments_route("acme", "app", 42),
+            "/repos/acme/app/issues/42/comments?per_page=20&sort=created&direction=desc"
         );
     }
 }

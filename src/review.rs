@@ -14,6 +14,7 @@ pub mod runner;
 
 pub use batch::ReviewOutcome;
 pub use record::RecordFindingsTool;
+pub use reply::ReplyMode;
 pub use reply::ReplyOutcome;
 pub use reply::ReplyTarget;
 pub use rubric::ReviewRubric;

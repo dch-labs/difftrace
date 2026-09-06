@@ -1,5 +1,6 @@
 //! The command line: `difftrace review` posts a review, `difftrace
-//! reply` answers a question asked in a comment.
+//! reply` answers a question asked in a comment, and `difftrace plan`
+//! produces a fix plan for a finding.
 
 use clap::ArgGroup;
 use clap::Args;
@@ -12,6 +13,7 @@ use crate::github::RepoRef;
 pub enum Command {
     Review(ReviewArgs),
     Reply(ReplyArgs),
+    Plan(ReplyArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -52,18 +54,10 @@ pub struct ReplyArgs {
     #[arg(long, help = "Pull request number")]
     pub pr: u64,
 
-    #[arg(
-        long,
-        group = "comment",
-        help = "Answer this conversation comment by id"
-    )]
+    #[arg(long, group = "comment", help = "The conversation comment by id")]
     pub issue_comment: Option<u64>,
 
-    #[arg(
-        long,
-        group = "comment",
-        help = "Answer this review-thread comment by id"
-    )]
+    #[arg(long, group = "comment", help = "The review-thread comment by id")]
     pub review_comment: Option<u64>,
 
     #[arg(
@@ -152,6 +146,26 @@ mod tests {
             .is_err()
         );
         assert!(Cli::try_parse_from(["difftrace", "reply", "--repo", "a/b", "--pr", "1"]).is_err());
+    }
+
+    #[test]
+    fn the_plan_command_parses_like_the_reply_command() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from([
+            "difftrace",
+            "plan",
+            "--repo",
+            "dch-labs/difftrace",
+            "--pr",
+            "42",
+            "--review-comment",
+            "7",
+        ])
+        .map_err(|err| err.to_string())?;
+        let Command::Plan(args) = cli.command else {
+            return Err("expected the plan subcommand".into());
+        };
+        assert_eq!(args.review_comment, Some(7));
+        Ok(())
     }
 
     #[test]

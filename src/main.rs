@@ -15,6 +15,7 @@ use difftrace::error::DifftraceError;
 use difftrace::github::GitHubClient;
 use difftrace::github::PrGateway;
 use difftrace::provider::build_client;
+use difftrace::review::ReplyMode;
 use difftrace::review::ReplyTarget;
 use difftrace::review::ReviewRunner;
 use tracing_subscriber::EnvFilter;
@@ -50,7 +51,14 @@ fn main() -> ExitCode {
                 Ok(target) => target,
                 Err(err) => return finish(Err(err)),
             };
-            finish(runtime.block_on(run_reply(args, target)))
+            finish(runtime.block_on(run_chat(args, target, ReplyMode::Chat)))
+        }
+        Command::Plan(args) => {
+            let target = match reply_target(&args) {
+                Ok(target) => target,
+                Err(err) => return finish(Err(err)),
+            };
+            finish(runtime.block_on(run_chat(args, target, ReplyMode::Plan)))
         }
     }
 }
@@ -141,7 +149,11 @@ async fn run(args: difftrace::cli::ReviewArgs) -> Result<ExitCode, DifftraceErro
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_reply(args: ReplyArgs, target: ReplyTarget) -> Result<ExitCode, DifftraceError> {
+async fn run_chat(
+    args: ReplyArgs,
+    target: ReplyTarget,
+    mode: ReplyMode,
+) -> Result<ExitCode, DifftraceError> {
     let repo = parse_repo(&args.repo).map_err(DifftraceError::Cli)?;
     let mut config = match &args.config {
         Some(path) if !path.is_file() => {
@@ -166,10 +178,11 @@ async fn run_reply(args: ReplyArgs, target: ReplyTarget) -> Result<ExitCode, Dif
         repo,
         config.github.api_base_url.as_deref(),
     )?);
-    eprintln!(
-        "difftrace: answering a question on pull request #{}…",
-        args.pr
-    );
+    let verb = match mode {
+        ReplyMode::Chat => "answering a question",
+        ReplyMode::Plan => "planning a fix",
+    };
+    eprintln!("difftrace: {verb} on pull request #{}…", args.pr);
     let overview = gateway.pr_overview(args.pr).await?;
     let raw_diff = gateway.pr_diff(args.pr).await?;
     let index = std::sync::Arc::new(DiffIndex::parse(&raw_diff)?);
@@ -182,14 +195,21 @@ async fn run_reply(args: ReplyArgs, target: ReplyTarget) -> Result<ExitCode, Dif
         config.review,
         trajectory_dir,
     );
-    let outcome = runner.reply(target).await?;
+    let outcome = match mode {
+        ReplyMode::Chat => runner.reply(target).await?,
+        ReplyMode::Plan => runner.plan(target).await?,
+    };
     if outcome.refused {
         eprintln!(
             "difftrace: refused — posted the authorization note to the {}",
             outcome.target
         );
     } else {
-        println!("difftrace: reply posted to the {}", outcome.target);
+        let noun = match mode {
+            ReplyMode::Chat => "reply",
+            ReplyMode::Plan => "plan",
+        };
+        println!("difftrace: {noun} posted to the {}", outcome.target);
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Chat depth: replies and plans now see the earlier turns of their
+  review thread (up to the last 20, each body capped) or the recent
+  PR-conversation trail (last 10, bodies capped), so follow-up
+  questions continue the discussion instead of starting from the
+  finding alone. Gathered comment text is rendered into the prompt as
+  quoted, untrusted data — never as instructions. This grows the
+  `PrGateway` trait with `issue_comments` (breaking for external
+  implementors; pre-1.0 minor bump when cut) — pinned by
+  `a_thread_reply_carries_the_earlier_turns`,
+  `a_conversation_reply_carries_the_recent_trail_without_the_target`,
+  and `the_issue_comments_listing_targets_the_newest_first_page`.
+- `@difftrace plan` under a finding produces a step-by-step fix plan
+  for it — numbered steps naming files and lines, how to verify, and
+  risks — from a planning-specific prompt that reads the code but
+  never claims to change it. On the PR conversation `plan` degrades to
+  a question; the CLI rejects a conversation-targeted `plan` with a
+  hint (pinned by `a_thread_reply_carries_the_earlier_turns`,
+  `a_plan_prompt_names_the_finding_and_asks_for_steps`,
+  `a_plan_command_posts_into_the_thread`,
+  `a_plan_on_the_conversation_is_rejected_with_a_hint`, and
+  `a_plan_without_a_readable_finding_fails_closed`). The workflow's
+  `plan` routing requires the release pin bump to a binary that has
+  the subcommand — merge rides the release.
+
 - The reviewer now reviews with memory: every batch's rubric carries
   the registry's cross-round context (still-open issues and the fix
   history with their commits), with the rule that open issues must be

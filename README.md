@@ -44,11 +44,17 @@ provider's default model applies (zai: `glm-4.7`).
 
 Comments starting with `@difftrace` or `/difftrace` trigger commands
 in repos whose workflows listen for them: `review` re-runs the full
-review, and anything else asks a question — under a finding, the
-answer lands in that thread; on the PR conversation, it lands as a
-comment mentioning the asker. Collaborators and the PR author may
-invoke; others get a refusal. Chat answers are bounded by
-`review.reply_max_turns` (default 8).
+review, `plan` (under a finding) produces a step-by-step fix plan for
+that finding — files and lines to touch, how to verify, risks — and
+anything else asks a question. Replies and plans see the earlier turns
+of their thread (or the recent conversation trail) — quoted into the
+prompt as untrusted comment text, not instructions — so follow-up
+questions continue the discussion instead of starting over; on the PR
+conversation a `plan` degrades to a question, since plans need a
+finding. Under a finding, the answer lands in that thread; on the PR
+conversation, it lands as a comment mentioning the asker.
+Collaborators and the PR author may invoke; others get a refusal.
+Chat runs are bounded by `review.reply_max_turns` (default 8).
 
 Progress goes to stderr; the rendered review (dry run) and the posting
 receipt go to stdout. Exit status is non-zero only on error — a review

@@ -37,7 +37,8 @@ struct Inner {
     permissions: Mutex<Vec<(String, String)>>,
     posted_replies: Mutex<Vec<(u64, String)>>,
     posted_comments: Mutex<Vec<(u64, String)>>,
-    issue_comments: Mutex<Vec<ExistingIssueComment>>,
+    posted_issue_comments: Mutex<Vec<ExistingIssueComment>>,
+    conversation_trail: Mutex<Vec<ExistingIssueComment>>,
     updated_comments: Mutex<Vec<(u64, String)>>,
     fail_comment_writes: Mutex<usize>,
     fail_reply_writes: Mutex<usize>,
@@ -97,6 +98,15 @@ impl FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = threads;
         gateway
+    }
+
+    pub(crate) fn with_conversation_trail(self, comments: Vec<ExistingIssueComment>) -> Self {
+        *self
+            .inner
+            .conversation_trail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = comments;
+        self
     }
 
     pub(crate) fn with_issue_comment(self, comment: ExistingIssueComment) -> Self {
@@ -208,7 +218,7 @@ impl FakeGateway {
 
     pub(crate) fn issue_comment_bodies(&self) -> Vec<String> {
         self.inner
-            .issue_comments
+            .posted_issue_comments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
@@ -404,7 +414,7 @@ impl PrGateway for FakeGateway {
         let found = crate::github::own_marker_comment_id(
             &self
                 .inner
-                .issue_comments
+                .posted_issue_comments
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
@@ -428,7 +438,7 @@ impl PrGateway for FakeGateway {
         {
             let mut guard = self
                 .inner
-                .issue_comments
+                .posted_issue_comments
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(stored) = guard.iter_mut().find(|comment| comment.id == comment_id) else {
@@ -460,7 +470,7 @@ impl PrGateway for FakeGateway {
             .clone()
             .or_else(|| {
                 self.inner
-                    .issue_comments
+                    .posted_issue_comments
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .iter()
@@ -470,6 +480,20 @@ impl PrGateway for FakeGateway {
         Box::pin(
             async move { comment.ok_or_else(|| missing(&format!("issue comment {comment_id}"))) },
         )
+    }
+
+    fn issue_comments(
+        &self,
+        _pr: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ExistingIssueComment>, DifftraceError>> + Send + '_>>
+    {
+        let comments = self
+            .inner
+            .conversation_trail
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move { Ok(comments) })
     }
 
     fn fetch_review_comment(
@@ -551,7 +575,7 @@ impl PrGateway for FakeGateway {
             *guard
         };
         self.inner
-            .issue_comments
+            .posted_issue_comments
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(ExistingIssueComment {
