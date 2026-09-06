@@ -82,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A clean round's review body is a single stat line — the pointer to
+  the standing comment is dropped when there is nothing to fix (pinned
+  by `a_clean_round_body_is_a_single_stat_line_without_the_pointer`).
+- The reviewer rubric gains a lifetime rule for runtime-managed
+  resources: consider events arriving while a signal listener, watcher,
+  timer, or channel is recreated across handoffs (pinned by
+  `the_rubric_carries_rules_and_frame_every_turn`).
+
 - Long lines inside the copyable prompt blocks now word-wrap at 80
   columns with a hanging indent; the fix-all items put each finding's
   detail on its own wrapped line instead of one very long line (pinned

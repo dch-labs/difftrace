@@ -29,6 +29,11 @@ Rules:
   rationale instead of re-flagging it.
 - When the same issue occurs at several locations, raise one finding per
   location and reuse the exact same title and severity for each.
+- When a runtime-managed resource (signal listener, watcher, timer,
+  channel) is created, dropped, or recreated across handoffs or awaits,
+  consider what happens to events arriving in the gap; check the
+  lifetime contract of the runtime or dependency in play (versions are
+  visible in the diff).
 - Use the tools to read context you need (file diff sections, full files,
   prior comments), then call record_findings exactly once with every
   finding, or with an empty list for a clean batch.";
@@ -199,6 +204,10 @@ mod tests {
         assert!(
             text.contains("reuse the exact same title"),
             "the rubric asks the model to reuse titles so grouping can pair locations"
+        );
+        assert!(
+            text.contains("events arriving in the gap"),
+            "the rubric covers runtime-managed resource lifetimes"
         );
         assert!(
             !text.contains("Issues already raised"),

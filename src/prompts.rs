@@ -31,6 +31,9 @@ pub(crate) fn review_round_body(
             "🤖 difftrace reviewed `{short}` — {findings} {noun} this round; fix prompts below."
         )
     };
+    if clean {
+        return head;
+    }
     let pointer = "Verdict, summary, and risks: the difftrace comment on this pull request.";
     if fix_all.is_empty() {
         format!("{head}\n\n{pointer}")
@@ -468,8 +471,26 @@ mod tests {
             clean.starts_with("🤖 difftrace reviewed `9f3b2c1` — clean round, nothing to fix.")
         );
         assert!(!clean.contains("Fix all findings"));
+        assert!(
+            !clean.contains("Verdict, summary, and risks"),
+            "a clean round has no fix prompts to point at"
+        );
         let single = review_round_body("9f3b2c1full", 1, false, "x");
         assert!(single.contains("— 1 finding this round"));
+    }
+
+    #[test]
+    fn a_clean_round_body_is_a_single_stat_line_without_the_pointer() {
+        let body = review_round_body("9f3b2c1full", 0, true, "");
+        assert_eq!(
+            body, "🤖 difftrace reviewed `9f3b2c1` — clean round, nothing to fix.",
+            "a clean round carries nothing but the stat line"
+        );
+        let with_findings = review_round_body("9f3b2c1full", 4, false, "## 🤖 Fix all findings");
+        assert!(
+            with_findings.contains("Verdict, summary, and risks"),
+            "the pointer stays for rounds with findings"
+        );
     }
 
     #[test]
