@@ -3,9 +3,6 @@
 # every difftrace release, bump the ref in the uses: line below —
 # release.sh pins in the difftrace repo prints the exact line: a fixed
 # commit carrying the release's binary version+checksum pins.
-# Do not copy this template before that first pin exists: the @master
-# placeholder below tracks a moving branch, and a review workflow must
-# pin a fixed commit.
 name: difftrace review
 
 on:
