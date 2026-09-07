@@ -59,6 +59,17 @@ pub struct ReviewOutcome {
     pub standing_body: String,
 }
 
+impl ReviewOutcome {
+    #[must_use]
+    pub fn raised_titles(&self) -> Vec<String> {
+        self.findings
+            .iter()
+            .chain(self.verified_out.iter().map(|(finding, _)| finding))
+            .map(|finding| finding.title.clone())
+            .collect()
+    }
+}
+
 fn verification_note(verified: &[(Finding, String)]) -> String {
     if verified.is_empty() {
         return String::new();
@@ -231,6 +242,72 @@ pub(crate) fn review_event(findings: &[Finding]) -> ReviewEvent {
     }
 }
 
+fn round_event(registry: &Registry, unreviewed: &[String]) -> ReviewEvent {
+    if registry.has_unresolved_blockers() {
+        ReviewEvent::ChangesRequested
+    } else if unreviewed.is_empty() {
+        ReviewEvent::Approved
+    } else {
+        ReviewEvent::Commented
+    }
+}
+
+fn also_locations_by_comment(findings: &[Finding]) -> Vec<Vec<(String, u64)>> {
+    crate::prompts::grouped_by_title(findings)
+        .iter()
+        .map(|(_, group)| {
+            let Some((_, rest)) = group.split_first() else {
+                return Vec::new();
+            };
+            rest.iter()
+                .map(|finding| (finding.file.clone(), finding.line as u64))
+                .collect()
+        })
+        .collect()
+}
+
+fn finding_thread_ids(
+    comment_of_finding: &[Option<usize>],
+    split: &ReplySplit,
+) -> Vec<Option<String>> {
+    comment_of_finding
+        .iter()
+        .map(|comment_index| {
+            comment_index
+                .and_then(|index| split.finding_threads.get(index))
+                .cloned()
+                .flatten()
+        })
+        .collect()
+}
+
+fn fixed_titles(registry: &Registry) -> Vec<String> {
+    registry
+        .issues
+        .iter()
+        .filter(|issue| issue.resolved_round == Some(registry.round))
+        .map(|issue| issue.title.clone())
+        .collect()
+}
+
+fn render_round(outcome: &mut ReviewOutcome, registry: &Registry) {
+    let fix_all = fix_all_section(
+        &outcome.findings,
+        &outcome.dropped,
+        outcome.pr,
+        &outcome.head_sha,
+    );
+    let raised = outcome.findings.len().saturating_add(outcome.dropped.len());
+    let clean = raised == 0 && outcome.unreviewed_batches.is_empty();
+    outcome.round_body = review_round_body(&outcome.head_sha, raised, clean, &fix_all);
+    let gap_note = unreviewed_note(&outcome.unreviewed_batches);
+    if !gap_note.is_empty() {
+        outcome.round_body.push('\n');
+        outcome.round_body.push_str(gap_note.trim_end());
+    }
+    outcome.standing_body = standing_render(outcome, registry);
+}
+
 fn verdict_comment_body(outcome: &ReviewOutcome, registry: &Registry) -> Result<String, String> {
     let rendered = format!(
         "{VERDICT_MARKER}\n\n{}\n\n---\nReviewed commit: `{}`",
@@ -248,38 +325,27 @@ struct ReplySplit {
     retired: Vec<String>,
 }
 
-fn split_replies(
-    threads: &[ReviewThread],
-    comments: Vec<CommentPosition>,
-    also_locations: &[Vec<(String, u64)>],
-    head_sha: &str,
-    registry: &Registry,
-) -> ReplySplit {
-    let mut split = ReplySplit {
-        positions: Vec::new(),
-        replies: Vec::new(),
-        matched: Vec::new(),
-        finding_threads: Vec::new(),
-        retired: Vec::new(),
-    };
-    let at_anchor = |thread: &ReviewThread, comment: &CommentPosition| {
-        thread.line.or(thread.original_line) == Some(comment.line) && thread.path == comment.path
-    };
-    let at_location = |thread: &ReviewThread, location: &(String, u64)| {
-        thread.path == location.0 && thread.line.or(thread.original_line) == Some(location.1)
-    };
-    let recorded_title = |thread: &ReviewThread| {
-        registry
-            .issues
-            .iter()
-            .find(|issue| issue.thread_id.as_deref() == Some(thread.id.as_str()))
-            .map(|issue| issue.title.as_str())
-    };
-    let titles: Vec<Option<String>> = comments
+fn thread_at_anchor(thread: &ReviewThread, comment: &CommentPosition) -> bool {
+    thread.line.or(thread.original_line) == Some(comment.line) && thread.path == comment.path
+}
+
+fn thread_at_location(thread: &ReviewThread, location: &(String, u64)) -> bool {
+    thread.path == location.0 && thread.line.or(thread.original_line) == Some(location.1)
+}
+
+fn recorded_title<'a>(registry: &'a Registry, thread: &ReviewThread) -> Option<&'a str> {
+    registry
+        .issues
         .iter()
-        .map(|comment| parse_issue_header(&comment.body).map(|(_, _, title)| title))
-        .collect();
-    let location_sets: Vec<Vec<(String, u64)>> = comments
+        .find(|issue| issue.thread_id.as_deref() == Some(thread.id.as_str()))
+        .map(|issue| issue.title.as_str())
+}
+
+fn comment_location_sets(
+    comments: &[CommentPosition],
+    also_locations: &[Vec<(String, u64)>],
+) -> Vec<Vec<(String, u64)>> {
+    comments
         .iter()
         .enumerate()
         .map(|(comment_index, comment)| {
@@ -291,25 +357,41 @@ fn split_replies(
                 .chain(also)
                 .collect()
         })
-        .collect();
-    // Pass one pairs comments with the threads that already carry the
-    // same issue: the anchor thread takes the group's re-raise, and any
-    // secondary location's matching thread keeps its own reply — a
-    // grouped finding that reappeared must never resolve the thread it
-    // reappeared in.
-    let mut anchor_matches: Vec<Option<usize>> = Vec::new();
-    let mut secondary_matches: Vec<(usize, usize)> = Vec::new();
-    let mut claimed: Vec<String> = Vec::new();
+        .collect()
+}
+
+struct ThreadMatches {
+    anchors: Vec<Option<usize>>,
+    secondaries: Vec<(usize, usize)>,
+    claimed: Vec<String>,
+}
+
+// Pass one pairs comments with the threads that already carry the
+// same issue: the anchor thread takes the group's re-raise, and any
+// secondary location's matching thread keeps its own reply — a
+// grouped finding that reappeared must never resolve the thread it
+// reappeared in.
+fn match_comments_to_threads(
+    threads: &[ReviewThread],
+    comments: &[CommentPosition],
+    location_sets: &[Vec<(String, u64)>],
+    registry: &Registry,
+) -> ThreadMatches {
+    let mut matches = ThreadMatches {
+        anchors: Vec::new(),
+        secondaries: Vec::new(),
+        claimed: Vec::new(),
+    };
     for (comment_index, comment) in comments.iter().enumerate() {
         let anchor = threads.iter().position(|thread| {
-            !claimed.contains(&thread.id)
-                && at_anchor(thread, comment)
-                && same_issue(recorded_title(thread), &comment.body)
+            !matches.claimed.contains(&thread.id)
+                && thread_at_anchor(thread, comment)
+                && same_issue(recorded_title(registry, thread), &comment.body)
         });
         if let Some(thread) = anchor.and_then(|thread_index| threads.get(thread_index)) {
-            claimed.push(thread.id.clone());
+            matches.claimed.push(thread.id.clone());
         }
-        anchor_matches.push(anchor);
+        matches.anchors.push(anchor);
         let Some((_, rest)) = location_sets
             .get(comment_index)
             .and_then(|set| set.split_first())
@@ -318,38 +400,54 @@ fn split_replies(
         };
         for location in rest {
             for (thread_index, thread) in threads.iter().enumerate() {
-                if claimed.contains(&thread.id) {
+                if matches.claimed.contains(&thread.id) {
                     continue;
                 }
-                if at_location(thread, location)
-                    && same_issue(recorded_title(thread), &comment.body)
+                if thread_at_location(thread, location)
+                    && same_issue(recorded_title(registry, thread), &comment.body)
                 {
-                    claimed.push(thread.id.clone());
-                    secondary_matches.push((thread_index, comment_index));
+                    matches.claimed.push(thread.id.clone());
+                    matches.secondaries.push((thread_index, comment_index));
                 }
             }
         }
     }
-    // Pass two retires only the unclaimed threads whose recorded issue
-    // differs from every comment covering their location: retiring
-    // resolves the thread and lets the registry record the old issue as
-    // fixed instead of letting a new issue overwrite it. A thread whose
-    // issue matches any covering comment survives for that comment's
-    // reply, whatever order the model emitted the findings in.
+    matches
+}
+
+// Pass two retires only the unclaimed threads whose recorded issue
+// differs from every comment covering their location: retiring
+// resolves the thread and lets the registry record the old issue as
+// fixed instead of letting a new issue overwrite it. A thread whose
+// issue matches any covering comment survives for that comment's
+// reply, whatever order the model emitted the findings in.
+fn retire_replaceable_threads(
+    threads: &[ReviewThread],
+    comments: &[CommentPosition],
+    location_sets: &[Vec<(String, u64)>],
+    registry: &Registry,
+    claimed: &[String],
+) -> Vec<String> {
+    let titles: Vec<Option<String>> = comments
+        .iter()
+        .map(|comment| parse_issue_header(&comment.body).map(|(_, _, title)| title))
+        .collect();
+    let mut retired: Vec<String> = Vec::new();
     for thread in threads {
         if claimed.contains(&thread.id) {
             continue;
         }
-        let Some(recorded) = recorded_title(thread) else {
+        let Some(recorded) = recorded_title(registry, thread) else {
             continue;
         };
         let covering: Vec<Option<&String>> = comments
             .iter()
             .enumerate()
             .filter(|(comment_index, _)| {
-                location_sets
-                    .get(*comment_index)
-                    .is_some_and(|set| set.iter().any(|location| at_location(thread, location)))
+                location_sets.get(*comment_index).is_some_and(|set| {
+                    set.iter()
+                        .any(|location| thread_at_location(thread, location))
+                })
             })
             .map(|(comment_index, _)| titles.get(comment_index).and_then(Option::as_ref))
             .collect();
@@ -358,9 +456,26 @@ fn split_replies(
                 .iter()
                 .all(|title| title.is_none_or(|title| !same_issue_title(recorded, title)));
         if replaceable {
-            split.retired.push(thread.id.clone());
+            retired.push(thread.id.clone());
         }
     }
+    retired
+}
+
+fn emit_replies(
+    threads: &[ReviewThread],
+    comments: Vec<CommentPosition>,
+    anchor_matches: &[Option<usize>],
+    secondary_matches: &[(usize, usize)],
+    head_sha: &str,
+) -> ReplySplit {
+    let mut split = ReplySplit {
+        positions: Vec::new(),
+        replies: Vec::new(),
+        matched: Vec::new(),
+        finding_threads: Vec::new(),
+        retired: Vec::new(),
+    };
     for (comment_index, comment) in comments.into_iter().enumerate() {
         if let Some(thread_index) = anchor_matches.get(comment_index).copied().flatten() {
             let Some(thread) = threads.get(thread_index) else {
@@ -372,7 +487,7 @@ fn split_replies(
                 re_raised_reply_body(&comment.body, head_sha),
             ));
             split.finding_threads.push(Some(thread.id.clone()));
-            for (secondary_index, owner) in &secondary_matches {
+            for (secondary_index, owner) in secondary_matches {
                 if *owner != comment_index {
                     continue;
                 }
@@ -390,6 +505,33 @@ fn split_replies(
             split.finding_threads.push(None);
         }
     }
+    split
+}
+
+fn split_replies(
+    threads: &[ReviewThread],
+    comments: Vec<CommentPosition>,
+    also_locations: &[Vec<(String, u64)>],
+    head_sha: &str,
+    registry: &Registry,
+) -> ReplySplit {
+    let location_sets = comment_location_sets(&comments, also_locations);
+    let matches = match_comments_to_threads(threads, &comments, &location_sets, registry);
+    let retired = retire_replaceable_threads(
+        threads,
+        &comments,
+        &location_sets,
+        registry,
+        &matches.claimed,
+    );
+    let mut split = emit_replies(
+        threads,
+        comments,
+        &matches.anchors,
+        &matches.secondaries,
+        head_sha,
+    );
+    split.retired = retired;
     split
 }
 
@@ -494,32 +636,10 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                 files = batch.join(", "),
                 stage
             );
-            let mut attempted: Option<Findings> = None;
-            for attempt in 0..2usize {
-                match self.review_batch(batch, &history, &evidence, hunt).await {
-                    Ok(findings) => {
-                        attempted = Some(findings);
-                        break;
-                    }
-                    Err(err) if attempt == 0 => {
-                        tracing::warn!(
-                            target: "difftrace::review",
-                            error = %crate::error::error_chain(&err),
-                            batch = index,
-                            "batch review failed; retrying once"
-                        );
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "difftrace::review",
-                            error = %crate::error::error_chain(&err),
-                            batch = index,
-                            "batch review failed again; recording the batch as unreviewed"
-                        );
-                    }
-                }
-            }
-            match attempted {
+            match self
+                .attempt_batch(batch, index, &history, &evidence, hunt)
+                .await
+            {
                 Some(findings) => {
                     tracing::info!(
                         target: "difftrace::review",
@@ -533,6 +653,42 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             }
         }
         (aggregated, unreviewed)
+    }
+
+    async fn attempt_batch(
+        &self,
+        batch: &[String],
+        index: usize,
+        history: &str,
+        evidence: &str,
+        hunt: bool,
+    ) -> Option<Findings> {
+        let mut attempted: Option<Findings> = None;
+        for attempt in 0..2usize {
+            match self.review_batch(batch, history, evidence, hunt).await {
+                Ok(findings) => {
+                    attempted = Some(findings);
+                    break;
+                }
+                Err(err) if attempt == 0 => {
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %crate::error::error_chain(&err),
+                        batch = index,
+                        "batch review failed; retrying once"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %crate::error::error_chain(&err),
+                        batch = index,
+                        "batch review failed again; recording the batch as unreviewed"
+                    );
+                }
+            }
+        }
+        attempted
     }
 
     async fn round_context(
@@ -569,21 +725,56 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             batches = batches.len(),
             "reviewing"
         );
+        let (mut aggregated, unreviewed) = self.gather_findings(&batches, &registry).await;
+        let verified_out = self
+            .apply_verification(&mut aggregated, &verifier_history)
+            .await;
+        let (mut outcome, comment_of_finding) = self
+            .grounded_outcome(aggregated, verified_out, unreviewed)
+            .await?;
+        let (merged, split) = self.attach_round_state(
+            &mut outcome,
+            registry,
+            &all_threads,
+            &open_threads,
+            &comment_of_finding,
+        );
+        render_round(&mut outcome, &merged);
+        let event = round_event(&merged, &outcome.unreviewed_batches);
+        if dry_run {
+            return Ok(outcome);
+        }
+        self.publish_round(&mut outcome, &merged, split, &open_threads, event)
+            .await?;
+        Ok(outcome)
+    }
+
+    async fn gather_findings(
+        &self,
+        batches: &[Vec<String>],
+        registry: &Registry,
+    ) -> (Findings, Vec<String>) {
         let (mut aggregated, first_pass_unreviewed) =
-            self.review_batches(&batches, &registry, false).await;
+            self.review_batches(batches, registry, false).await;
         let mut unreviewed = first_pass_unreviewed;
         let hunt_skipped = unreviewed.clone();
         for batch in self
-            .hunt_misses(&batches, &registry, &mut aggregated, &hunt_skipped)
+            .hunt_misses(batches, registry, &mut aggregated, &hunt_skipped)
             .await
         {
             if !unreviewed.contains(&batch) {
                 unreviewed.push(batch);
             }
         }
-        let verified_out = self
-            .apply_verification(&mut aggregated, &verifier_history)
-            .await;
+        (aggregated, unreviewed)
+    }
+
+    async fn grounded_outcome(
+        &self,
+        aggregated: Findings,
+        verified_out: Vec<(Finding, String)>,
+        unreviewed: Vec<String>,
+    ) -> Result<(ReviewOutcome, Vec<Option<usize>>), DifftraceError> {
         let grounded = ground_findings(
             self.index(),
             aggregated.findings,
@@ -595,7 +786,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                 findings: grounded.findings.clone(),
             }])
             .await?;
-        let mut outcome = ReviewOutcome {
+        let outcome = ReviewOutcome {
             summary,
             findings: grounded.findings,
             comments: grounded.comments,
@@ -609,79 +800,52 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             standing_body: String::new(),
             fixed_this_round: Vec::new(),
         };
-        let also_by_comment: Vec<Vec<(String, u64)>> =
-            crate::prompts::grouped_by_title(&outcome.findings)
-                .iter()
-                .map(|(_, group)| {
-                    let Some((_, rest)) = group.split_first() else {
-                        return Vec::new();
-                    };
-                    rest.iter()
-                        .map(|finding| (finding.file.clone(), finding.line as u64))
-                        .collect()
-                })
-                .collect();
+        Ok((outcome, comment_of_finding))
+    }
+
+    fn attach_round_state(
+        &self,
+        outcome: &mut ReviewOutcome,
+        registry: Registry,
+        all_threads: &[ReviewThread],
+        open_threads: &[ReviewThread],
+        comment_of_finding: &[Option<usize>],
+    ) -> (Registry, ReplySplit) {
+        let also_by_comment = also_locations_by_comment(&outcome.findings);
         let split = split_replies(
-            &open_threads,
+            open_threads,
             outcome.comments.clone(),
             &also_by_comment,
             self.head_sha(),
             &registry,
         );
-        let finding_threads: Vec<Option<String>> = comment_of_finding
-            .iter()
-            .map(|comment_index| {
-                comment_index
-                    .and_then(|index| split.finding_threads.get(index))
-                    .cloned()
-                    .flatten()
-            })
-            .collect();
+        let finding_threads = finding_thread_ids(comment_of_finding, &split);
         let dropped: Vec<(Finding, &str)> = outcome
             .dropped
             .iter()
             .map(|entry| (entry.finding.clone(), entry.reason))
             .collect();
-        let registry = registry.merge(&RoundFindings {
+        let merged = registry.merge(&RoundFindings {
             head_sha: self.head_sha(),
             grounded: &outcome.findings,
             finding_threads: &finding_threads,
             dropped: &dropped,
-            threads: &all_threads,
+            threads: all_threads,
             retired: &split.retired,
         });
-        outcome.fixed_this_round = registry
-            .issues
-            .iter()
-            .filter(|issue| issue.resolved_round == Some(registry.round))
-            .map(|issue| issue.title.clone())
-            .collect();
-        let fix_all = fix_all_section(
-            &outcome.findings,
-            &outcome.dropped,
-            outcome.pr,
-            &outcome.head_sha,
-        );
-        let raised = outcome.findings.len().saturating_add(outcome.dropped.len());
-        let clean = raised == 0 && outcome.unreviewed_batches.is_empty();
-        outcome.round_body = review_round_body(&outcome.head_sha, raised, clean, &fix_all);
-        let gap_note = unreviewed_note(&outcome.unreviewed_batches);
-        if !gap_note.is_empty() {
-            outcome.round_body.push('\n');
-            outcome.round_body.push_str(gap_note.trim_end());
-        }
-        outcome.standing_body = standing_render(&outcome, &registry);
-        let event = if registry.has_unresolved_blockers() {
-            ReviewEvent::ChangesRequested
-        } else if outcome.unreviewed_batches.is_empty() {
-            ReviewEvent::Approved
-        } else {
-            ReviewEvent::Commented
-        };
-        if dry_run {
-            return Ok(outcome);
-        }
-        self.post_verdict_comment(&outcome, &registry).await;
+        outcome.fixed_this_round = fixed_titles(&merged);
+        (merged, split)
+    }
+
+    async fn publish_round(
+        &self,
+        outcome: &mut ReviewOutcome,
+        registry: &Registry,
+        split: ReplySplit,
+        open_threads: &[ReviewThread],
+        event: ReviewEvent,
+    ) -> Result<(), DifftraceError> {
+        self.post_verdict_comment(outcome, registry).await;
         let submission = ReviewSubmission {
             head_sha: self.head_sha().to_owned(),
             event,
@@ -690,7 +854,14 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         };
         self.submit(submission).await?;
         self.post_re_raised_replies(split.replies).await;
-        let resolved = threads_to_resolve(&open_threads, &split.matched);
+        self.resolve_previous_threads(open_threads, &split.matched)
+            .await;
+        outcome.posted = true;
+        Ok(())
+    }
+
+    async fn resolve_previous_threads(&self, open_threads: &[ReviewThread], matched: &[String]) {
+        let resolved = threads_to_resolve(open_threads, matched);
         for id in &resolved {
             if let Err(err) = self.resolve_thread(id.clone()).await {
                 tracing::warn!(
@@ -705,8 +876,6 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             resolved = resolved.len(),
             "resolved previous threads"
         );
-        outcome.posted = true;
-        Ok(outcome)
     }
 
     async fn apply_verification(
@@ -1110,6 +1279,193 @@ diff --git a/src/beta.rs b/src/beta.rs
         let batches = plan_batches(&files, 0);
         assert_eq!(batches.len(), 2);
         assert!(batches.iter().all(|batch| batch.len() == 1));
+    }
+
+    fn finding(file: &str, line: usize, title: &str) -> Finding {
+        Finding {
+            file: file.to_owned(),
+            line,
+            severity: Severity::Warning,
+            complexity: 3,
+            title: title.to_owned(),
+            body: "The guard is dropped before the read completes.".to_owned(),
+        }
+    }
+
+    fn open_registry_issue(severity: Severity) -> Issue {
+        Issue {
+            title: "Guard dropped early".to_owned(),
+            file: "src/alpha.rs".to_owned(),
+            line: Some(2),
+            severity,
+            complexity: 3,
+            anchored: true,
+            status: IssueStatus::Open,
+            thread_id: Some("T1".to_owned()),
+            raised_round: 1,
+            raised_sha: "round1sha".to_owned(),
+            last_round: 2,
+            resolved_round: None,
+            resolved_sha: None,
+        }
+    }
+
+    #[test]
+    fn the_round_event_blocks_on_blockers_and_withholds_when_files_went_unreviewed() {
+        let mut blocked = Registry {
+            round: 2,
+            issues: vec![],
+        };
+        blocked.issues.push(open_registry_issue(Severity::Critical));
+        assert_eq!(
+            round_event(&blocked, &[]),
+            ReviewEvent::ChangesRequested,
+            "an unresolved blocker must never approve"
+        );
+        let clean = Registry {
+            round: 2,
+            issues: vec![],
+        };
+        assert_eq!(round_event(&clean, &[]), ReviewEvent::Approved);
+        let unreviewed_only = Registry {
+            round: 2,
+            issues: vec![],
+        };
+        assert_eq!(
+            round_event(&unreviewed_only, &["a.rs, b.rs".to_owned()]),
+            ReviewEvent::Commented,
+            "a neutral review never satisfies branch protection"
+        );
+        let nit_only = Registry {
+            round: 2,
+            issues: vec![open_registry_issue(Severity::Nitpick)],
+        };
+        assert_eq!(
+            round_event(&nit_only, &[]),
+            ReviewEvent::Approved,
+            "non-blocking issues do not block"
+        );
+    }
+
+    #[test]
+    fn also_locations_by_comment_lists_each_groups_secondaries() {
+        let findings = vec![
+            finding("src/alpha.rs", 2, "Same issue"),
+            finding("src/beta.rs", 9, "Same issue"),
+            finding("src/gamma.rs", 4, "Other issue"),
+        ];
+        let locations = also_locations_by_comment(&findings);
+        assert_eq!(locations.len(), 2, "one entry per grouped comment");
+        let expected_secondaries = vec![("src/beta.rs".to_owned(), 9)];
+        assert_eq!(locations.first(), Some(&expected_secondaries));
+        assert!(
+            locations.get(1).is_some_and(Vec::is_empty),
+            "a lone finding has no secondaries"
+        );
+    }
+
+    #[test]
+    fn finding_thread_ids_follow_the_comment_index_mapping() {
+        let split = ReplySplit {
+            positions: vec![],
+            replies: vec![],
+            matched: vec![],
+            finding_threads: vec![Some("T1".to_owned()), None, Some("T3".to_owned())],
+            retired: vec![],
+        };
+        let comment_of_finding = vec![None, Some(0), Some(1), Some(2)];
+        let ids = finding_thread_ids(&comment_of_finding, &split);
+        assert_eq!(
+            ids,
+            vec![None, Some("T1".to_owned()), None, Some("T3".to_owned())]
+        );
+    }
+
+    #[test]
+    fn fixed_titles_name_only_issues_resolved_this_round() {
+        let mut resolved_this_round = open_registry_issue(Severity::Warning);
+        resolved_this_round.status = IssueStatus::Fixed;
+        resolved_this_round.resolved_round = Some(3);
+        let mut resolved_earlier = open_registry_issue(Severity::Warning);
+        resolved_earlier.status = IssueStatus::Fixed;
+        resolved_earlier.resolved_round = Some(1);
+        let registry = Registry {
+            round: 3,
+            issues: vec![resolved_this_round, resolved_earlier],
+        };
+        assert_eq!(
+            fixed_titles(&registry),
+            vec!["Guard dropped early".to_owned()]
+        );
+    }
+
+    #[test]
+    fn comment_location_sets_lead_with_the_anchor_and_append_the_secondaries() {
+        let comment = CommentPosition {
+            path: "src/alpha.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: "detail".to_owned(),
+        };
+        let also_locations = vec![vec![
+            ("src/beta.rs".to_owned(), 9),
+            ("src/gamma.rs".to_owned(), 4),
+        ]];
+        let sets = comment_location_sets(std::slice::from_ref(&comment), &also_locations);
+        assert_eq!(
+            sets,
+            vec![vec![
+                ("src/alpha.rs".to_owned(), 2),
+                ("src/beta.rs".to_owned(), 9),
+                ("src/gamma.rs".to_owned(), 4),
+            ]]
+        );
+        let bare = comment_location_sets(std::slice::from_ref(&comment), &[]);
+        assert_eq!(bare, vec![vec![("src/alpha.rs".to_owned(), 2)]]);
+    }
+
+    #[test]
+    fn match_comments_to_threads_claims_a_thread_for_one_comment_only() {
+        let threads = vec![ReviewThread {
+            id: "T1".to_owned(),
+            comment_id: 601,
+            resolved: false,
+            path: "src/alpha.rs".to_owned(),
+            line: Some(2),
+            original_line: Some(2),
+        }];
+        let comment = |title: &str| CommentPosition {
+            path: "src/alpha.rs".to_owned(),
+            line: 2,
+            side: Side::Right,
+            body: format!(
+                "![warning](https://img.shields.io/badge/warning-orange) ![effort 1](https://img.shields.io/badge/effort_1-blue) **{title}**\n\ndetail"
+            ),
+        };
+        let comments = vec![comment("Shared issue"), comment("Shared issue")];
+        let location_sets = comment_location_sets(&comments, &[]);
+        let registry = Registry {
+            round: 1,
+            issues: vec![Issue {
+                title: "Shared issue".to_owned(),
+                file: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                severity: Severity::Warning,
+                complexity: 3,
+                anchored: true,
+                status: IssueStatus::Open,
+                thread_id: Some("T1".to_owned()),
+                raised_round: 1,
+                raised_sha: String::new(),
+                last_round: 1,
+                resolved_round: None,
+                resolved_sha: None,
+            }],
+        };
+        let matches = match_comments_to_threads(&threads, &comments, &location_sets, &registry);
+        assert_eq!(matches.anchors, vec![Some(0), None]);
+        assert!(matches.secondaries.is_empty());
+        assert_eq!(matches.claimed, vec!["T1".to_owned()]);
     }
 
     #[test]
@@ -2262,6 +2618,48 @@ mod registry_flow_tests {
     use loopctl::testing::MockApiClient;
     use loopctl::testing::MockResponse;
     use loopctl::testing::MockToolCall;
+
+    #[tokio::test]
+    async fn a_batch_that_fails_once_recovers_on_the_retry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // The first attempt ends without ever recording findings, which
+        // fails the batch; the retry replays the rest of the script to a
+        // clean verdict.
+        let inner = MockApiClient::new("review-model").with_responses(vec![
+            text_response("thinking out loud, no verdict"),
+            tool_call("c1", json!({ "findings": [] })),
+            text_response("Clean on the retry."),
+        ]);
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = ReviewRunner::new(
+            Arc::new(inner),
+            {
+                let handle = std::sync::Arc::clone(&gateway);
+                let typed: Arc<dyn crate::github::PrGateway> = handle;
+                typed
+            },
+            Arc::new(two_file_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                verify_findings: false,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let registry = Registry {
+            round: 1,
+            issues: vec![],
+        };
+        let (findings, unreviewed) = runner
+            .review_batches(&[vec!["src/lib.rs".to_owned()]], &registry, false)
+            .await;
+        assert!(
+            unreviewed.is_empty(),
+            "the retry must recover the failed first attempt"
+        );
+        assert!(findings.findings.is_empty());
+        Ok(())
+    }
     use serde_json::json;
     use std::future::Future;
     use std::pin::Pin;

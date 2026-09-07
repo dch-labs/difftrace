@@ -26,7 +26,7 @@ uses); `cargo` resolves it automatically.
 ## Usage
 
 ```
-difftrace review --repo owner/repo --pr 42 [--dry-run] [--config PATH]
+difftrace review --repo owner/repo --pr 42 [--dry-run] [--config PATH] [--sha SHA]
 ```
 
 - `--repo owner/repo` — the repository to review (required)
@@ -34,6 +34,9 @@ difftrace review --repo owner/repo --pr 42 [--dry-run] [--config PATH]
 - `--dry-run` — render the review to stdout instead of posting it
 - `--config PATH` — explicit config file; default `~/.difftrace/config.toml`
   (a missing file there means defaults; a missing explicit path is an error)
+- `--sha SHA` — pin the run to this head commit; the run fails if the pull
+  request's head differs, so a consumer can key its cache and its review
+  to one commit (`reply` and `plan` take it too)
 
 The `DIFFTRACE_PROFILE` environment variable overrides
 `provider.profile` without a config file — the natural mechanism in CI,
@@ -163,13 +166,20 @@ created, difftrace says so on stderr and proceeds without capture.
 
 ## The consumer workflow
 
-[`examples/difftrace-review.yml`](examples/difftrace-review.yml) is the
-reference `GitHub` Actions workflow for running difftrace on a
-repository — reviews on every pull request, `@difftrace`/`/difftrace`
-comment commands through a first-line mention, and per-PR concurrency
-that never lets a comment cancel an in-flight review. Copy it verbatim;
-on every difftrace release, bump the two version+checksum pins (both
-install steps). Setup it assumes: the difftrace `GitHub` App installed with
+The review workflow lives once in this repository at
+[`.github/workflows/review.yml`](.github/workflows/review.yml) — it
+runs on difftrace's own pull requests, and consumer repositories call
+it as a reusable workflow through the small caller template at
+[`examples/difftrace-review.yml`](examples/difftrace-review.yml):
+reviews on every pull request, `@difftrace`/`/difftrace` comment
+commands through a first-line mention, and per-PR concurrency that
+never lets a comment cancel an in-flight review.
+
+Pin the caller's `uses:` line to a fixed commit of this repository,
+not to the tag — `release.sh pins` prints the exact line after each
+release, because only that commit carries the binary version+checksum
+pins matching the release; on every difftrace release, bump it. Setup
+it assumes: the difftrace `GitHub` App installed with
 `pull-requests: write` and `contents: write` (conversation resolution
 requires repo-write on the token — `contents: read` leaves
 `resolveReviewThread` rejected), the `ZAI_API_KEY`,

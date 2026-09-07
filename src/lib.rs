@@ -20,4 +20,5 @@ pub mod github;
 pub mod prompts;
 pub mod provider;
 pub mod review;
+pub mod session;
 pub mod tools;

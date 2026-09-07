@@ -190,7 +190,17 @@ pub(crate) fn fix_all_section(
     if findings.is_empty() && dropped.is_empty() {
         return String::new();
     }
-    let grounded = grouped_by_title(findings)
+    let grounded = grounded_list(findings);
+    let unanchored = dropped_list(dropped);
+    let wrapped = wrap_prompt(&fix_all_prompt(findings, dropped, pr, head_sha));
+    let fence = fence_for(&wrapped);
+    format!(
+        "## 🤖 Fix all findings\n{grounded}{unanchored}\n\n<details>\n<summary>Copy the fix-all prompt for coding agents</summary>\n\n{fence}text\n{wrapped}\n{fence}\n</details>"
+    )
+}
+
+fn grounded_list(findings: &[Finding]) -> String {
+    grouped_by_title(findings)
         .iter()
         .enumerate()
         .map(|(index, (_, group))| {
@@ -213,32 +223,29 @@ pub(crate) fn fix_all_section(
             )
         })
         .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn dropped_list(dropped: &[DroppedFinding]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let entries = dropped
+        .iter()
+        .map(|entry| {
+            format!(
+                "- `{}:{}` — {} {} ({}, {})",
+                entry.finding.file,
+                entry.finding.line,
+                entry.finding.severity.glyph(),
+                entry.finding.title,
+                complexity_glyph(entry.finding.complexity),
+                entry.reason,
+            )
+        })
+        .collect::<Vec<_>>()
         .join("\n");
-    let unanchored = if dropped.is_empty() {
-        String::new()
-    } else {
-        let entries = dropped
-            .iter()
-            .map(|entry| {
-                format!(
-                    "- `{}:{}` — {} {} ({}, {})",
-                    entry.finding.file,
-                    entry.finding.line,
-                    entry.finding.severity.glyph(),
-                    entry.finding.title,
-                    complexity_glyph(entry.finding.complexity),
-                    entry.reason,
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("\n\nUnanchored (no inline comment posted):\n{entries}")
-    };
-    let wrapped = wrap_prompt(&fix_all_prompt(findings, dropped, pr, head_sha));
-    let fence = fence_for(&wrapped);
-    format!(
-        "## 🤖 Fix all findings\n{grounded}{unanchored}\n\n<details>\n<summary>Copy the fix-all prompt for coding agents</summary>\n\n{fence}text\n{wrapped}\n{fence}\n</details>"
-    )
+    format!("\n\nUnanchored (no inline comment posted):\n{entries}")
 }
 
 fn fix_all_prompt(

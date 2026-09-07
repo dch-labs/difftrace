@@ -22,6 +22,9 @@ const OWN_LOGIN: &str = "difftrace[bot]";
 #[derive(Default)]
 struct Inner {
     overview: Mutex<Option<PrOverview>>,
+    overview_queue: Mutex<Vec<PrOverview>>,
+    overview_calls: Mutex<usize>,
+    diff: Mutex<String>,
     files: Mutex<Vec<(String, String)>>,
     comments: Mutex<Vec<ExistingComment>>,
     submitted: Mutex<Option<ReviewSubmission>>,
@@ -61,6 +64,31 @@ impl FakeGateway {
         gateway
     }
 
+    pub(crate) fn with_overview_queue(overviews: Vec<PrOverview>) -> Self {
+        let gateway = Self::empty();
+        if let Some(last) = overviews.last().cloned() {
+            *gateway
+                .inner
+                .overview
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(last);
+        }
+        *gateway
+            .inner
+            .overview_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = overviews;
+        gateway
+    }
+
+    pub(crate) fn overview_calls(&self) -> usize {
+        *self
+            .inner
+            .overview_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub(crate) fn with_file(path: &str, content: &str) -> Self {
         let gateway = Self::empty();
         gateway
@@ -70,6 +98,15 @@ impl FakeGateway {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((path.to_owned(), content.to_owned()));
         gateway
+    }
+
+    pub(crate) fn and_diff(self, diff: &str) -> Self {
+        *self
+            .inner
+            .diff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = diff.to_owned();
+        self
     }
 
     pub(crate) fn and_file(self, path: &str, content: &str) -> Self {
@@ -290,12 +327,32 @@ impl PrGateway for FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(pr);
-        let overview = self
-            .inner
-            .overview
+        self.inner
+            .calls
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .push("overview");
+        let mut overview_calls = self
+            .inner
+            .overview_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *overview_calls = overview_calls.saturating_add(1);
+        let queued = self
+            .inner
+            .overview_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut queued = queued;
+        let overview = if queued.is_empty() {
+            self.inner
+                .overview
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        } else {
+            Some(queued.remove(0))
+        };
         Box::pin(async move { overview.ok_or_else(|| missing("overview")) })
     }
 
@@ -303,8 +360,24 @@ impl PrGateway for FakeGateway {
         &self,
         _pr: u64,
     ) -> Pin<Box<dyn Future<Output = Result<String, DifftraceError>> + Send + '_>> {
-        let err = missing("diff");
-        Box::pin(async move { Err(err) })
+        self.inner
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push("diff");
+        let diff = self
+            .inner
+            .diff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move {
+            if diff.is_empty() {
+                Err(missing("diff"))
+            } else {
+                Ok(diff)
+            }
+        })
     }
 
     fn file_at_ref(

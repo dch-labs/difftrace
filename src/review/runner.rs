@@ -30,8 +30,9 @@ use crate::review::RecordFindingsTool;
 use crate::review::logging::LoggingObserver;
 use crate::review::rubric::ReviewRubric;
 use crate::tools::ReviewScope;
+use loopctl::tool::ToolRegistry;
 
-pub(crate) const TOOL_OUTPUT_MAX_CHARS: usize = 16 * 1024;
+pub(crate) const TOOL_OUTPUT_MAX_CHARS: usize = 128 * 1024;
 
 pub(crate) fn production_managers(stream_timeout_secs: u64) -> LoopManagers {
     let handler = loopctl::stream::handler::StreamHandler::new().with_timeout_config(
@@ -41,6 +42,70 @@ pub(crate) fn production_managers(stream_timeout_secs: u64) -> LoopManagers {
         },
     );
     LoopManagers::new().with_stream_handler(handler)
+}
+
+pub async fn recheck_pinned_head(
+    gateway: &dyn PrGateway,
+    pr: u64,
+    requested: Option<&str>,
+) -> Result<(), DifftraceError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let latest = gateway.pr_overview(pr).await?;
+    crate::cli::check_sha(&latest.head_sha, Some(requested)).map_err(DifftraceError::Cli)
+}
+
+pub async fn fetch_pinned_diff(
+    gateway: &dyn PrGateway,
+    pr: u64,
+    requested: Option<&str>,
+) -> Result<(PrOverview, String), DifftraceError> {
+    let overview = gateway.pr_overview(pr).await?;
+    crate::cli::check_sha(&overview.head_sha, requested).map_err(DifftraceError::Cli)?;
+    let diff = gateway.pr_diff(pr).await?;
+    recheck_pinned_head(gateway, pr, requested).await?;
+    Ok((overview, diff))
+}
+
+fn check_truncation(
+    budget: Option<u32>,
+    turns: &[loopctl::engine::Turn],
+) -> Result<(), DifftraceError> {
+    let Some(budget) = budget else {
+        return Ok(());
+    };
+    let Some(final_turn) = turns.last() else {
+        return Ok(());
+    };
+    tracing::info!(
+        target: "difftrace::review",
+        output_tokens = final_turn.output_tokens,
+        tool_calls = final_turn.tool_calls.len(),
+        "batch run ended"
+    );
+    if final_turn.tool_calls.is_empty() && final_turn.output_tokens >= u64::from(budget) {
+        tracing::warn!(
+            target: "difftrace::review",
+            output_tokens = final_turn.output_tokens,
+            budget,
+            "the batch's final turn was truncated at the output budget"
+        );
+        return Err(DifftraceError::ReviewTruncated { budget });
+    }
+    Ok(())
+}
+
+fn recorded_findings(
+    slot: &std::sync::Mutex<Option<Findings>>,
+) -> Result<Option<Findings>, DifftraceError> {
+    let guard = slot.lock().map_err(|_| DifftraceError::ReviewRun {
+        source: LoopError::ToolExecution {
+            tool: "record_findings".to_owned(),
+            message: "findings slot poisoned".to_owned(),
+        },
+    })?;
+    Ok(guard.clone())
 }
 
 const SUMMARY_SYSTEM: &str = "\
@@ -213,6 +278,35 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         let registry = self
             .scope
             .batch_registry(Arc::clone(&slot), self.settings.max_findings_per_file);
+        let mut agent = self.assemble_batch_agent(registry, history, hunt)?;
+        let mut run_config = RunConfig::default();
+        run_config.max_turns = self.settings.max_turns;
+        let prompt = batch_prompt(files, evidence, hunt);
+        let run = match agent.run(&prompt, &run_config).await {
+            Ok(run) => Some(run),
+            Err(LoopError::MaxTurnsExceeded { .. }) => None,
+            Err(source) => return Err(DifftraceError::ReviewRun { source }),
+        };
+        check_truncation(
+            self.output_budget,
+            run.as_ref().map_or(&[], |run| run.turns.as_slice()),
+        )?;
+        if let Some(findings) = recorded_findings(&slot)? {
+            return Ok(findings);
+        }
+        tracing::warn!(
+            target: "difftrace::review",
+            "the batch run ended without a single record_findings call"
+        );
+        Err(DifftraceError::ReviewNoVerdict)
+    }
+
+    fn assemble_batch_agent(
+        &self,
+        registry: ToolRegistry,
+        history: &str,
+        hunt: bool,
+    ) -> Result<BareLoop<C>, DifftraceError> {
         let mut agent = BareLoop::new_with_managers(
             Arc::clone(&self.client),
             registry,
@@ -239,51 +333,7 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         agent
             .set_pipeline(pipeline)
             .map_err(|source| DifftraceError::ReviewRun { source })?;
-
-        let mut run_config = RunConfig::default();
-        run_config.max_turns = self.settings.max_turns;
-        let prompt = batch_prompt(files, evidence, hunt);
-        let run = match agent.run(&prompt, &run_config).await {
-            Ok(run) => Some(run),
-            Err(LoopError::MaxTurnsExceeded { .. }) => None,
-            Err(source) => return Err(DifftraceError::ReviewRun { source }),
-        };
-        if let (Some(budget), Some(run)) = (self.output_budget, run.as_ref())
-            && let Some(final_turn) = run.turns.last()
-        {
-            tracing::info!(
-                target: "difftrace::review",
-                output_tokens = final_turn.output_tokens,
-                tool_calls = final_turn.tool_calls.len(),
-                "batch run ended"
-            );
-            if final_turn.tool_calls.is_empty() && final_turn.output_tokens >= u64::from(budget) {
-                tracing::warn!(
-                    target: "difftrace::review",
-                    output_tokens = final_turn.output_tokens,
-                    budget,
-                    "the batch's final turn was truncated at the output budget"
-                );
-                return Err(DifftraceError::ReviewTruncated { budget });
-            }
-        }
-        let recorded = slot
-            .lock()
-            .map_err(|_| DifftraceError::ReviewRun {
-                source: LoopError::ToolExecution {
-                    tool: "record_findings".to_owned(),
-                    message: "findings slot poisoned".to_owned(),
-                },
-            })?
-            .clone();
-        if let Some(findings) = recorded {
-            return Ok(findings);
-        }
-        tracing::warn!(
-            target: "difftrace::review",
-            "the batch run ended without a single record_findings call"
-        );
-        Err(DifftraceError::ReviewNoVerdict)
+        Ok(agent)
     }
 
     pub async fn summarize(&self, batches: &[Findings]) -> Result<ReviewSummary, DifftraceError> {
@@ -509,6 +559,98 @@ diff --git a/src/lib.rs b/src/lib.rs
         DiffIndex::parse(diff).map_err(Into::into)
     }
 
+    #[tokio::test]
+    async fn a_pinned_run_rechecks_the_head_after_the_diff_is_fetched()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::with_overview_queue(vec![overview()]));
+        recheck_pinned_head(gateway.as_ref(), 42, Some("headsha")).await?;
+        assert_eq!(gateway.overview_calls(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_head_that_moves_mid_fetch_fails_the_pinned_run()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut moved = overview();
+        moved.head_sha = "newerhead".to_owned();
+        let gateway = Arc::new(FakeGateway::with_overview_queue(vec![moved]));
+        let err = recheck_pinned_head(gateway.as_ref(), 42, Some("headsha"))
+            .await
+            .err()
+            .ok_or("expected the moved head to fail the pin")?;
+        let message = err.to_string();
+        assert!(
+            message.contains("headsha"),
+            "the pinned commit is named: {message}"
+        );
+        assert!(
+            message.contains("newerhead"),
+            "the actual head is named: {message}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn an_unpinned_run_does_not_refetch_the_head() -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        recheck_pinned_head(gateway.as_ref(), 42, None).await?;
+        assert_eq!(gateway.overview_calls(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_pinned_run_fetches_overview_diff_then_rechecks_the_head()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = FakeGateway::with_overview_queue(vec![overview()])
+            .and_diff("diff --git a/src/lib.rs b/src/lib.rs");
+        let (fetched, diff) = fetch_pinned_diff(&gateway, 42, Some("headsha")).await?;
+        assert_eq!(fetched.head_sha, "headsha");
+        assert!(!diff.is_empty());
+        assert_eq!(
+            gateway.call_order(),
+            vec!["overview", "diff", "overview"],
+            "the pin is checked before the fetch and re-checked after it"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failing_pin_skips_the_diff_fetch() -> Result<(), Box<dyn std::error::Error>> {
+        let gateway =
+            FakeGateway::with_overview_queue(vec![overview()]).and_diff("diff --git a/x b/x");
+        let err = fetch_pinned_diff(&gateway, 42, Some("otherpin"))
+            .await
+            .err()
+            .ok_or("expected the pin check to fail before the fetch")?;
+        assert_eq!(
+            gateway.call_order(),
+            vec!["overview"],
+            "nothing else runs once the pin fails"
+        );
+        assert!(err.to_string().contains("otherpin"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_head_moving_after_the_diff_fails_the_composed_fetch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut moved = overview();
+        moved.head_sha = "newerhead".to_owned();
+        let gateway = FakeGateway::with_overview_queue(vec![overview(), moved])
+            .and_diff("diff --git a/x b/x");
+        let err = fetch_pinned_diff(&gateway, 42, Some("headsha"))
+            .await
+            .err()
+            .ok_or("expected the mid-fetch move to fail the run")?;
+        assert_eq!(
+            gateway.call_order(),
+            vec!["overview", "diff", "overview"],
+            "the diff is fetched before the re-check fails"
+        );
+        assert!(err.to_string().contains("newerhead"));
+        Ok(())
+    }
+
     fn tool_call(id: &str, name: &str, input: serde_json::Value) -> MockResponse {
         MockResponse {
             text: String::new(),
@@ -519,6 +661,53 @@ diff --git a/src/lib.rs b/src/lib.rs
             }),
             stop_reason: "tool_use".to_owned(),
         }
+    }
+
+    fn turn_with(output_tokens: u64, tools: &[&str]) -> loopctl::engine::Turn {
+        loopctl::engine::Turn {
+            turn: 0,
+            input: String::new(),
+            output: String::new(),
+            tool_calls: tools
+                .iter()
+                .map(|tool| loopctl::engine::ToolCall {
+                    id: format!("call_{tool}"),
+                    tool: (*tool).to_owned(),
+                    input: serde_json::json!({}),
+                })
+                .collect(),
+            input_tokens: 0,
+            output_tokens,
+        }
+    }
+
+    #[test]
+    fn the_truncation_check_fires_on_a_tool_free_final_turn_at_the_budget()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let turns = vec![turn_with(25, &[])];
+        let err = check_truncation(Some(10), &turns)
+            .err()
+            .ok_or("an over-budget tool-free final turn is truncation")?;
+        assert!(
+            err.to_string().contains("10-token output budget"),
+            "the failure names the budget: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_truncation_check_passes_under_the_budget_or_with_tool_calls() {
+        assert!(check_truncation(Some(64), &[turn_with(25, &[])]).is_ok());
+        assert!(check_truncation(Some(10), &[turn_with(25, &["record_findings"])]).is_ok());
+    }
+
+    #[test]
+    fn the_truncation_check_needs_both_a_budget_and_a_final_turn() {
+        assert!(check_truncation(None, &[]).is_ok(), "no budget, no check");
+        assert!(
+            check_truncation(Some(10), &[]).is_ok(),
+            "a max-turns run has no final turn to judge"
+        );
     }
 
     fn text_response(text: &str) -> MockResponse {

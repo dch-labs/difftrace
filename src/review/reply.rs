@@ -171,80 +171,92 @@ async fn reply_context(
     target: &ReplyTarget,
 ) -> Result<ReplyContext, DifftraceError> {
     match target {
-        ReplyTarget::IssueComment { id } => {
-            let comment = gateway.fetch_issue_comment(*id).await?;
-            let trail = gateway
-                .issue_comments(pr)
-                .await
-                .inspect_err(|err| {
-                    tracing::warn!(
-                        target: "difftrace::review",
-                        error = %crate::error::error_chain(err),
-                        "could not read the conversation trail; replying without it"
-                    );
-                })
-                .unwrap_or_default();
-            let history: Vec<(String, String)> = trail
-                .into_iter()
-                .filter(|entry| entry.id != *id)
-                .map(|entry| (entry.author, cap_body(entry.body)))
-                .collect();
-            let skip = history.len().saturating_sub(CONVERSATION_TRAIL);
-            Ok(ReplyContext {
-                author: comment.author,
-                question: comment.body,
-                finding: None,
-                path: None,
-                history: history.into_iter().skip(skip).collect(),
-            })
-        }
-        ReplyTarget::ReviewComment { id } => {
-            let comment = gateway.fetch_review_comment(*id).await?;
-            let path = comment.path.clone();
-            let Some(root_id) = comment.in_reply_to else {
-                // A standalone review comment opens its own thread; there
-                // is no difftrace finding behind it.
-                return Ok(ReplyContext {
-                    author: comment.author,
-                    question: comment.body,
-                    finding: None,
-                    path: Some(path),
-                    history: Vec::new(),
-                });
-            };
-            let all = match gateway.existing_review_comments(pr).await {
-                Ok(all) => Some(all),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "difftrace::review",
-                        error = %crate::error::error_chain(&err),
-                        "could not read the thread; the finding and its history are lost"
-                    );
-                    None
-                }
-            };
-            let finding = all
-                .as_ref()
-                .and_then(|entries| entries.iter().find(|entry| entry.id == root_id))
-                .map(|entry| entry.body.clone());
-            let history: Vec<(String, String)> = all
-                .as_ref()
-                .map_or_else(Vec::new, std::clone::Clone::clone)
-                .iter()
-                .filter(|entry| entry.id != *id && entry.id != root_id)
-                .filter(|entry| entry.in_reply_to == Some(root_id))
-                .map(|entry| (entry.author.clone(), cap_body(entry.body.clone())))
-                .collect();
-            let skip = history.len().saturating_sub(THREAD_HISTORY_MAX);
-            Ok(ReplyContext {
-                author: comment.author,
-                question: comment.body,
-                finding,
-                path: Some(path),
-                history: history.into_iter().skip(skip).collect(),
-            })
-        }
+        ReplyTarget::IssueComment { id } => conversation_context(gateway, *id, pr).await,
+        ReplyTarget::ReviewComment { id } => thread_context(gateway, *id, pr).await,
     }
+}
+
+async fn conversation_context(
+    gateway: &Arc<dyn PrGateway>,
+    id: u64,
+    pr: u64,
+) -> Result<ReplyContext, DifftraceError> {
+    let comment = gateway.fetch_issue_comment(id).await?;
+    let trail = gateway
+        .issue_comments(pr)
+        .await
+        .inspect_err(|err| {
+            tracing::warn!(
+                target: "difftrace::review",
+                error = %crate::error::error_chain(err),
+                "could not read the conversation trail; replying without it"
+            );
+        })
+        .unwrap_or_default();
+    let history: Vec<(String, String)> = trail
+        .into_iter()
+        .filter(|entry| entry.id != id)
+        .map(|entry| (entry.author, cap_body(entry.body)))
+        .collect();
+    let skip = history.len().saturating_sub(CONVERSATION_TRAIL);
+    Ok(ReplyContext {
+        author: comment.author,
+        question: comment.body,
+        finding: None,
+        path: None,
+        history: history.into_iter().skip(skip).collect(),
+    })
+}
+
+async fn thread_context(
+    gateway: &Arc<dyn PrGateway>,
+    id: u64,
+    pr: u64,
+) -> Result<ReplyContext, DifftraceError> {
+    let comment = gateway.fetch_review_comment(id).await?;
+    let path = comment.path.clone();
+    let Some(root_id) = comment.in_reply_to else {
+        // A standalone review comment opens its own thread; there
+        // is no difftrace finding behind it.
+        return Ok(ReplyContext {
+            author: comment.author,
+            question: comment.body,
+            finding: None,
+            path: Some(path),
+            history: Vec::new(),
+        });
+    };
+    let all = match gateway.existing_review_comments(pr).await {
+        Ok(all) => Some(all),
+        Err(err) => {
+            tracing::warn!(
+                target: "difftrace::review",
+                error = %crate::error::error_chain(&err),
+                "could not read the thread; the finding and its history are lost"
+            );
+            None
+        }
+    };
+    let finding = all
+        .as_ref()
+        .and_then(|entries| entries.iter().find(|entry| entry.id == root_id))
+        .map(|entry| entry.body.clone());
+    let history: Vec<(String, String)> = all
+        .as_ref()
+        .map_or_else(Vec::new, std::clone::Clone::clone)
+        .iter()
+        .filter(|entry| entry.id != id && entry.id != root_id)
+        .filter(|entry| entry.in_reply_to == Some(root_id))
+        .map(|entry| (entry.author.clone(), cap_body(entry.body.clone())))
+        .collect();
+    let skip = history.len().saturating_sub(THREAD_HISTORY_MAX);
+    Ok(ReplyContext {
+        author: comment.author,
+        question: comment.body,
+        finding,
+        path: Some(path),
+        history: history.into_iter().skip(skip).collect(),
+    })
 }
 
 fn cap_body(body: String) -> String {

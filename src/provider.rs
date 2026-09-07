@@ -125,76 +125,85 @@ impl ApiClient for DifftraceClient {
 }
 
 pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
-    let provider = &cfg.provider;
-    match provider.profile {
-        ProviderProfile::Anthropic => {
-            let key = env_key("ANTHROPIC_API_KEY")?;
-            let mut builder = AnthropicClient::builder()
-                .with_api_key(key)
-                .with_max_tokens(budget(cfg));
-            if let Some(model) = &provider.model {
-                builder = builder.with_model(model.clone());
-            }
-            if let Some(base_url) = &provider.base_url {
-                builder = builder.with_base_url(base_url.clone());
-            }
-            builder
-                .build()
-                .map(DifftraceClient::Anthropic)
-                .map_err(|source| DifftraceError::ClientBuild { source })
-        }
-        ProviderProfile::OpenAi => {
-            let key = env_key("OPENAI_API_KEY")?;
-            let mut builder = OpenAiClient::builder().with_api_key(key);
-            if let Some(model) = &provider.model {
-                builder = builder.with_model(model.clone());
-            }
-            if let Some(base_url) = &provider.base_url {
-                builder = builder.with_base_url(base_url.clone());
-            }
-            builder
-                .build()
-                .map(DifftraceClient::OpenAi)
-                .map_err(|source| DifftraceError::ClientBuild { source })
-        }
-        ProviderProfile::Zai => {
-            let key = env_key_with_alias("ZAI_API_KEY", "ZHIPUAI_API_KEY")?;
-            let mut builder = loopctl::provider::zai_builder()
-                .with_api_key(key)
-                .with_max_tokens(budget(cfg));
-            if let Some(model) = &provider.model {
-                builder = builder.with_model(model.clone());
-            }
-            if let Some(base_url) = &provider.base_url {
-                builder = builder.with_base_url(base_url.clone());
-            }
-            builder
-                .build()
-                .map(DifftraceClient::Anthropic)
-                .map_err(|source| DifftraceError::ClientBuild { source })
-        }
-        ProviderProfile::Ollama => {
-            let model = provider
-                .model
-                .clone()
-                .ok_or(DifftraceError::OllamaModelMissing)?;
-            let key = std::env::var("OLLAMA_API_KEY")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| NO_AUTH_KEY.to_owned());
-            let base_url = provider
-                .base_url
-                .clone()
-                .unwrap_or_else(|| OLLAMA_BASE_URL.to_owned());
-            OpenAiClient::builder()
-                .with_api_key(key)
-                .with_base_url(base_url)
-                .with_model(model)
-                .build()
-                .map(DifftraceClient::OpenAi)
-                .map_err(|source| DifftraceError::ClientBuild { source })
-        }
+    match cfg.provider.profile {
+        ProviderProfile::Anthropic => anthropic_client(cfg),
+        ProviderProfile::OpenAi => openai_client(cfg),
+        ProviderProfile::Zai => zai_client(cfg),
+        ProviderProfile::Ollama => ollama_client(cfg),
     }
+}
+
+fn anthropic_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
+    let key = env_key("ANTHROPIC_API_KEY")?;
+    let mut builder = AnthropicClient::builder()
+        .with_api_key(key)
+        .with_max_tokens(budget(cfg));
+    if let Some(model) = &cfg.provider.model {
+        builder = builder.with_model(model.clone());
+    }
+    if let Some(base_url) = &cfg.provider.base_url {
+        builder = builder.with_base_url(base_url.clone());
+    }
+    builder
+        .build()
+        .map(DifftraceClient::Anthropic)
+        .map_err(|source| DifftraceError::ClientBuild { source })
+}
+
+fn openai_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
+    let key = env_key("OPENAI_API_KEY")?;
+    let mut builder = OpenAiClient::builder().with_api_key(key);
+    if let Some(model) = &cfg.provider.model {
+        builder = builder.with_model(model.clone());
+    }
+    if let Some(base_url) = &cfg.provider.base_url {
+        builder = builder.with_base_url(base_url.clone());
+    }
+    builder
+        .build()
+        .map(DifftraceClient::OpenAi)
+        .map_err(|source| DifftraceError::ClientBuild { source })
+}
+
+fn zai_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
+    let key = env_key_with_alias("ZAI_API_KEY", "ZHIPUAI_API_KEY")?;
+    let mut builder = loopctl::provider::zai_builder()
+        .with_api_key(key)
+        .with_max_tokens(budget(cfg));
+    if let Some(model) = &cfg.provider.model {
+        builder = builder.with_model(model.clone());
+    }
+    if let Some(base_url) = &cfg.provider.base_url {
+        builder = builder.with_base_url(base_url.clone());
+    }
+    builder
+        .build()
+        .map(DifftraceClient::Anthropic)
+        .map_err(|source| DifftraceError::ClientBuild { source })
+}
+
+fn ollama_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
+    let model = cfg
+        .provider
+        .model
+        .clone()
+        .ok_or(DifftraceError::OllamaModelMissing)?;
+    let key = std::env::var("OLLAMA_API_KEY")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| NO_AUTH_KEY.to_owned());
+    let base_url = cfg
+        .provider
+        .base_url
+        .clone()
+        .unwrap_or_else(|| OLLAMA_BASE_URL.to_owned());
+    OpenAiClient::builder()
+        .with_api_key(key)
+        .with_base_url(base_url)
+        .with_model(model)
+        .build()
+        .map(DifftraceClient::OpenAi)
+        .map_err(|source| DifftraceError::ClientBuild { source })
 }
 
 fn env_key_with_alias(

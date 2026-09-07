@@ -82,6 +82,14 @@ pub fn learning_section(
     )
 }
 
+#[must_use]
+pub fn errored_section(head_sha: &str) -> String {
+    let short = crate::review::registry::short_sha(head_sha);
+    format!(
+        "\n## review {short} (errored)\n- the round errored; whether a review posted is not recorded\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,6 +106,18 @@ mod tests {
         assert!(load(&path).is_none());
         std::fs::remove_file(&path)?;
         Ok(())
+    }
+
+    #[test]
+    fn the_errored_section_names_the_short_sha_without_claiming_a_posting() {
+        let section = errored_section("9f3b2c1full-sha");
+        assert!(section.contains("(errored)"));
+        assert!(section.contains("9f3b2c1"));
+        assert!(section.contains("not recorded"));
+        assert!(
+            !section.contains("clean"),
+            "an errored round is never clean"
+        );
     }
 
     #[test]

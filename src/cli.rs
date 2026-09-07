@@ -49,6 +49,12 @@ pub struct ReviewArgs {
         help = "Cross-review memory file: loaded into the review, appended after posting"
     )]
     pub memory: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        help = "Pin the run to this head commit: fail if the pull request head differs"
+    )]
+    pub sha: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -71,6 +77,12 @@ pub struct ReplyArgs {
         help = "Path to a config file (default: ~/.difftrace/config.toml)"
     )]
     pub config: Option<std::path::PathBuf>,
+
+    #[arg(
+        long,
+        help = "Pin the run to this head commit: fail if the pull request head differs"
+    )]
+    pub sha: Option<String>,
 }
 
 pub fn parse_repo(raw: &str) -> Result<RepoRef, String> {
@@ -84,6 +96,16 @@ pub fn parse_repo(raw: &str) -> Result<RepoRef, String> {
         owner: owner.to_owned(),
         repo: repo.to_owned(),
     })
+}
+
+pub fn check_sha(head_sha: &str, requested: Option<&str>) -> Result<(), String> {
+    match requested {
+        Some(requested) if head_sha != requested => Err(format!(
+            "--sha pins this run to {requested} but the pull request head is {head_sha}; \
+             nothing was run — re-resolve the head and dispatch again"
+        )),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -100,6 +122,8 @@ mod tests {
             "--pr",
             "42",
             "--dry-run",
+            "--sha",
+            "9f3b2c1",
         ])
         .map_err(|err| err.to_string())?;
         let Command::Review(args) = cli.command else {
@@ -109,6 +133,7 @@ mod tests {
         assert_eq!(args.pr, 42);
         assert!(args.dry_run);
         assert_eq!(args.config, None);
+        assert_eq!(args.sha.as_deref(), Some("9f3b2c1"));
         Ok(())
     }
 
@@ -207,5 +232,25 @@ mod tests {
         assert!(parse_repo("owner/").is_err());
         assert!(parse_repo("a/b/c").is_err());
         assert!(parse_repo("").is_err());
+    }
+
+    #[test]
+    fn a_sha_pin_matching_the_head_is_accepted() {
+        assert!(check_sha("9f3b2c1full", Some("9f3b2c1full")).is_ok());
+        assert!(check_sha("9f3b2c1full", None).is_ok());
+    }
+
+    #[test]
+    fn a_sha_pin_off_the_head_fails_and_names_both_commits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let err = check_sha("def4567", Some("9f3b2c1"))
+            .err()
+            .ok_or("a pin that differs from the head must fail validation")?;
+        assert!(
+            err.contains("9f3b2c1"),
+            "the requested commit is named: {err}"
+        );
+        assert!(err.contains("def4567"), "the actual head is named: {err}");
+        Ok(())
     }
 }

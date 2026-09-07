@@ -80,11 +80,15 @@ impl Registry {
     pub(crate) fn merge(mut self, round: &RoundFindings<'_>) -> Self {
         self.round = self.round.saturating_add(1);
         let round_no = self.round;
-        let sha = round.head_sha;
-
         let original_len = self.issues.len();
         let mut seen: Vec<bool> = self.issues.iter().map(|_| false).collect();
+        self.ingest_grounded(round, round_no, &mut seen);
+        self.ingest_dropped(round, round_no, &mut seen);
+        self.retire_unseen(round, round_no, original_len, &seen);
+        self
+    }
 
+    fn ingest_grounded(&mut self, round: &RoundFindings<'_>, round_no: u32, seen: &mut Vec<bool>) {
         for (finding, thread_id) in grounded_with_threads(round.grounded, round.finding_threads) {
             let index = self.match_open_index(finding, thread_id, round.retired);
             if let Some(i) = index {
@@ -103,24 +107,13 @@ impl Registry {
                 }
             } else {
                 seen.push(true);
-                self.issues.push(Issue {
-                    title: finding.title.clone(),
-                    file: finding.file.clone(),
-                    line: Some(finding.line as u64),
-                    severity: finding.severity,
-                    complexity: finding.complexity,
-                    anchored: true,
-                    status: IssueStatus::Open,
-                    thread_id: thread_id.map(String::from),
-                    raised_round: round_no,
-                    raised_sha: sha.to_owned(),
-                    last_round: round_no,
-                    resolved_round: None,
-                    resolved_sha: None,
-                });
+                self.issues
+                    .push(raised_issue(finding, thread_id, round_no, round.head_sha));
             }
         }
+    }
 
+    fn ingest_dropped(&mut self, round: &RoundFindings<'_>, round_no: u32, seen: &mut Vec<bool>) {
         for (finding, _reason) in round.dropped {
             if let Some(i) = self.issues.iter().position(|issue| {
                 issue.status == IssueStatus::Open
@@ -135,30 +128,24 @@ impl Registry {
                 }
             } else {
                 seen.push(true);
-                self.issues.push(Issue {
-                    title: finding.title.clone(),
-                    file: finding.file.clone(),
-                    line: None,
-                    severity: finding.severity,
-                    complexity: finding.complexity,
-                    anchored: false,
-                    status: IssueStatus::Open,
-                    thread_id: None,
-                    raised_round: round_no,
-                    raised_sha: sha.to_owned(),
-                    last_round: round_no,
-                    resolved_round: None,
-                    resolved_sha: None,
-                });
+                self.issues
+                    .push(dropped_issue(finding, round_no, round.head_sha));
             }
         }
+    }
 
+    fn retire_unseen(
+        &mut self,
+        round: &RoundFindings<'_>,
+        round_no: u32,
+        original_len: usize,
+        seen: &[bool],
+    ) {
         let resolved_threads: Vec<&ReviewThread> = round
             .threads
             .iter()
             .filter(|thread| thread.resolved)
             .collect();
-
         for (i, issue) in self.issues.iter_mut().enumerate() {
             let marked = i >= original_len || seen.get(i).is_some_and(|flag| *flag);
             if issue.status != IssueStatus::Open || marked {
@@ -174,10 +161,8 @@ impl Registry {
                 IssueStatus::Fixed
             };
             issue.resolved_round = Some(round_no);
-            issue.resolved_sha = Some(sha.to_owned());
+            issue.resolved_sha = Some(round.head_sha.to_owned());
         }
-
-        self
     }
 
     fn match_open_index(
@@ -214,6 +199,33 @@ pub(crate) fn normalize_title(title: &str) -> String {
 
 pub(crate) fn same_issue_title(a: &str, b: &str) -> bool {
     normalize_title(a) == normalize_title(b)
+}
+
+fn raised_issue(finding: &Finding, thread_id: Option<&str>, round_no: u32, sha: &str) -> Issue {
+    Issue {
+        title: finding.title.clone(),
+        file: finding.file.clone(),
+        line: Some(finding.line as u64),
+        severity: finding.severity,
+        complexity: finding.complexity,
+        anchored: true,
+        status: IssueStatus::Open,
+        thread_id: thread_id.map(String::from),
+        raised_round: round_no,
+        raised_sha: sha.to_owned(),
+        last_round: round_no,
+        resolved_round: None,
+        resolved_sha: None,
+    }
+}
+
+fn dropped_issue(finding: &Finding, round_no: u32, sha: &str) -> Issue {
+    Issue {
+        anchored: false,
+        line: None,
+        thread_id: None,
+        ..raised_issue(finding, None, round_no, sha)
+    }
 }
 
 fn grounded_with_threads<'a>(
@@ -331,6 +343,96 @@ mod tests {
             line: Some(2),
             original_line: Some(2),
         }
+    }
+
+    #[test]
+    fn raised_and_dropped_issues_carry_their_round_and_anchor_shape() {
+        let raised = raised_issue(
+            &finding("src/a.rs", 3, Severity::Warning),
+            Some("T9"),
+            2,
+            "abc1234",
+        );
+        assert_eq!(raised.thread_id.as_deref(), Some("T9"));
+        assert!(raised.anchored);
+        assert_eq!(raised.line, Some(3));
+        assert_eq!(raised.status, IssueStatus::Open);
+        assert_eq!(raised.raised_round, 2);
+        assert_eq!(raised.raised_sha, "abc1234");
+        assert_eq!(raised.last_round, 2);
+        assert_eq!(raised.resolved_round, None);
+        let dropped = dropped_issue(&finding("src/a.rs", 3, Severity::Warning), 2, "abc1234");
+        assert!(!dropped.anchored);
+        assert_eq!(dropped.line, None);
+        assert_eq!(dropped.thread_id, None);
+        assert_eq!(dropped.raised_round, 2);
+    }
+
+    #[test]
+    fn retire_unseen_resolves_through_the_threads_resolution_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut registry = Registry {
+            round: 1,
+            issues: vec![
+                open_issue("src/alpha.rs", 2, Severity::Warning, "T_OPEN"),
+                open_issue("src/beta.rs", 5, Severity::Warning, "T_GONE"),
+            ],
+        };
+        let round = RoundFindings {
+            head_sha: "round2sha",
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[],
+            threads: &[thread("T_GONE", true)],
+            retired: &[],
+        };
+        registry.retire_unseen(&round, 2, 2, &[]);
+        let first = registry
+            .issues
+            .first()
+            .ok_or("the open issue stays in the registry")?;
+        let second = registry
+            .issues
+            .get(1)
+            .ok_or("the raised issue is appended")?;
+        assert_eq!(first.status, IssueStatus::Fixed);
+        assert_eq!(first.resolved_sha.as_deref(), Some("round2sha"));
+        assert_eq!(first.resolved_round, Some(2));
+        assert_eq!(
+            second.status,
+            IssueStatus::ManuallyResolved,
+            "a thread resolved by hand records the manual outcome"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn retire_unseen_never_touches_freshly_raised_issues() {
+        let mut registry = Registry {
+            round: 1,
+            issues: vec![open_issue("src/alpha.rs", 2, Severity::Warning, "T_OLD")],
+        };
+        let raised = raised_issue(&finding("src/new.rs", 7, Severity::Nitpick), None, 2, "s2");
+        registry.issues.push(raised);
+        let round = RoundFindings {
+            head_sha: "s2",
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[],
+            threads: &[],
+            retired: &[],
+        };
+        registry.retire_unseen(&round, 2, 1, &[false]);
+        let statuses: Vec<IssueStatus> = registry
+            .issues
+            .iter()
+            .map(|issue| issue.status.clone())
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![IssueStatus::Fixed, IssueStatus::Open],
+            "the freshly raised issue is never retired in its own round"
+        );
     }
 
     #[test]

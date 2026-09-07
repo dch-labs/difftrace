@@ -40,9 +40,12 @@ Rules:
   forced one.
 - Defects in test code that can kill processes, race signals or other
   tests, or corrupt the environment are warning-grade, not nitpicks.
-- Use the tools to read context you need (file diff sections, full files,
-  prior comments), then call record_findings exactly once with every
-  finding, or with an empty list for a clean batch.";
+- The batch prompt's evidence pack already carries each file's content
+  at the reviewed commit; treat it as the primary source and use the
+  tools only for what it does not show (regions beyond its truncated
+  sections, other files, prior comments), then call
+  record_findings exactly once with every finding, or with an empty
+  list for a clean batch.";
 
 // Only the rubric carries these: the reviewer must keep the registry's
 // open issues alive by re-reporting them, and must not reverse settled
@@ -275,6 +278,10 @@ mod tests {
         assert!(
             text.contains("warning-grade, not nitpicks"),
             "the rubric grades environment-damaging test code as warnings"
+        );
+        assert!(
+            text.contains("evidence pack already carries each file's content"),
+            "the rubric points the reviewer at the evidence pack before fetching"
         );
         assert!(
             !text.contains("Issues already raised"),
