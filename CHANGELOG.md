@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] - 2026-09-08
+
+### Fixed
+
+- A transient provider error on the summary request no longer kills the
+  whole review after every batch completed: the summary pass retries
+  three times with backoff and, if the provider stays unreachable,
+  falls back to a plain machine-written summary naming the intact
+  finding count — the same never-veto contract the verification pass
+  already had. The loopctl#112 round that died at minute 21 (all nine
+  batches finished, one ZAI network error on the final call, exit 1,
+  nothing posted) is the case in point (pinned by
+  `a_summary_survives_transient_provider_failures` and
+  `a_summary_that_never_arrives_falls_back_to_a_plain_summary`).
+- A failed `read_file_at_head` on a `mod.rs` path now names the sibling
+  module root ("no mod.rs here: this repo uses the `foo.rs` + `foo/`
+  layout; the module root is src/memory.rs — read that instead of
+  retrying") — the 0.11.2 rubric instruction alone did not stop the
+  retry loop (22 loop detections on one invented `src/memory/mod.rs` in
+  the same failed round), so the tool error carries the correction
+  mechanically (pinned by
+  `a_failed_mod_rs_read_names_the_sibling_module_root`).
+
 ## [0.11.2] - 2026-09-08
 
 ### Changed
