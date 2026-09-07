@@ -45,7 +45,11 @@ Rules:
   tools only for what it does not show (regions beyond its truncated
   sections, other files, prior comments), then call
   record_findings exactly once with every finding, or with an empty
-  list for a clean batch.";
+  list for a clean batch.
+- Never guess a file path from convention or from other projects: take
+  paths from the diff and from tool results. A tool error is final for
+  that exact call — do not repeat it; adjust the path to what the diff
+  shows or move on.";
 
 // Only the rubric carries these: the reviewer must keep the registry's
 // open issues alive by re-reporting them, and must not reverse settled
@@ -282,6 +286,10 @@ mod tests {
         assert!(
             text.contains("evidence pack already carries each file's content"),
             "the rubric points the reviewer at the evidence pack before fetching"
+        );
+        assert!(
+            text.contains("A tool error is final for"),
+            "the rubric forbids repeating a failing tool call on a guessed path"
         );
         assert!(
             !text.contains("Issues already raised"),
