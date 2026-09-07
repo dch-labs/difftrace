@@ -161,6 +161,25 @@ fn summary_prompt(findings: &Findings) -> Result<String, DifftraceError> {
     ))
 }
 
+fn plain_summary(findings: &Findings) -> ReviewSummary {
+    let count = findings.findings.len();
+    ReviewSummary {
+        summary: format!(
+            "The generated summary is unavailable this round (provider \
+             errors after every retry); all {count} recorded finding(s) \
+             are intact below."
+        ),
+        risk_notes: vec![
+            "Risk notes unavailable: the summary pass could not reach the \
+             provider."
+                .to_owned(),
+        ],
+        tests: "Test-coverage note unavailable: the summary pass could not \
+                reach the provider."
+            .to_owned(),
+    }
+}
+
 fn verify_prompt(findings: &[Finding], history: &str) -> Result<String, DifftraceError> {
     let payload = serde_json::to_string(findings).map_err(|err| DifftraceError::Verify {
         source: loopctl::structured::StructuredError::Deserialize(err),
@@ -345,19 +364,40 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         let system = Some(SUMMARY_SYSTEM.to_owned());
         let options = RequestOptions::new().with_response_format(summary_response_format());
         let mut attempts_left: u8 = 2;
+        let mut api_attempt: u64 = 0;
         loop {
             let request = loopctl::api::StreamRequest {
                 messages: messages.clone(),
                 system: system.clone(),
                 tools: None,
             };
-            let response = self
+            let response = match self
                 .client
                 .create_message_with_options(&request, options.clone())
                 .await
-                .map_err(|source| DifftraceError::Summary {
-                    source: loopctl::structured::StructuredError::Api(source),
-                })?;
+            {
+                Ok(response) => response,
+                Err(source) => {
+                    api_attempt = api_attempt.saturating_add(1);
+                    if api_attempt >= 3 {
+                        tracing::warn!(
+                            target: "difftrace::review",
+                            error = %source,
+                            "summary generation failed after every retry; posting a plain summary"
+                        );
+                        return Ok(plain_summary(&merged));
+                    }
+                    let wait = std::time::Duration::from_secs(2_u64.saturating_mul(api_attempt));
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %source,
+                        ?wait,
+                        "summary request failed; retrying"
+                    );
+                    tokio::time::sleep(wait).await;
+                    continue;
+                }
+            };
             let value = self.client.extract_structured(&response.message);
             match ReviewSummary::from_value(value) {
                 Ok(summary) => return Ok(summary),
@@ -512,6 +552,15 @@ pub(crate) mod test_support {
                     + '_,
             >,
         > {
+            let failed = self
+                .fail_first
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+                .is_ok_and(|previous| previous > 0);
+            if failed {
+                return Box::pin(
+                    async move { Err(ApiError::api("network error during the request")) },
+                );
+            }
             self.inner.create_message_with_options(request, options)
         }
     }
@@ -1032,6 +1081,53 @@ diff --git a/src/lib.rs b/src/lib.rs
         let runner = runner(Arc::new(client), ReviewSettings::default(), None)?;
         let summary = runner.summarize(&[Findings::default()]).await?;
         assert_eq!(summary.summary, "Adds retry with backoff.");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_summary_survives_transient_provider_failures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let good = json!({
+            "summary": "Adds retry with backoff.",
+            "risk_notes": [],
+            "tests": "Covered."
+        });
+        let inner = MockApiClient::new("review-model")
+            .with_responses(vec![text_response(&good.to_string())]);
+        let client = Arc::new(FlakyClient::new(inner, 1));
+        let runner = runner(client, ReviewSettings::default(), None)?;
+        let summary = runner.summarize(&[Findings::default()]).await?;
+        assert_eq!(summary.summary, "Adds retry with backoff.");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_never_arrives_falls_back_to_a_plain_summary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let inner = MockApiClient::new("review-model");
+        let client = Arc::new(FlakyClient::new(inner, 9));
+        let runner = runner(client, ReviewSettings::default(), None)?;
+        let findings = Findings {
+            findings: vec![crate::findings::Finding {
+                file: "src/lib.rs".to_owned(),
+                line: 2,
+                severity: crate::findings::Severity::Warning,
+                complexity: 3,
+                title: "Lock dropped early".to_owned(),
+                body: "The guard is dropped.".to_owned(),
+            }],
+        };
+        let summary = runner.summarize(&[findings]).await?;
+        assert!(
+            summary.summary.contains("unavailable"),
+            "the fallback states its limitation: {}",
+            summary.summary
+        );
+        assert!(
+            summary.summary.contains('1'),
+            "the fallback names the intact finding count: {}",
+            summary.summary
+        );
         Ok(())
     }
 

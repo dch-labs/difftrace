@@ -10,8 +10,8 @@
 # must be collaborators with write; required secrets fail fast with
 # named messages; the binary is checksum-pinned; all writes go through
 # a least-privilege app token; concurrency lanes are callee-side too
-# — pushes supersede in-flight reviews and commands queue without
-# dropping.
+# — pushes supersede in-flight reviews and commands queue FIFO without
+# dropping (up to 100 pending; beyond that, arrivals are canceled).
 name: difftrace review
 
 on:

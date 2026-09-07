@@ -68,15 +68,43 @@ impl Tool for ReadFileTool {
     ) -> Pin<Box<dyn Future<Output = Result<ToolOutput, ToolError>> + Send + '_>> {
         Box::pin(async move {
             let path = Self::input_path(&input)?;
+            let hint = module_root_hint(&path);
             let content = self
                 .scope
                 .gateway
                 .file_at_ref(path, self.scope.head_sha.clone())
                 .await
-                .map_err(|err| ToolError::Execution(err.to_string()))?;
+                .map_err(|err| {
+                    let mut message = err.to_string();
+                    if let Some(hint) = hint {
+                        message.push_str(&hint);
+                    }
+                    ToolError::Execution(message)
+                })?;
             Ok(ToolOutput::text(content))
         })
     }
+}
+
+fn module_root_hint(path: &str) -> Option<String> {
+    if !path.ends_with("mod.rs") {
+        return None;
+    }
+    let parent = path
+        .strip_suffix("mod.rs")?
+        .trim_end_matches('/')
+        .to_owned();
+    if parent.is_empty() {
+        return Some(
+            " (no mod.rs here: this repo uses the `foo.rs` + `foo/` layout \
+             — do not retry this path)"
+                .to_owned(),
+        );
+    }
+    Some(format!(
+        " (no mod.rs here: this repo uses the `foo.rs` + `foo/` layout; the \
+         module root is {parent}.rs — read that instead of retrying)"
+    ))
 }
 
 #[cfg(test)]
@@ -121,6 +149,63 @@ mod tests {
             .err()
             .ok_or("expected an error")?;
         assert!(matches!(err, ToolError::InvalidInput(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_mod_rs_read_names_the_sibling_module_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let scope = ReviewScope::new(
+            Arc::new(FakeGateway::empty()),
+            Arc::new(DiffIndex::empty()),
+            7,
+            "h",
+        );
+        let tool = ReadFileTool::new(Arc::new(scope));
+        let err = tool
+            .call(
+                json!({ "path": "src/memory/mod.rs" }),
+                &ToolContext::default(),
+            )
+            .await
+            .err()
+            .ok_or("expected an error")?;
+        let ToolError::Execution(message) = err else {
+            return Err("expected an execution error".into());
+        };
+        assert!(
+            message.contains("src/memory.rs"),
+            "the error names the sibling module root: {message}"
+        );
+        assert!(
+            message.contains("instead of retrying"),
+            "the error tells the model to stop retrying: {message}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_of_a_normal_file_carries_no_layout_hint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let scope = ReviewScope::new(
+            Arc::new(FakeGateway::empty()),
+            Arc::new(DiffIndex::empty()),
+            7,
+            "h",
+        );
+        let tool = ReadFileTool::new(Arc::new(scope));
+        let err = tool
+            .call(json!({ "path": "src/gone.rs" }), &ToolContext::default())
+            .await
+            .err()
+            .ok_or("expected an error")?;
+        let ToolError::Execution(message) = err else {
+            return Err("expected an execution error".into());
+        };
+        assert!(
+            !message.contains("foo.rs"),
+            "only mod.rs misses carry the layout hint: {message}"
+        );
         Ok(())
     }
 }
