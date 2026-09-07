@@ -3,6 +3,8 @@
 //! the review or hand back the identical rendered content for a dry run —
 //! the render is the single code path, only the terminal step differs.
 
+use futures::StreamExt;
+
 use loopctl::api::ApiClient;
 
 use crate::error::DifftraceError;
@@ -620,36 +622,52 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         registry: &Registry,
         hunt: bool,
     ) -> (Findings, Vec<String>) {
-        let mut aggregated = Findings::default();
-        let mut unreviewed: Vec<String> = Vec::new();
-        for (index, batch) in batches.iter().enumerate() {
-            let evidence = self.evidence_for(batch).await;
-            let history = crate::review::rubric::rubric_history_for_files(registry, batch);
-            let stage = if hunt {
-                "hunt batch started"
-            } else {
-                "batch started"
-            };
-            tracing::info!(
-                target: "difftrace::review",
-                batch = index,
-                files = batch.join(", "),
-                stage
-            );
-            match self
-                .attempt_batch(batch, index, &history, &evidence, hunt)
-                .await
-            {
-                Some(findings) => {
+        let stage = if hunt {
+            "hunt batch started"
+        } else {
+            "batch started"
+        };
+        let lanes = self.settings().max_parallel_batches;
+        let outcomes: Vec<(usize, Option<Findings>)> =
+            futures::stream::iter(batches.iter().enumerate())
+                .map(|(index, batch)| async move {
+                    let evidence = self.evidence_for(batch).await;
+                    let history = crate::review::rubric::rubric_history_for_files(registry, batch);
                     tracing::info!(
                         target: "difftrace::review",
                         batch = index,
-                        findings = findings.findings.len(),
-                        "batch finished"
+                        files = batch.join(", "),
+                        stage
                     );
-                    aggregated.findings.extend(findings.findings);
-                }
-                None => unreviewed.push(batch.join(", ")),
+                    let attempted = self
+                        .attempt_batch(batch, index, &history, &evidence, hunt)
+                        .await;
+                    if let Some(findings) = &attempted {
+                        tracing::info!(
+                            target: "difftrace::review",
+                            batch = index,
+                            findings = findings.findings.len(),
+                            "batch finished"
+                        );
+                    }
+                    (index, attempted)
+                })
+                .buffer_unordered(lanes)
+                .collect::<Vec<_>>()
+                .await;
+        let mut reviewed: Vec<Option<Findings>> = (0..batches.len()).map(|_| None).collect();
+        for (index, outcome) in outcomes {
+            if let Some(slot) = reviewed.get_mut(index) {
+                *slot = outcome;
+            }
+        }
+        let mut aggregated = Findings::default();
+        let mut unreviewed: Vec<String> = Vec::new();
+        for (index, slot) in reviewed.into_iter().enumerate() {
+            match (slot, batches.get(index)) {
+                (Some(findings), _) => aggregated.findings.extend(findings.findings),
+                (None, Some(batch)) => unreviewed.push(batch.join(", ")),
+                (None, None) => {}
             }
         }
         (aggregated, unreviewed)
@@ -2773,6 +2791,49 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             },
             None,
         ))
+    }
+
+    #[tokio::test]
+    async fn parallel_lanes_review_every_batch_and_keep_none_unreviewed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let responses: Vec<MockResponse> = (0..8)
+            .map(|n| {
+                tool_call(
+                    &format!("call_{n}"),
+                    json!({ "findings": [finding_json(2)] }),
+                )
+            })
+            .collect();
+        let runner = ReviewRunner::new(
+            Arc::new(MockApiClient::new("review-model").with_responses(responses)),
+            Arc::new(FakeGateway::empty()),
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                max_turns: 1,
+                max_parallel_batches: 3,
+                verify_findings: false,
+                miss_hunt: false,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let registry = Registry {
+            round: 0,
+            issues: Vec::new(),
+        };
+        let batches = vec![
+            vec!["src/first.rs".to_owned()],
+            vec!["src/second.rs".to_owned()],
+        ];
+        let (aggregated, unreviewed) = runner.review_batches(&batches, &registry, false).await;
+        assert_eq!(
+            aggregated.findings.len(),
+            2,
+            "each parallel lane records its own finding"
+        );
+        assert!(unreviewed.is_empty());
+        Ok(())
     }
 
     fn thread_at(line: Option<u64>, original: u64) -> ReviewThread {

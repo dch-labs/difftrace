@@ -42,9 +42,12 @@ The `DIFFTRACE_PROFILE` environment variable overrides
 `provider.profile` without a config file — the natural mechanism in CI,
 where no `~/.difftrace/config.toml` exists (e.g. `DIFFTRACE_PROFILE=zai`
 in a GitHub Action). `DIFFTRACE_MODEL` overrides `provider.model` the
-same way, as do `DIFFTRACE_MAX_TOKENS` for `provider.max_tokens` and
-`DIFFTRACE_STREAM_TIMEOUT_SECS` for `review.stream_timeout_secs`; an
-empty value counts as unset, and without either the provider's default
+same way, as do `DIFFTRACE_MAX_TOKENS` for `provider.max_tokens`,
+`DIFFTRACE_STREAM_TIMEOUT_SECS` for `review.stream_timeout_secs`,
+`DIFFTRACE_BATCH_FILES` for `review.batch_files`, and
+`DIFFTRACE_MAX_PARALLEL_BATCHES` for `review.max_parallel_batches`
+(how many batches review concurrently; 1 is sequential);
+an empty value counts as unset, and without either the provider's default
 model applies (zai: `glm-4.7`).
 
 Comments starting with `@difftrace` or `/difftrace` trigger commands
@@ -207,6 +210,7 @@ api_base_url = "…"         # optional; GitHub Enterprise API root
 [review]
 max_findings_per_file = 5  # accepted findings per file (cap receipts both)
 batch_files = 4            # changed files per agent run
+max_parallel_batches = 1   # batches reviewing concurrently (1 = sequential)
 max_turns = 16             # turn budget per batch (soft stop)
 verify_findings = true     # cross-examine findings before posting
 ```

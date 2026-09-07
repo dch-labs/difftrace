@@ -42,6 +42,7 @@ pub struct ReviewSettings {
     pub miss_hunt: bool,
     pub memory_content: Option<String>,
     pub stream_timeout_secs: u64,
+    pub max_parallel_batches: usize,
 }
 
 impl Default for ReviewSettings {
@@ -55,6 +56,7 @@ impl Default for ReviewSettings {
             miss_hunt: true,
             memory_content: None,
             stream_timeout_secs: 900,
+            max_parallel_batches: 1,
         }
     }
 }
@@ -109,6 +111,34 @@ impl DifftraceConfig {
                 ));
             }
             self.review.stream_timeout_secs = parsed;
+        }
+        if let Some(lanes) = std::env::var("DIFFTRACE_MAX_PARALLEL_BATCHES")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            let parsed = lanes.trim().parse::<usize>().map_err(|_| {
+                DifftraceError::Cli(format!("invalid DIFFTRACE_MAX_PARALLEL_BATCHES: {lanes}"))
+            })?;
+            if parsed == 0 {
+                return Err(DifftraceError::Cli(
+                    "DIFFTRACE_MAX_PARALLEL_BATCHES must be at least 1".to_owned(),
+                ));
+            }
+            self.review.max_parallel_batches = parsed;
+        }
+        if let Some(size) = std::env::var("DIFFTRACE_BATCH_FILES")
+            .ok()
+            .filter(|value| !value.is_empty())
+        {
+            let parsed = size.trim().parse::<usize>().map_err(|_| {
+                DifftraceError::Cli(format!("invalid DIFFTRACE_BATCH_FILES: {size}"))
+            })?;
+            if parsed == 0 {
+                return Err(DifftraceError::Cli(
+                    "DIFFTRACE_BATCH_FILES must be at least 1".to_owned(),
+                ));
+            }
+            self.review.batch_files = parsed;
         }
         Ok(())
     }
@@ -265,6 +295,52 @@ mod tests {
             "names the constraint: {err}"
         );
         env.remove("DIFFTRACE_MAX_TOKENS");
+        Ok(())
+    }
+
+    #[test]
+    fn the_parallel_batches_env_override_reaches_the_review_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = DifftraceConfig::default();
+        assert_eq!(
+            config.review.max_parallel_batches, 1,
+            "the default keeps batches sequential"
+        );
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_MAX_PARALLEL_BATCHES"]);
+        env.set("DIFFTRACE_MAX_PARALLEL_BATCHES", "3");
+        config.apply_env_overrides()?;
+        assert_eq!(config.review.max_parallel_batches, 3);
+        env.set("DIFFTRACE_MAX_PARALLEL_BATCHES", "0");
+        let mut config = DifftraceConfig::default();
+        let Err(err) = config.apply_env_overrides() else {
+            return Err("expected a zero lane count to be rejected".into());
+        };
+        assert!(
+            err.to_string().contains("at least 1"),
+            "names the constraint: {err}"
+        );
+        env.remove("DIFFTRACE_MAX_PARALLEL_BATCHES");
+        Ok(())
+    }
+
+    #[test]
+    fn the_batch_files_env_override_reaches_the_review_settings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["DIFFTRACE_BATCH_FILES"]);
+        env.set("DIFFTRACE_BATCH_FILES", "1");
+        let mut config = DifftraceConfig::default();
+        config.apply_env_overrides()?;
+        assert_eq!(config.review.batch_files, 1);
+        env.set("DIFFTRACE_BATCH_FILES", "0");
+        let mut config = DifftraceConfig::default();
+        let Err(err) = config.apply_env_overrides() else {
+            return Err("expected a zero batch size to be rejected".into());
+        };
+        assert!(
+            err.to_string().contains("at least 1"),
+            "names the constraint: {err}"
+        );
+        env.remove("DIFFTRACE_BATCH_FILES");
         Ok(())
     }
 
