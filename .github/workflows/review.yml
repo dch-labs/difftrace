@@ -133,6 +133,7 @@ jobs:
           DIFFTRACE_PROFILE: zai
           DIFFTRACE_MAX_TOKENS: '65536'
           DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
+          DIFFTRACE_BATCH_FILES: '100'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 
@@ -291,6 +292,7 @@ jobs:
           DIFFTRACE_PROFILE: zai
           DIFFTRACE_MAX_TOKENS: '65536'
           DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
+          DIFFTRACE_BATCH_FILES: '100'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 

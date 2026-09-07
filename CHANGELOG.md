@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-09-07
+
+### Changed
+
+- `review.batch_files` and a new `review.max_parallel_batches` are both
+  overridable from the environment (`DIFFTRACE_BATCH_FILES`,
+  `DIFFTRACE_MAX_PARALLEL_BATCHES`, each validated to at least 1), and
+  batches can review concurrently, bounded by the lane count (default 1,
+  the previous sequential behavior; aggregate order stays batch order
+  regardless of completion order). The reference workflow sets
+  `DIFFTRACE_BATCH_FILES=100`, so a pull request reviews as one batch in
+  one agent loop (pinned by
+  `parallel_lanes_review_every_batch_and_keep_none_unreviewed`,
+  `the_parallel_batches_env_override_reaches_the_review_settings`, and
+  `the_batch_files_env_override_reaches_the_review_settings`).
+
 ## [0.10.0] - 2026-09-07
 
 ### Added
