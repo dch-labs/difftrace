@@ -123,7 +123,13 @@ jobs:
 
       - name: Review the pull request
         run: |
-          difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md"
+          set -o pipefail
+          {
+            difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md" 2>&1 \
+              | tee /dev/stderr
+          } | {
+            grep --line-buffered -E 'provider client|batch |turn |run (started|ended)|hunt|verdict|dropped|unreviewed|review posted|difftrace:|ERROR|WARN' >> "$GITHUB_STEP_SUMMARY" || true
+          }
         env:
           PR: ${{ steps.pr.outputs.pr }}
           SHA: ${{ steps.pr.outputs.sha }}
@@ -131,9 +137,10 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
-          DIFFTRACE_MAX_TOKENS: '65536'
+          DIFFTRACE_MAX_TOKENS: '131072'
           DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
-          DIFFTRACE_BATCH_FILES: '100'
+          DIFFTRACE_BATCH_FILES: '1'
+          DIFFTRACE_MAX_PARALLEL_BATCHES: '10'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 
@@ -290,9 +297,10 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
-          DIFFTRACE_MAX_TOKENS: '65536'
+          DIFFTRACE_MAX_TOKENS: '131072'
           DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
-          DIFFTRACE_BATCH_FILES: '100'
+          DIFFTRACE_BATCH_FILES: '1'
+          DIFFTRACE_MAX_PARALLEL_BATCHES: '10'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 

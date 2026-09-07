@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-09-08
+
+### Changed
+
+- The reference workflow raises the per-turn output budget to 131072
+  tokens, matching the 128k tool-output cap so a thinking model's
+  longest turns are never the thing that cuts a batch short.
+- The caller template forwards the pull request number explicitly
+  (`github.event.pull_request.number || github.event.issue.number ||
+  inputs.pr`) instead of relying on the callee to branch on the event
+  context for every non-dispatch trigger (raised by the reviewer on
+  loopctl#112).
+- The reference workflow reviews one file per batch across ten parallel
+  lanes (`DIFFTRACE_BATCH_FILES=1`,
+  `DIFFTRACE_MAX_PARALLEL_BATCHES=10`): every changed file gets its own
+  agent conversation with the full per-file evidence budget, and a round
+  bounds at the slowest single file instead of the sum of all of them —
+  the single-batch round on loopctl#112 needed 43 minutes and its hunt
+  pass carried six of seven findings because the shared conversation
+  starved the first pass.
+
+### Added
+
+- Review progress streams into the run's step summary: milestone lines
+  (model, batch and turn events, hunt, verdict, posting) append to
+  `$GITHUB_STEP_SUMMARY` line-buffered, so the Actions Summary page
+  shows what the reviewer is doing while the job runs instead of a
+  sealed log until completion.
+
 ## [0.11.0] - 2026-09-07
 
 ### Changed
