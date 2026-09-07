@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-09-08
+
+### Changed
+
+- The review rules forbid guessing file paths from convention and
+  repeating a failed tool call: a loopctl#112 lane burned six turns
+  re-reading a `foo/mod.rs` that exists only in the model's prior — the
+  crate uses `foo.rs` + `foo/`. Paths must come from the diff and tool
+  results, and a tool error is final for that exact call (pinned by the
+  rubric assertion in `the_rubric_carries_rules_and_frame_every_turn`).
+
+- The caller template skips comments on plain issues at the job
+  condition (`github.event_name != 'issue_comment' ||
+  github.event.issue.pull_request != null`) — `issue_comment` fires for
+  plain issues too, and only pull-request comments carry commands, so
+  those runs are dead weight (adopted from loopctl#112's caller; dch's
+  caller already excluded them in its richer condition).
+- The caller template's `pr` forwarding ignores comments on plain
+  issues — `github.event.issue.number` is an issue number there, not a
+  PR number, so the forwarding now requires
+  `github.event.issue.pull_request != null` before using it (found by
+  the reviewer on loopctl#112). The header also quotes the
+  `` `release.sh pins` `` command and adds the callee's concurrency
+  lanes to the enforcement checklist.
+- Comment commands queue instead of being dropped: the command lane now
+  declares `queue: max` (up to 100 pending commands, FIFO — GitHub's
+  default replaces a pending command when a third arrives), and a
+  `review` command moved to its own job so each lane keeps static,
+  valid concurrency settings (`queue: max` may not combine with
+  `cancel-in-progress: true`). The re-review job joins the review lane
+  and cancels the in-flight review exactly as before; only the
+  drop-the-pending-command behavior is gone (flagged by the standing
+  review summary on loopctl#112). Callers must not add their own
+  single-group gate — a caller gate re-serializes everything and
+  reintroduces the drop; the template delegates all concurrency to the
+  callee.
+
 ## [0.11.1] - 2026-09-08
 
 ### Changed

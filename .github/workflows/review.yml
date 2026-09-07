@@ -204,23 +204,116 @@ jobs:
           fork=$(gh api "repos/$REPO/pulls/$PR" --jq .head.repo.fork)
           case "$fork" in false) ;; *) echo "difftrace does not run on fork pull requests" >&2; exit 1;; esac
 
+  re-review:
+    name: Run a requested re-review
+    needs: gate
+    runs-on: ubuntu-latest
+    concurrency:
+      # A `review` command joins the review lane and, as the incoming
+      # run, cancels the in-flight review there — latest intent wins,
+      # and only the newest head gets reviewed.
+      group: difftrace-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: true
+    if: needs.gate.outputs.skip == '' && needs.gate.outputs.verb == 'review'
+    steps:
+
+      - name: Resolve the pull request number and head
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          case "$sha" in ''|*[!0-9a-f]*) echo "invalid head sha: $sha" >&2; exit 1;; esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The binary is pinned to the tagged v0.11.1 release; bump version and
+      # checksum together on every difftrace release.
+      - name: Install difftrace v0.11.1
+        run: |
+          curl -fsSL -o /tmp/difftrace.tar.gz \
+            https://github.com/dch-labs/difftrace/releases/download/v0.11.1/difftrace-0.11.1-x86_64-unknown-linux-gnu.tar.gz
+          echo "63bcaab0c0d0a185ff77bffb4167abac630cf99628c9df2fcbd1075a448639cd  /tmp/difftrace.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/difftrace.tar.gz -C "$HOME/.local/bin"
+
+      - name: Check the required secrets are present
+        env:
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          DIFFTRACE_APP_ID: ${{ secrets.DIFFTRACE_APP_ID }}
+          DIFFTRACE_APP_PRIVATE_KEY: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
+        run: |
+          : "${ZAI_API_KEY:?ZAI_API_KEY is not set - the review step would fail opaquely}"
+          : "${DIFFTRACE_APP_ID:?DIFFTRACE_APP_ID is not set - the review step would fail opaquely}"
+          : "${DIFFTRACE_APP_PRIVATE_KEY:?DIFFTRACE_APP_PRIVATE_KEY is not set - the review step would fail opaquely}"
+
+      - name: Mint the difftrace app token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        id: app-token
+        with:
+          app-id: ${{ secrets.DIFFTRACE_APP_ID }}
+          private-key: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+          permission-contents: write
+
+      - name: Restore the review memory
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.difftrace/memory
+          key: difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-${{ steps.pr.outputs.sha }}
+          restore-keys: |
+            difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-
+
+      - name: Review the pull request
+        run: |
+          set -o pipefail
+          {
+            difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md" 2>&1 \
+              | tee /dev/stderr
+          } | {
+            grep --line-buffered -E 'provider client|batch |turn |run (started|ended)|hunt|verdict|dropped|unreviewed|review posted|difftrace:|ERROR|WARN' >> "$GITHUB_STEP_SUMMARY" || true
+          }
+        env:
+          PR: ${{ steps.pr.outputs.pr }}
+          SHA: ${{ steps.pr.outputs.sha }}
+          REPO: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          DIFFTRACE_PROFILE: zai
+          DIFFTRACE_MAX_TOKENS: '131072'
+          DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
+          DIFFTRACE_BATCH_FILES: '1'
+          DIFFTRACE_MAX_PARALLEL_BATCHES: '10'
+          DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
+          RUST_LOG: info
+
+      - name: Upload trajectory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: difftrace-trajectory-pr${{ steps.pr.outputs.pr }}-rereview
+          path: ~/.difftrace/trajectories/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+
   chat:
     name: Handle a difftrace command
     needs: gate
     runs-on: ubuntu-latest
     concurrency:
-      # One command lane per pull request, serialized: comment commands
-      # never race each other on the registry, threads, and memory.
-      # Reviews run in their own lane and may interleave with a command;
-      # a push supersedes an in-flight review instead of queueing behind
-      # it. GitHub holds at most one running and one pending run per
-      # lane, so a third rapid command replaces the pending one.
-      # A `review` command joins the review lane instead and, as the
-      # incoming run, cancels the in-flight review there — latest intent
-      # wins.
-      group: ${{ needs.gate.outputs.verb == 'review' && format('difftrace-review-{0}', github.event.pull_request.number || github.event.issue.number || github.run_id) || format('difftrace-chat-{0}', github.event.pull_request.number || github.event.issue.number || github.run_id) }}
-      cancel-in-progress: ${{ needs.gate.outputs.verb == 'review' }}
-    if: needs.gate.outputs.skip == ''
+      # One command lane per pull request with a deep queue: commands
+      # serialize (never racing the registry, threads, and memory) and
+      # queue: max keeps up to 100 pending commands in FIFO order — a
+      # burst of commands no longer replaces the pending one. Commands
+      # never cancel anything; reviews run in their own lane.
+      group: difftrace-chat-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: false
+      queue: max
+    if: needs.gate.outputs.skip == '' && needs.gate.outputs.verb != 'review'
     steps:
 
       - name: Resolve the pull request number and head
@@ -275,9 +368,7 @@ jobs:
 
       - name: Run the command
         run: |
-          if [ "$VERB" = "review" ]; then
-            difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md"
-          elif [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "review" ]; then
+          if [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "review" ]; then
             difftrace plan --repo "$REPO" --pr "$PR" --sha "$SHA" --review-comment "$COMMENT_ID"
           elif [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "issue" ]; then
             gh pr comment "$PR" --repo "$REPO" --body '`plan` plans a fix for a review-thread finding — answering as a generic reply; use `@difftrace review` for a fresh full review.'
@@ -299,8 +390,6 @@ jobs:
           DIFFTRACE_PROFILE: zai
           DIFFTRACE_MAX_TOKENS: '131072'
           DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
-          DIFFTRACE_BATCH_FILES: '1'
-          DIFFTRACE_MAX_PARALLEL_BATCHES: '10'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
 
