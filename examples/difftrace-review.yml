@@ -37,7 +37,7 @@ permissions:
 jobs:
   review:
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
-    uses: dch-labs/difftrace/.github/workflows/review.yml@1a830b666aaa3ce47359d12944260ad1730c38b3 # v0.11.1
+    uses: dch-labs/difftrace/.github/workflows/review.yml@ea6c910f22707185e025b6c7bb2cc1c25a07ade6 # v0.11.2
     with:
       pr: ${{ github.event.pull_request.number || (github.event.issue.pull_request != null && github.event.issue.number) || inputs.pr }}
       model: ${{ inputs.model }}
