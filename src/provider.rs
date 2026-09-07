@@ -125,12 +125,19 @@ impl ApiClient for DifftraceClient {
 }
 
 pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
-    match cfg.provider.profile {
+    let client = match cfg.provider.profile {
         ProviderProfile::Anthropic => anthropic_client(cfg),
         ProviderProfile::OpenAi => openai_client(cfg),
         ProviderProfile::Zai => zai_client(cfg),
         ProviderProfile::Ollama => ollama_client(cfg),
-    }
+    }?;
+    tracing::info!(
+        target: "difftrace::provider",
+        profile = ?cfg.provider.profile,
+        model = %client.model(),
+        "provider client built"
+    );
+    Ok(client)
 }
 
 fn anthropic_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
@@ -261,6 +268,27 @@ mod tests {
         env.set("ANTHROPIC_API_KEY", "env-key");
         let client = build_client(&cfg(ProviderProfile::Anthropic))?;
         assert_eq!(client.model(), "test-model");
+        Ok(())
+    }
+
+    #[test]
+    fn the_built_client_logs_its_profile_and_model() -> Result<(), Box<dyn std::error::Error>> {
+        let (logs, _guard) = crate::review::logging::test_support::install();
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.set("ZAI_API_KEY", "env-key");
+        env.remove("ZHIPUAI_API_KEY");
+        let client = build_client(&cfg(ProviderProfile::Zai))?;
+        assert_eq!(client.model(), "test-model");
+        let text = logs.text();
+        assert!(
+            text.contains("provider client built"),
+            "the startup line must reach an installed subscriber: {text}"
+        );
+        assert!(
+            text.contains("test-model"),
+            "the resolved model is named: {text}"
+        );
+        assert!(text.contains("Zai"), "the profile is named: {text}");
         Ok(())
     }
 

@@ -3,6 +3,12 @@
 # every difftrace release, bump the ref in the uses: line below —
 # release.sh pins in the difftrace repo prints the exact line: a fixed
 # commit carrying the release's binary version+checksum pins.
+#
+# What the pinned callee enforces on its side — the jobs are not in this
+# file: fork and dependabot pull requests are rejected; command authors
+# must be collaborators with write; required secrets fail fast with
+# named messages; the binary is checksum-pinned; all writes go through
+# a least-privilege app token.
 name: difftrace review
 
 on:

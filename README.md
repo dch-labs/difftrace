@@ -196,7 +196,7 @@ away from the default.
 profile = "zai"      # anthropic | openai | zai | ollama
 model = "glm-4.7"  # optional; ollama requires it; zai defaults to glm-4.7
 base_url = "…"             # optional endpoint override
-max_tokens = 32768         # optional per-response output budget (anthropic
+max_tokens = 65536         # optional per-response output budget (anthropic
                            # and zai; default 8192 — raise it for thinking
                            # models, which burn the budget on reasoning)
 
