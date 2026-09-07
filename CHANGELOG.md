@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-07
+
+### Added
+
+- The review workflow ships as a reusable workflow at
+  `.github/workflows/review.yml`, dogfooded on this repository's own
+  pull requests; consumers call it through the small caller template at
+  `examples/difftrace-review.yml`, pinned to the fixed commit that
+  `release.sh pins` echoes — workflow fixes now propagate by bumping
+  one line per consumer instead of re-copying the file. Verbatim copies
+  keep working; migrate them at the next release chore. `release.sh`
+  learned the new layout (workflow pins in `.github/workflows/`,
+  the template pinned to the pins commit).
+- `--sha <commit>` on `review`, `reply`, and `plan`: the run fails before touching
+  anything unless the pull request's current head is exactly the requested
+  commit, so a consumer can bind the run and its memory-cache key to one
+  SHA instead of racing a push between its resolve step and the tool's own
+  (pinned by `a_sha_pin_matching_the_head_is_accepted` and
+  `a_sha_pin_off_the_head_fails_and_names_both_commits`). The pin is
+  re-checked after the diff is fetched, so a push landing mid-fetch fails
+  the run instead of reviewing a newer diff under the older pin (pinned
+  by `a_head_that_moves_mid_fetch_fails_the_pinned_run`). The reference
+  workflow passes `--sha` only once the release chore bumps its pins to a
+  binary that supports it — that wiring is part of the next release chore.
+
+### Changed
+
+- Tool outputs are truncated at 128k characters instead of 16k: the old
+  cap cropped `read_file_at_head` mid-file, so a fix landing beyond the
+  crop was verified against stale content and raised again — six of
+  eleven findings on loopctl#112 round 5 were such re-reports. The bound
+  stays pinned by `an_oversized_tool_output_is_truncated_for_the_model`,
+  which scales with the constant.
+- The review rules direct the model at the batch's evidence pack as the
+  primary source, fetching with the tools only what the pack does not
+  show — rounds were spending several fetch turns per batch on content
+  the pack already carried (pinned in
+  `the_rubric_carries_rules_and_frame_every_turn`).
+
+### Fixed
+
+- The reference workflow drops the repo-level memory restore key: a new
+  pull request no longer restores another PR's learnings file and
+  reviews under it (workflow-only; found by difftrace on loopctl#112).
+  Rides the next release chore with the pin bumps.
+- A `plan` command on a pull-request conversation posts a visible hint
+  comment — naming `@difftrace review` for a fresh full review — and
+  runs the generic reply it previously ran silently (workflow-only).
+  Rides the next release chore.
+- The review job's concurrency comment states the
+  one-running-one-pending lane semantics, so a command dropped by a
+  third arrival is diagnosable from the workflow instead of mysterious
+  (workflow-only). Rides the next release chore.
+
 ## [0.8.0] - 2026-09-07
 
 ### Added
