@@ -35,7 +35,7 @@ jobs:
   review:
     uses: dch-labs/difftrace/.github/workflows/review.yml@ed800d58b310ea3041f57521c15ce989b0bc932d # v0.11.0
     with:
-      pr: ${{ inputs.pr }}
+      pr: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
       model: ${{ inputs.model }}
     secrets:
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
