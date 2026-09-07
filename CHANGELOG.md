@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-07
+
+### Added
+
+- Every run names the provider profile and model it resolved at startup
+  (`provider client built` on the `difftrace::provider` target), so the
+  run log states which model reviewed the code instead of leaving it
+  implicit in the workflow env (pinned by
+  `the_built_client_logs_its_profile_and_model`).
+- The caller template's header lists the guards the pinned callee
+  enforces — fork and dependabot rejection, collaborator authorization,
+  secret preflights, the checksum-pinned binary, least-privilege app
+  token — so consumer-PR reviewers can verify them without reading the
+  callee (workflow-only).
+
+### Changed
+
+- The review workflow splits the per-PR concurrency lane: reviews run in
+  their own lane with cancellation, so a push supersedes the in-flight
+  review instead of queueing a duplicate of a stale head (flagged
+  independently by two reviewers on dch#25); comment commands keep a
+  serialized no-cancel lane, except a `review` command, which joins the
+  review lane so the latest intent cancels the in-flight review. A
+  review and a non-review command may still interleave — accepted in
+  exchange for never reviewing a stale head twice (workflow-only; rides
+  the next release chore with the consumer pin bumps).
+- Every difftrace invocation passes `--sha` with the head resolved in
+  the workflow's first step, binding the review, the command, and the
+  memory-cache key to one commit (workflow-only; the recorded v0.9.0
+  follow-up).
+- The command gate declines bot-authored comments in the job condition
+  before any setup, so the gate runs a review used to spawn for its own
+  inline comments no longer happen (workflow-only).
+
 ## [0.9.0] - 2026-09-07
 
 ### Added

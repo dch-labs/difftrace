@@ -48,14 +48,13 @@ jobs:
     name: Review the pull request
     runs-on: ubuntu-latest
     concurrency:
-      # One lane per pull request, shared with the chat job: reviews and
-      # comment commands serialize instead of racing the registry,
-      # threads, and memory. Queued runs pick up the head at start time.
-      # GitHub holds at most one running and one pending run per lane —
-      # a third arrival silently replaces the pending one, so a push
-      # plus two quick commands can drop the middle command.
-      group: difftrace-${{ inputs.pr || github.event.pull_request.number || github.event.issue.number || github.run_id }}
-      cancel-in-progress: false
+      # One review lane per pull request: a push supersedes any review
+      # still in flight or queued for the same PR — the superseded run
+      # would only re-review an older head, so cancelling it saves the
+      # duplicate spend. Comment commands have their own serialized lane
+      # in the chat job and may interleave with a review.
+      group: difftrace-review-${{ inputs.pr || github.event.pull_request.number || github.event.issue.number || github.run_id }}
+      cancel-in-progress: true
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
@@ -124,14 +123,15 @@ jobs:
 
       - name: Review the pull request
         run: |
-          difftrace review --repo "$REPO" --pr "$PR" --memory "$HOME/.difftrace/memory/learnings.md"
+          difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md"
         env:
           PR: ${{ steps.pr.outputs.pr }}
+          SHA: ${{ steps.pr.outputs.sha }}
           REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
-          DIFFTRACE_MAX_TOKENS: '32768'
+          DIFFTRACE_MAX_TOKENS: '65536'
           DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
@@ -152,9 +152,10 @@ jobs:
     permissions:
       contents: read
     if: >-
-      github.event_name == 'pull_request_review_comment' ||
+      (github.event_name == 'pull_request_review_comment' ||
       (github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request != null)
+      github.event.issue.pull_request != null)) &&
+      !endsWith(github.event.comment.user.login, '[bot]')
     outputs:
       skip: ${{ steps.cmd.outputs.skip }}
       verb: ${{ steps.cmd.outputs.verb }}
@@ -200,10 +201,17 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     concurrency:
-      # Shared with the review job's lane: a re-review command waits for
-      # any in-flight review instead of racing it.
-      group: difftrace-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
-      cancel-in-progress: false
+      # One command lane per pull request, serialized: comment commands
+      # never race each other on the registry, threads, and memory.
+      # Reviews run in their own lane and may interleave with a command;
+      # a push supersedes an in-flight review instead of queueing behind
+      # it. GitHub holds at most one running and one pending run per
+      # lane, so a third rapid command replaces the pending one.
+      # A `review` command joins the review lane instead and, as the
+      # incoming run, cancels the in-flight review there — latest intent
+      # wins.
+      group: ${{ needs.gate.outputs.verb == 'review' && format('difftrace-review-{0}', github.event.pull_request.number || github.event.issue.number || github.run_id) || format('difftrace-chat-{0}', github.event.pull_request.number || github.event.issue.number || github.run_id) }}
+      cancel-in-progress: ${{ needs.gate.outputs.verb == 'review' }}
     if: needs.gate.outputs.skip == ''
     steps:
 
@@ -260,27 +268,28 @@ jobs:
       - name: Run the command
         run: |
           if [ "$VERB" = "review" ]; then
-            difftrace review --repo "$REPO" --pr "$PR" --memory "$HOME/.difftrace/memory/learnings.md"
+            difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md"
           elif [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "review" ]; then
-            difftrace plan --repo "$REPO" --pr "$PR" --review-comment "$COMMENT_ID"
+            difftrace plan --repo "$REPO" --pr "$PR" --sha "$SHA" --review-comment "$COMMENT_ID"
           elif [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "issue" ]; then
             gh pr comment "$PR" --repo "$REPO" --body '`plan` plans a fix for a review-thread finding — answering as a generic reply; use `@difftrace review` for a fresh full review.'
-            difftrace reply --repo "$REPO" --pr "$PR" --issue-comment "$COMMENT_ID"
+            difftrace reply --repo "$REPO" --pr "$PR" --sha "$SHA" --issue-comment "$COMMENT_ID"
           elif [ "$COMMENT_KIND" = "issue" ]; then
-            difftrace reply --repo "$REPO" --pr "$PR" --issue-comment "$COMMENT_ID"
+            difftrace reply --repo "$REPO" --pr "$PR" --sha "$SHA" --issue-comment "$COMMENT_ID"
           else
-            difftrace reply --repo "$REPO" --pr "$PR" --review-comment "$COMMENT_ID"
+            difftrace reply --repo "$REPO" --pr "$PR" --sha "$SHA" --review-comment "$COMMENT_ID"
           fi
         env:
           VERB: ${{ needs.gate.outputs.verb }}
           COMMENT_ID: ${{ github.event.comment.id }}
           COMMENT_KIND: ${{ github.event_name == 'issue_comment' && 'issue' || 'review' }}
           PR: ${{ steps.pr.outputs.pr }}
+          SHA: ${{ steps.pr.outputs.sha }}
           REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           DIFFTRACE_PROFILE: zai
-          DIFFTRACE_MAX_TOKENS: '32768'
+          DIFFTRACE_MAX_TOKENS: '65536'
           DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
           DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
