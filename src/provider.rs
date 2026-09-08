@@ -1,8 +1,10 @@
 //! Builds the loopctl API client from configuration: the
-//! [`DifftraceClient`] enum (Anthropic / OpenAI protocol; Ollama rides
-//! the OpenAI protocol at a local endpoint). Keys come from the
-//! environment only.
+//! [`DifftraceClient`] enum (Anthropic / OpenAI protocol; Ollama and any
+//! OpenAI-compatible local server — llama.cpp, vLLM, LM Studio — ride the
+//! OpenAI protocol at a local endpoint). Keys resolve from the
+//! environment first, then `~/.difftrace/env`.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -18,19 +20,21 @@ use loopctl::stream::StreamEvent;
 
 use crate::config::DifftraceConfig;
 use crate::config::ProviderProfile;
+use crate::config::layered_lookup;
+use crate::config::load_env_file;
 use crate::error::DifftraceError;
 
 const NO_AUTH_KEY: &str = "ollama";
 
 const OLLAMA_BASE_URL: &str = "http://localhost:11434/v1";
 
-const DEFAULT_OUTPUT_BUDGET: u32 = 8192;
+const DEFAULT_OUTPUT_BUDGET: u32 = 32768;
 
 #[must_use]
 pub fn enforced_output_budget(cfg: &DifftraceConfig) -> Option<u32> {
     match cfg.provider.profile {
         ProviderProfile::Anthropic | ProviderProfile::Zai => Some(budget(cfg)),
-        ProviderProfile::OpenAi | ProviderProfile::Ollama => None,
+        ProviderProfile::OpenAi | ProviderProfile::Ollama | ProviderProfile::Local => None,
     }
 }
 
@@ -125,11 +129,19 @@ impl ApiClient for DifftraceClient {
 }
 
 pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
+    build_client_with(cfg, &load_env_file())
+}
+
+pub fn build_client_with(
+    cfg: &DifftraceConfig,
+    env_file: &BTreeMap<String, String>,
+) -> Result<DifftraceClient, DifftraceError> {
     let client = match cfg.provider.profile {
-        ProviderProfile::Anthropic => anthropic_client(cfg),
-        ProviderProfile::OpenAi => openai_client(cfg),
-        ProviderProfile::Zai => zai_client(cfg),
-        ProviderProfile::Ollama => ollama_client(cfg),
+        ProviderProfile::Anthropic => anthropic_client(cfg, env_file),
+        ProviderProfile::OpenAi => openai_client(cfg, env_file),
+        ProviderProfile::Zai => zai_client(cfg, env_file),
+        ProviderProfile::Ollama => ollama_client(cfg, env_file),
+        ProviderProfile::Local => local_client(cfg, env_file),
     }?;
     tracing::info!(
         target: "difftrace::provider",
@@ -140,8 +152,11 @@ pub fn build_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceE
     Ok(client)
 }
 
-fn anthropic_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
-    let key = env_key("ANTHROPIC_API_KEY")?;
+fn anthropic_client(
+    cfg: &DifftraceConfig,
+    env_file: &BTreeMap<String, String>,
+) -> Result<DifftraceClient, DifftraceError> {
+    let key = env_key("ANTHROPIC_API_KEY", env_file)?;
     let mut builder = AnthropicClient::builder()
         .with_api_key(key)
         .with_max_tokens(budget(cfg));
@@ -157,8 +172,11 @@ fn anthropic_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceE
         .map_err(|source| DifftraceError::ClientBuild { source })
 }
 
-fn openai_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
-    let key = env_key("OPENAI_API_KEY")?;
+fn openai_client(
+    cfg: &DifftraceConfig,
+    env_file: &BTreeMap<String, String>,
+) -> Result<DifftraceClient, DifftraceError> {
+    let key = env_key("OPENAI_API_KEY", env_file)?;
     let mut builder = OpenAiClient::builder().with_api_key(key);
     if let Some(model) = &cfg.provider.model {
         builder = builder.with_model(model.clone());
@@ -172,8 +190,11 @@ fn openai_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceErro
         .map_err(|source| DifftraceError::ClientBuild { source })
 }
 
-fn zai_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
-    let key = env_key_with_alias("ZAI_API_KEY", "ZHIPUAI_API_KEY")?;
+fn zai_client(
+    cfg: &DifftraceConfig,
+    env_file: &BTreeMap<String, String>,
+) -> Result<DifftraceClient, DifftraceError> {
+    let key = env_key_with_alias("ZAI_API_KEY", "ZHIPUAI_API_KEY", env_file)?;
     let mut builder = loopctl::provider::zai_builder()
         .with_api_key(key)
         .with_max_tokens(budget(cfg));
@@ -189,16 +210,40 @@ fn zai_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> 
         .map_err(|source| DifftraceError::ClientBuild { source })
 }
 
-fn ollama_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceError> {
+fn local_client(
+    cfg: &DifftraceConfig,
+    env_file: &BTreeMap<String, String>,
+) -> Result<DifftraceClient, DifftraceError> {
+    let model = cfg
+        .provider
+        .model
+        .clone()
+        .ok_or(DifftraceError::LocalModelMissing)?;
+    let base_url = cfg
+        .provider
+        .base_url
+        .clone()
+        .ok_or(DifftraceError::LocalEndpointMissing)?;
+    let key = layered_lookup("LOCAL_API_KEY", env_file).unwrap_or_else(|| NO_AUTH_KEY.to_owned());
+    OpenAiClient::builder()
+        .with_api_key(key)
+        .with_base_url(base_url)
+        .with_model(model)
+        .build()
+        .map(DifftraceClient::OpenAi)
+        .map_err(|source| DifftraceError::ClientBuild { source })
+}
+
+fn ollama_client(
+    cfg: &DifftraceConfig,
+    env_file: &BTreeMap<String, String>,
+) -> Result<DifftraceClient, DifftraceError> {
     let model = cfg
         .provider
         .model
         .clone()
         .ok_or(DifftraceError::OllamaModelMissing)?;
-    let key = std::env::var("OLLAMA_API_KEY")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| NO_AUTH_KEY.to_owned());
+    let key = layered_lookup("OLLAMA_API_KEY", env_file).unwrap_or_else(|| NO_AUTH_KEY.to_owned());
     let base_url = cfg
         .provider
         .base_url
@@ -216,18 +261,18 @@ fn ollama_client(cfg: &DifftraceConfig) -> Result<DifftraceClient, DifftraceErro
 fn env_key_with_alias(
     primary: &'static str,
     alias: &'static str,
+    env_file: &BTreeMap<String, String>,
 ) -> Result<String, DifftraceError> {
-    let non_empty = |var: &'static str| std::env::var(var).ok().filter(|v| !v.is_empty());
-    non_empty(primary)
-        .or_else(|| non_empty(alias))
+    layered_lookup(primary, env_file)
+        .or_else(|| layered_lookup(alias, env_file))
         .ok_or(DifftraceError::MissingApiKey { env_var: primary })
 }
 
-fn env_key(var: &'static str) -> Result<String, DifftraceError> {
-    std::env::var(var)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or(DifftraceError::MissingApiKey { env_var: var })
+fn env_key(
+    var: &'static str,
+    env_file: &BTreeMap<String, String>,
+) -> Result<String, DifftraceError> {
+    layered_lookup(var, env_file).ok_or(DifftraceError::MissingApiKey { env_var: var })
 }
 
 #[cfg(test)]
@@ -250,11 +295,11 @@ mod tests {
     fn the_output_budget_is_enforced_where_the_provider_takes_one() {
         assert_eq!(
             enforced_output_budget(&cfg(ProviderProfile::Anthropic)),
-            Some(8192)
+            Some(32768)
         );
         assert_eq!(
             enforced_output_budget(&cfg(ProviderProfile::Zai)),
-            Some(8192)
+            Some(32768)
         );
         assert_eq!(enforced_output_budget(&cfg(ProviderProfile::OpenAi)), None);
         let mut configured = cfg(ProviderProfile::Zai);
@@ -390,6 +435,33 @@ mod tests {
     }
 
     #[test]
+    fn a_local_profile_requires_an_explicit_endpoint() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["LOCAL_API_KEY"]);
+        env.remove("LOCAL_API_KEY");
+        let err = build_client(&cfg(ProviderProfile::Local))
+            .err()
+            .ok_or("a local profile without base_url must fail")?;
+        assert!(
+            err.to_string().contains("provider.base_url"),
+            "the failure names the missing endpoint: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_profile_builds_at_any_openai_compatible_endpoint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["LOCAL_API_KEY"]);
+        env.remove("LOCAL_API_KEY");
+        let mut config = cfg(ProviderProfile::Local);
+        config.provider.base_url = Some("http://localhost:8000/v1".to_owned());
+        let client = build_client(&config)?;
+        assert_eq!(client.base_url(), "http://localhost:8000/v1");
+        assert_eq!(client.model(), "test-model");
+        Ok(())
+    }
+
+    #[test]
     fn an_ollama_cloud_key_comes_from_the_env() -> Result<(), Box<dyn std::error::Error>> {
         let env = loopctl::testing::EnvGuard::acquire(&["OLLAMA_API_KEY"]);
         env.set("OLLAMA_API_KEY", "env-key");
@@ -485,6 +557,52 @@ mod tests {
         config.provider.model = None;
         let err = build_client(&config).err().ok_or("expected an error")?;
         assert!(matches!(err, DifftraceError::OllamaModelMissing));
+        Ok(())
+    }
+
+    fn file_with(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn an_env_file_key_builds_when_the_environment_is_silent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.remove("ZAI_API_KEY");
+        env.remove("ZHIPUAI_API_KEY");
+        let file = file_with(&[("ZAI_API_KEY", "file-key")]);
+        let client = build_client_with(&cfg(ProviderProfile::Zai), &file)?;
+        assert_eq!(client.base_url(), "https://api.z.ai/api/anthropic");
+        Ok(())
+    }
+
+    #[test]
+    fn an_env_file_alias_key_satisfies_the_zai_profile() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.remove("ZAI_API_KEY");
+        env.remove("ZHIPUAI_API_KEY");
+        let file = file_with(&[("ZHIPUAI_API_KEY", "alias-file-key")]);
+        let client = build_client_with(&cfg(ProviderProfile::Zai), &file)?;
+        assert_eq!(client.base_url(), "https://api.z.ai/api/anthropic");
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_env_file_value_still_counts_as_missing() -> Result<(), Box<dyn std::error::Error>> {
+        let env = loopctl::testing::EnvGuard::acquire(&["ZAI_API_KEY", "ZHIPUAI_API_KEY"]);
+        env.remove("ZAI_API_KEY");
+        env.remove("ZHIPUAI_API_KEY");
+        let file = file_with(&[("ZAI_API_KEY", "")]);
+        let err = build_client_with(&cfg(ProviderProfile::Zai), &file)
+            .err()
+            .ok_or("expected an error")?;
+        assert!(
+            err.to_string().contains("ZAI_API_KEY") && err.to_string().contains("~/.difftrace/env"),
+            "the error names the variable and the env file: {err}"
+        );
         Ok(())
     }
 }

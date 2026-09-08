@@ -20,19 +20,27 @@ pub(crate) fn review_round_body(
     head_sha: &str,
     findings: usize,
     clean: bool,
+    unreviewed: usize,
     fix_all: &str,
 ) -> String {
     let short = crate::review::registry::short_sha(head_sha);
     let noun = if findings == 1 { "finding" } else { "findings" };
+    let partial = if unreviewed == 0 {
+        String::new()
+    } else {
+        format!(
+            " ⚠️ PARTIAL REVIEW — {unreviewed} file(s) could not be reviewed (provider failures); the findings below are not a full verdict."
+        )
+    };
     let head = if clean {
         format!("🤖 difftrace reviewed `{short}` — clean round, nothing to fix.")
     } else if findings == 0 {
         format!(
-            "🤖 difftrace reviewed `{short}` — no findings in the files it reviewed; the round is incomplete."
+            "🤖 difftrace reviewed `{short}` — no findings in the files it reviewed; the round is incomplete.{partial}"
         )
     } else {
         format!(
-            "🤖 difftrace reviewed `{short}` — {findings} {noun} this round; fix prompts below."
+            "🤖 difftrace reviewed `{short}` — {findings} {noun} this round; fix prompts below.{partial}"
         )
     };
     if clean {
@@ -196,6 +204,72 @@ pub(crate) fn fix_all_section(
     let fence = fence_for(&wrapped);
     format!(
         "## 🤖 Fix all findings\n{grounded}{unanchored}\n\n<details>\n<summary>Copy the fix-all prompt for coding agents</summary>\n\n{fence}text\n{wrapped}\n{fence}\n</details>"
+    )
+}
+
+pub(crate) fn suppressed_note(count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    let (noun, verb) = if count == 1 {
+        ("observation", "was")
+    } else {
+        ("observations", "were")
+    };
+    format!(
+        "🧭 {count} {noun} outside the changed lines {verb} suppressed — run with \
+         `--scope deep` to review whole files and list them as pre-existing issues."
+    )
+}
+
+pub(crate) fn existing_issues_section(
+    dropped: &[DroppedFinding],
+    pr: u64,
+    head_sha: &str,
+) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let list = dropped
+        .iter()
+        .map(|entry| {
+            format!(
+                "- `{}:{}` — {} {} (pre-existing, not from this change)",
+                entry.finding.file,
+                entry.finding.line,
+                entry.finding.severity.glyph(),
+                entry.finding.title
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let items = dropped
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let finding = &entry.finding;
+            format!(
+                "{}. {}:{} [{}] {} (effort {}/5).\n   Detail: {}",
+                index.saturating_add(1),
+                finding.file,
+                finding.line,
+                finding.severity.as_str(),
+                finding.title,
+                finding.complexity,
+                finding.body,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let prompt = wrap_prompt(&format!(
+        "{PROMPT_LABEL}\n\nFix these pre-existing issues found while reviewing PR #{pr} \
+         (commit {head_sha}); they predate this change.\n{VERIFY_ALL}\nWork through the \
+         list in order:\n\n{items}"
+    ));
+    let fence = fence_for(&prompt);
+    format!(
+        "## 🧭 Existing issues — not from this change\nThe diff could not anchor these, \
+         so they carry no inline comment; they predate the branch under review.\n{list}\n\n<details>\n<summary>🤖 Fix prompt for these pre-existing issues</summary>\n\n{fence}text\n{prompt}\n{fence}\n</details>"
     )
 }
 
@@ -467,7 +541,7 @@ mod tests {
 
     #[test]
     fn the_round_body_is_a_stat_line_with_the_rounds_fix_all() {
-        let body = review_round_body("9f3b2c1full", 4, false, "## 🤖 Fix all findings\n…");
+        let body = review_round_body("9f3b2c1full", 4, false, 0, "## 🤖 Fix all findings\n…");
         assert!(body.starts_with(
             "🤖 difftrace reviewed `9f3b2c1` — 4 findings this round; fix prompts below."
         ));
@@ -477,7 +551,7 @@ mod tests {
             )
         );
         assert!(body.contains("## 🤖 Fix all findings"));
-        let clean = review_round_body("9f3b2c1full", 0, true, "");
+        let clean = review_round_body("9f3b2c1full", 0, true, 0, "");
         assert!(
             clean.starts_with("🤖 difftrace reviewed `9f3b2c1` — clean round, nothing to fix.")
         );
@@ -486,22 +560,62 @@ mod tests {
             !clean.contains("Verdict, summary, and risks"),
             "a clean round has no fix prompts to point at"
         );
-        let single = review_round_body("9f3b2c1full", 1, false, "x");
+        let single = review_round_body("9f3b2c1full", 1, false, 0, "x");
         assert!(single.contains("— 1 finding this round"));
     }
 
     #[test]
     fn a_clean_round_body_is_a_single_stat_line_without_the_pointer() {
-        let body = review_round_body("9f3b2c1full", 0, true, "");
+        let body = review_round_body("9f3b2c1full", 0, true, 0, "");
         assert_eq!(
             body, "🤖 difftrace reviewed `9f3b2c1` — clean round, nothing to fix.",
             "a clean round carries nothing but the stat line"
         );
-        let with_findings = review_round_body("9f3b2c1full", 4, false, "## 🤖 Fix all findings");
+        let with_findings = review_round_body("9f3b2c1full", 4, false, 0, "## 🤖 Fix all findings");
         assert!(
             with_findings.contains("Verdict, summary, and risks"),
             "the pointer stays for rounds with findings"
         );
+    }
+
+    #[test]
+    fn a_partial_round_leads_with_a_loud_banner() {
+        let body = review_round_body("9f3b2c1full", 2, false, 5, "## 🤖 Fix all findings");
+        assert!(
+            body.contains(
+                "⚠️ PARTIAL REVIEW — 5 file(s) could not be reviewed (provider failures)"
+            ),
+            "the first line names the gap at its exact collapsed spacing: {body}"
+        );
+        assert!(
+            body.contains("not a full verdict"),
+            "the banner warns against reading the count as clean"
+        );
+    }
+
+    #[test]
+    fn a_deep_round_lists_existing_issues_with_a_fix_prompt() {
+        let dropped = vec![DroppedFinding {
+            finding: titled("src/old.rs", 77, "Ancient debt"),
+            reason: "line outside the changed hunks",
+        }];
+        let section = existing_issues_section(&dropped, 7, "deadbee");
+        assert!(section.contains("## 🧭 Existing issues — not from this change"));
+        assert!(section.contains("`src/old.rs:77`"));
+        assert!(section.contains("predate this change"));
+        assert!(section.contains("Fix prompt for these pre-existing issues"));
+        assert!(section.contains("Ancient debt"));
+    }
+
+    #[test]
+    fn a_diff_round_notes_suppressed_observations() {
+        assert!(
+            suppressed_note(3).contains("3 observations outside the changed lines were suppressed")
+        );
+        assert!(
+            suppressed_note(1).contains("1 observation outside the changed lines was suppressed")
+        );
+        assert_eq!(suppressed_note(0), "");
     }
 
     #[test]

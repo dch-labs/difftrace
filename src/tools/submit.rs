@@ -34,6 +34,8 @@ use crate::tools::ReviewScope;
 pub struct SubmitReviewTool {
     scope: Arc<ReviewScope>,
     max_per_file: usize,
+    mode: crate::config::ReviewMode,
+    severity: crate::findings::Severity,
     submitted: AtomicBool,
 }
 
@@ -57,18 +59,29 @@ pub(crate) struct Grounded {
     // group's primary location, None for locations folded into another
     // comment's "Also occurs at" list.
     pub(crate) comment_of_finding: Vec<Option<usize>>,
+    // Findings dropped unseen for sitting below the configured severity
+    // floor; counted so the round body can say how many were silenced.
+    pub(crate) below_floor: usize,
 }
 
 pub(crate) fn ground_findings(
     index: &crate::diff::DiffIndex,
     findings: Vec<Finding>,
     max_per_file: usize,
+    mode: crate::config::ReviewMode,
+    severity: crate::findings::Severity,
 ) -> Grounded {
+    let clamp = mode != crate::config::ReviewMode::Full;
     let mut accepted: Vec<Finding> = Vec::new();
     let mut dropped = Vec::new();
+    let mut below_floor = 0usize;
     let mut per_file_counts = std::collections::BTreeMap::new();
     for finding in findings {
-        if index.clamp_to_hunk(&finding.file, finding.line).is_none() {
+        if finding.severity.rank() < severity.rank() {
+            below_floor = below_floor.saturating_add(1);
+            continue;
+        }
+        if clamp && index.clamp_to_hunk(&finding.file, finding.line).is_none() {
             dropped.push(DroppedFinding {
                 finding,
                 reason: "line outside the changed hunks",
@@ -111,6 +124,7 @@ pub(crate) fn ground_findings(
         comments,
         dropped,
         comment_of_finding,
+        below_floor,
     }
 }
 
@@ -136,16 +150,29 @@ fn render_receipt(posted: usize, dropped: &[DroppedFinding]) -> String {
 
 impl SubmitReviewTool {
     #[must_use]
-    pub fn new(scope: Arc<ReviewScope>, max_per_file: usize) -> Self {
+    pub fn new(
+        scope: Arc<ReviewScope>,
+        max_per_file: usize,
+        mode: crate::config::ReviewMode,
+        severity: crate::findings::Severity,
+    ) -> Self {
         Self {
             scope,
             max_per_file,
+            mode,
+            severity,
             submitted: AtomicBool::new(false),
         }
     }
 
     fn ground(&self, findings: Vec<Finding>) -> Grounded {
-        ground_findings(&self.scope.index, findings, self.max_per_file)
+        ground_findings(
+            &self.scope.index,
+            findings,
+            self.max_per_file,
+            self.mode,
+            self.severity,
+        )
     }
 }
 
@@ -262,7 +289,12 @@ diff --git a/src/lib.rs b/src/lib.rs
             "headsha",
         );
         Ok((
-            SubmitReviewTool::new(Arc::new(scope), max_per_file),
+            SubmitReviewTool::new(
+                Arc::new(scope),
+                max_per_file,
+                crate::config::ReviewMode::Diff,
+                crate::findings::Severity::Nitpick,
+            ),
             gateway,
         ))
     }
@@ -294,6 +326,31 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[test]
+    fn the_configured_floor_reaches_the_submit_tool() {
+        let scope = Arc::new(ReviewScope::new(
+            Arc::new(crate::tools::fake_gateway::FakeGateway::empty()),
+            Arc::new(crate::diff::DiffIndex::empty()),
+            1,
+            "h",
+        ));
+        let tool = SubmitReviewTool::new(
+            scope,
+            5,
+            crate::config::ReviewMode::Diff,
+            crate::findings::Severity::Critical,
+        );
+        let grounded = tool.ground(vec![finding("src/lib.rs", 1)]);
+        assert!(
+            grounded.findings.is_empty(),
+            "a warning cannot pass the tool's critical floor"
+        );
+        assert_eq!(
+            grounded.below_floor, 1,
+            "the tool counts the silencing like the batch path does"
+        );
+    }
+
+    #[test]
     fn grounding_returns_only_the_accepted_findings() -> Result<(), Box<dyn std::error::Error>> {
         let index = diff_index()?;
         let grounded = ground_findings(
@@ -304,6 +361,8 @@ diff --git a/src/lib.rs b/src/lib.rs
                 finding("absent.rs", 1),
             ],
             5,
+            crate::config::ReviewMode::Diff,
+            crate::findings::Severity::Nitpick,
         );
         assert_eq!(grounded.findings.len(), 1);
         assert_eq!(
@@ -325,6 +384,43 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[test]
+    fn full_scope_anchors_lines_outside_the_hunks() -> Result<(), Box<dyn std::error::Error>> {
+        let index = diff_index()?;
+        let grounded = ground_findings(
+            &index,
+            vec![finding("src/lib.rs", 900)],
+            5,
+            crate::config::ReviewMode::Full,
+            crate::findings::Severity::Nitpick,
+        );
+        assert_eq!(grounded.findings.len(), 1, "a full audit anchors any line");
+        assert!(grounded.dropped.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn findings_below_the_floor_are_counted_and_dropped() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let index = diff_index()?;
+        let grounded = ground_findings(
+            &index,
+            vec![finding("src/lib.rs", 2)],
+            5,
+            crate::config::ReviewMode::Diff,
+            crate::findings::Severity::Critical,
+        );
+        assert!(
+            grounded.findings.is_empty(),
+            "the floor silences the finding"
+        );
+        assert_eq!(
+            grounded.below_floor, 1,
+            "the silencing is counted for the round body"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn same_titled_findings_share_one_comment_listing_every_location()
     -> Result<(), Box<dyn std::error::Error>> {
         let index = diff_index()?;
@@ -336,6 +432,8 @@ diff --git a/src/lib.rs b/src/lib.rs
                 finding("src/lib.rs", 3),
             ],
             5,
+            crate::config::ReviewMode::Diff,
+            crate::findings::Severity::Nitpick,
         );
         assert_eq!(
             grounded.findings.len(),

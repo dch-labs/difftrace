@@ -28,15 +28,23 @@ pub struct Cli {
 }
 
 #[derive(Debug, Args)]
+#[command(group(ArgGroup::new("target").required(true).args(["repo", "base"])))]
 pub struct ReviewArgs {
-    #[arg(long, help = "Repository as owner/repo")]
-    pub repo: String,
+    #[arg(long, help = "Repository as owner/repo (not used with --base)")]
+    pub repo: Option<String>,
 
-    #[arg(long, help = "Pull request number")]
-    pub pr: u64,
+    #[arg(long, help = "Pull request number (not used with --base)")]
+    pub pr: Option<u64>,
 
     #[arg(long, help = "Render the review to stdout instead of posting it")]
     pub dry_run: bool,
+
+    #[arg(
+        long,
+        help = "Review the local branch offline: reviews merge-base(<base>, HEAD)..HEAD \
+                in the current directory and prints without posting"
+    )]
+    pub base: Option<String>,
 
     #[arg(
         long,
@@ -46,7 +54,8 @@ pub struct ReviewArgs {
 
     #[arg(
         long,
-        help = "Cross-review memory file: loaded into the review, appended after posting"
+        help = "Cross-review memory file: loaded into the review, appended after \
+                posting (posted rounds only)"
     )]
     pub memory: Option<std::path::PathBuf>,
 
@@ -55,6 +64,31 @@ pub struct ReviewArgs {
         help = "Pin the run to this head commit: fail if the pull request head differs"
     )]
     pub sha: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Review scope: diff = changed lines only (default), deep = whole changed \
+                files with pre-existing issues listed separately, full = every file in \
+                the repository (local --base runs only)"
+    )]
+    pub scope: Option<crate::config::ReviewMode>,
+
+    #[arg(
+        long,
+        value_enum,
+        value_delimiter = ',',
+        help = "Kinds of issues to hunt: security, correctness, concurrency, performance, \
+                tests, docs (default: all)"
+    )]
+    pub focus: Option<Vec<crate::config::IssueKind>>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Drop findings below this severity (default: nitpick keeps everything)"
+    )]
+    pub severity: Option<crate::findings::Severity>,
 }
 
 #[derive(Debug, Args)]
@@ -129,11 +163,29 @@ mod tests {
         let Command::Review(args) = cli.command else {
             return Err("expected the review subcommand".into());
         };
-        assert_eq!(args.repo, "dch-labs/difftrace");
-        assert_eq!(args.pr, 42);
+        assert_eq!(args.repo.as_deref(), Some("dch-labs/difftrace"));
+        assert_eq!(args.pr, Some(42));
         assert!(args.dry_run);
+        assert!(args.base.is_none());
         assert_eq!(args.config, None);
         assert_eq!(args.sha.as_deref(), Some("9f3b2c1"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_local_review_parses_with_the_base_flag_alone() -> Result<(), Box<dyn std::error::Error>> {
+        let cli = Cli::try_parse_from(["difftrace", "review", "--base", "master"])
+            .map_err(|err| err.to_string())?;
+        let Command::Review(args) = cli.command else {
+            return Err("expected the review subcommand".into());
+        };
+        assert_eq!(args.base.as_deref(), Some("master"));
+        assert_eq!(args.repo, None);
+        assert_eq!(args.pr, None);
+        assert!(
+            !args.dry_run,
+            "local mode always renders; the flag is implicit"
+        );
         Ok(())
     }
 
@@ -200,8 +252,75 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_pr_is_rejected() {
-        assert!(Cli::try_parse_from(["difftrace", "review", "--repo", "a/b"]).is_err());
+    fn a_review_without_a_target_is_rejected() {
+        assert!(Cli::try_parse_from(["difftrace", "review"]).is_err());
+    }
+
+    #[test]
+    fn the_review_command_parses_scope_focus_and_severity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let cli = Cli::try_parse_from([
+            "difftrace",
+            "review",
+            "--repo",
+            "a/b",
+            "--pr",
+            "7",
+            "--scope",
+            "deep",
+            "--focus",
+            "security,tests",
+            "--severity",
+            "warning",
+        ])
+        .map_err(|err| err.to_string())?;
+        let Command::Review(args) = cli.command else {
+            return Err("expected the review subcommand".into());
+        };
+        assert_eq!(args.scope, Some(crate::config::ReviewMode::Deep));
+        assert_eq!(
+            args.focus,
+            Some(vec![
+                crate::config::IssueKind::Security,
+                crate::config::IssueKind::Tests
+            ])
+        );
+        assert_eq!(args.severity, Some(crate::findings::Severity::Warning));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unknown_scope_is_rejected() {
+        assert!(
+            Cli::try_parse_from([
+                "difftrace",
+                "review",
+                "--repo",
+                "a/b",
+                "--pr",
+                "1",
+                "--scope",
+                "wide"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_base_conflicts_with_the_github_target() {
+        assert!(
+            Cli::try_parse_from([
+                "difftrace",
+                "review",
+                "--repo",
+                "a/b",
+                "--pr",
+                "1",
+                "--base",
+                "master"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

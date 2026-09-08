@@ -26,6 +26,7 @@ struct Inner {
     overview_calls: Mutex<usize>,
     diff: Mutex<String>,
     files: Mutex<Vec<(String, String)>>,
+    file_list: Mutex<Vec<String>>,
     comments: Mutex<Vec<ExistingComment>>,
     submitted: Mutex<Option<ReviewSubmission>>,
     submit_calls: Mutex<usize>,
@@ -115,6 +116,15 @@ impl FakeGateway {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((path.to_owned(), content.to_owned()));
+        self
+    }
+
+    pub(crate) fn and_file_list(self, files: Vec<String>) -> Self {
+        *self
+            .inner
+            .file_list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = files;
         self
     }
 
@@ -423,6 +433,18 @@ impl PrGateway for FakeGateway {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         Box::pin(async move { Ok(comments) })
+    }
+
+    fn list_files(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DifftraceError>> + Send + '_>> {
+        let files = self
+            .inner
+            .file_list
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Box::pin(async move { Ok(files) })
     }
 
     fn submit_review(

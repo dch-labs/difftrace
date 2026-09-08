@@ -302,7 +302,7 @@ async fn answer<C: loopctl::api::ApiClient + 'static>(
         Some(dir) => TrajectoryObserver::writing_to(dir),
         None => TrajectoryObserver::in_memory(),
     }));
-    agent.register_observer(Arc::new(LoggingObserver));
+    agent.register_observer(Arc::new(LoggingObserver::default()));
     let pipeline = ToolPipelineBuilder::new()
         .with_middleware(OutputLimitMiddleware::new(TOOL_OUTPUT_MAX_CHARS));
     agent

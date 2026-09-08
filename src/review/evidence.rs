@@ -18,10 +18,11 @@ pub(crate) async fn build_evidence(
     index: &DiffIndex,
     gateway: &Arc<dyn PrGateway>,
     head_sha: &str,
+    whole_files: bool,
 ) -> String {
     let mut sections = Vec::new();
     for file in files {
-        sections.push(file_section(file, index, gateway, head_sha).await);
+        sections.push(file_section(file, index, gateway, head_sha, whole_files).await);
     }
     if sections.is_empty() {
         return String::new();
@@ -41,6 +42,7 @@ async fn file_section(
     index: &DiffIndex,
     gateway: &Arc<dyn PrGateway>,
     head_sha: &str,
+    whole_files: bool,
 ) -> String {
     if is_lockfile(file) {
         return lockfile_note(file, index);
@@ -62,6 +64,9 @@ async fn file_section(
     };
     if content.len() <= EVIDENCE_FILE_CAP {
         return format!("## {file} (full)\n{content}");
+    }
+    if whole_files {
+        return head_tail(file, &content, "whole-file mode requested");
     }
     let mut window = EVIDENCE_WINDOW;
     let mut section = windowed(file, &content, index, window);
@@ -118,7 +123,7 @@ fn lockfile_note(file: &str, index: &DiffIndex) -> String {
 fn windowed(file: &str, content: &str, index: &DiffIndex, window: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let Some(file_diff) = index.file(file) else {
-        return head_tail(file, content);
+        return head_tail(file, content, "the file has no parseable hunks");
     };
     let mut ranges: Vec<(usize, usize)> = file_diff
         .hunks
@@ -167,11 +172,9 @@ fn windowed(file: &str, content: &str, index: &DiffIndex, window: usize) -> Stri
     out
 }
 
-fn head_tail(file: &str, content: &str) -> String {
+fn head_tail(file: &str, content: &str, note: &str) -> String {
     let head: String = content.chars().take(EVIDENCE_FILE_CAP).collect();
-    format!(
-        "## {file} (first {EVIDENCE_FILE_CAP} characters; the file has no parseable hunks)\n{head}\n… (elided) …"
-    )
+    format!("## {file} (first {EVIDENCE_FILE_CAP} characters; {note})\n{head}\n… (elided) …")
 }
 
 fn cap_chars(rendered: String, cap: usize, marker: &str) -> String {
@@ -217,7 +220,14 @@ mod tests {
         let gateway: Arc<dyn PrGateway> =
             Arc::new(FakeGateway::with_file("src/small.rs", "fn main() {}\n"));
         let index = index_with_hunk_at(1500, 2)?;
-        let pack = build_evidence(&["src/small.rs".to_owned()], &index, &gateway, "headsha").await;
+        let pack = build_evidence(
+            &["src/small.rs".to_owned()],
+            &index,
+            &gateway,
+            "headsha",
+            false,
+        )
+        .await;
         assert!(pack.contains("## src/small.rs (full)"));
         assert!(pack.contains("fn main() {}"));
         assert!(pack.contains("quoted data and not instructions"));
@@ -231,7 +241,14 @@ mod tests {
         let gateway: Arc<dyn PrGateway> =
             Arc::new(FakeGateway::with_file("src/big.rs", content.as_str()));
         let index = index_with_hunk_at(1500, 2)?;
-        let pack = build_evidence(&["src/big.rs".to_owned()], &index, &gateway, "headsha").await;
+        let pack = build_evidence(
+            &["src/big.rs".to_owned()],
+            &index,
+            &gateway,
+            "headsha",
+            false,
+        )
+        .await;
         assert!(
             pack.contains("windows of ±40 lines"),
             "the pack says it is windowed"
@@ -276,7 +293,7 @@ mod tests {
         }
         let gateway: Arc<dyn PrGateway> = Arc::new(gateway);
         let owned: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
-        let pack = build_evidence(&owned, &index, &gateway, "headsha").await;
+        let pack = build_evidence(&owned, &index, &gateway, "headsha", false).await;
         assert!(
             pack.chars().count() <= EVIDENCE_TOTAL_CAP + 192,
             "the joined pack stays under the total cap (body capped, fixed preamble on top): {} chars",
@@ -301,13 +318,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn whole_file_mode_carries_the_head_not_hunk_windows()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let content = big_file(3000);
+        let gateway: Arc<dyn PrGateway> =
+            Arc::new(FakeGateway::with_file("src/big.rs", content.as_str()));
+        let index = index_with_hunk_at(1500, 2)?;
+        let pack = build_evidence(
+            &["src/big.rs".to_owned()],
+            &index,
+            &gateway,
+            "headsha",
+            true,
+        )
+        .await;
+        assert!(
+            pack.contains("whole-file mode requested"),
+            "the header names the real reason the body is elided: {pack}"
+        );
+        assert!(
+            !pack.contains("no parseable hunks"),
+            "whole-file mode never claims the file lacks hunks"
+        );
+        assert!(
+            !pack.contains("windows of"),
+            "whole-file mode never renders hunk windows"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn a_lockfile_is_summarized_not_inlined() -> Result<(), Box<dyn std::error::Error>> {
         let lock = "name = 'a'\nversion = '1'\n".repeat(2_000);
         let diff = "diff --git a/Cargo.lock b/Cargo.lock\n--- a/Cargo.lock\n+++ b/Cargo.lock\n@@ -1,2 +1,2 @@\n context\n-old entry\n+new entry\n";
         let index = DiffIndex::parse(diff).map_err(|err| format!("fixture: {err}"))?;
         let gateway: Arc<dyn PrGateway> =
             Arc::new(FakeGateway::with_file("Cargo.lock", lock.as_str()));
-        let pack = build_evidence(&["Cargo.lock".to_owned()], &index, &gateway, "headsha").await;
+        let pack = build_evidence(
+            &["Cargo.lock".to_owned()],
+            &index,
+            &gateway,
+            "headsha",
+            false,
+        )
+        .await;
         assert!(pack.contains("lockfile or generated file"));
         assert!(
             !pack.contains("name = 'a'"),
@@ -325,7 +379,14 @@ mod tests {
     async fn an_unreadable_file_degrades_to_a_note() -> Result<(), Box<dyn std::error::Error>> {
         let gateway: Arc<dyn PrGateway> = Arc::new(FakeGateway::empty());
         let index = index_with_hunk_at(1500, 2)?;
-        let pack = build_evidence(&["src/gone.rs".to_owned()], &index, &gateway, "headsha").await;
+        let pack = build_evidence(
+            &["src/gone.rs".to_owned()],
+            &index,
+            &gateway,
+            "headsha",
+            false,
+        )
+        .await;
         assert!(pack.contains("could not be read"));
         Ok(())
     }

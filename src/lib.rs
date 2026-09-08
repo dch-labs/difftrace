@@ -6,9 +6,10 @@
 //!
 //! Modules: `config` (configuration), `error` (the error enum),
 //! `provider` (loopctl client factory), `github` (the REST layer behind
-//! `PrGateway`), `diff` (the diff index and grounding authority),
+//! `PrGateway`), `local` (the offline git gateway behind `--base`),
+//! `diff` (the diff index and grounding authority),
 //! `findings` (the model-output contracts), `tools` (the agent's
-//! loopctl `Tool` surface), `review` (the runner that drives batches),
+//! `loopctl` `Tool` surface), `review` (the runner that drives batches),
 //! `prompts` (the agent fix prompts embedded in the review).
 
 pub mod cli;
@@ -17,6 +18,7 @@ pub mod diff;
 pub mod error;
 pub mod findings;
 pub mod github;
+pub mod local;
 pub mod prompts;
 pub mod provider;
 pub mod review;

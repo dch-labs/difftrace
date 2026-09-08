@@ -15,9 +15,12 @@ and posts one atomic review — or renders it locally with `--dry-run`.
 - Rust 1.98 or newer
 - A GitHub personal access token with read access to pull requests (and
   write access when posting reviews) — `GITHUB_TOKEN`
-- A provider API key — `ANTHROPIC_API_KEY` (default profile),
-  `OPENAI_API_KEY`, `ZAI_API_KEY` (or its `ZHIPUAI_API_KEY` alias), or
-  `OLLAMA_API_KEY` for a local server
+- A provider API key — `ZAI_API_KEY` (or its `ZHIPUAI_API_KEY` alias;
+  default profile), `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or
+  `OLLAMA_API_KEY` for a local Ollama server, or the `local` profile for
+  any OpenAI-compatible server — llama.cpp (`http://localhost:8080/v1`),
+  vLLM (`:8000/v1`), LM Studio (`:1234/v1`): it requires `provider.model`
+  and `provider.base_url`, needs no key (optional `LOCAL_API_KEY`)
 
 difftrace depends on loopctl via a git pin until loopctl 0.3.1+ is
 published to crates.io (0.3.0 lacks the trajectory capture difftrace
@@ -27,6 +30,7 @@ uses); `cargo` resolves it automatically.
 
 ```
 difftrace review --repo owner/repo --pr 42 [--dry-run] [--config PATH] [--sha SHA]
+difftrace review --base <ref> [--scope diff|deep|full] [--focus KINDS] [--severity LEVEL]
 ```
 
 - `--repo owner/repo` — the repository to review (required)
@@ -37,18 +41,61 @@ difftrace review --repo owner/repo --pr 42 [--dry-run] [--config PATH] [--sha SH
 - `--sha SHA` — pin the run to this head commit; the run fails if the pull
   request's head differs, so a consumer can key its cache and its review
   to one commit (`reply` and `plan` take it too)
+- `--scope diff|deep|full` — how much the reviewer looks at: `diff`
+  (default) reviews only the changed lines; `deep` reviews whole changed
+  files and files out-of-diff observations as pre-existing issues in
+  their own non-blocking section with fix prompts; `full` audits every
+  tracked file (local `--base` runs only)
+- `--focus security,correctness,concurrency,performance,tests,docs` —
+  hunt only these kinds of issues (default: all)
+- `--severity critical|warning|suggestion|nitpick` — drop findings below
+  this severity, with a counted note (default: `nitpick` keeps
+  everything); `review.scope`, `review.focus`, `review.severity`, and
+  their `DIFFTRACE_SCOPE`, `DIFFTRACE_FOCUS`, `DIFFTRACE_SEVERITY`
+  overrides work too
+
+### Local pre-push review
+
+```
+difftrace review --base main
+```
+
+Reviews `merge-base(<base>, HEAD)..HEAD` from the current checkout with
+the same engine as the hosted rounds and renders to stdout without
+posting anything — the pre-push loop: what a local round clears stays
+cleared (the head and merge-base are pinned at startup), and the
+pull-request round that follows confirms it. No `GITHUB_TOKEN` is
+demanded; `--pr` and `--sha` do not apply. Every local run also writes
+a full transcript — diagnostics plus the round body and the
+standing-comment render — to `~/.difftrace/reviews/<checkout>-<local
+time>-<short sha>.log`, one run log per run, named after the checkout it
+reviewed.
 
 The `DIFFTRACE_PROFILE` environment variable overrides
 `provider.profile` without a config file — the natural mechanism in CI,
 where no `~/.difftrace/config.toml` exists (e.g. `DIFFTRACE_PROFILE=zai`
 in a GitHub Action). `DIFFTRACE_MODEL` overrides `provider.model` the
-same way, as do `DIFFTRACE_MAX_TOKENS` for `provider.max_tokens`,
+same way, as does `DIFFTRACE_BASE_URL` for `provider.base_url` (point a
+run at a local server: `DIFFTRACE_PROFILE=local
+DIFFTRACE_MODEL=<model> DIFFTRACE_BASE_URL=http://localhost:8080/v1` —
+llama.cpp, vLLM, Ollama, LM Studio),
+as do `DIFFTRACE_MAX_TOKENS` for `provider.max_tokens`,
 `DIFFTRACE_STREAM_TIMEOUT_SECS` for `review.stream_timeout_secs`,
-`DIFFTRACE_BATCH_FILES` for `review.batch_files`, and
+`DIFFTRACE_BATCH_FILES` for `review.batch_files`,
 `DIFFTRACE_MAX_PARALLEL_BATCHES` for `review.max_parallel_batches`
-(how many batches review concurrently; 1 is sequential);
-an empty value counts as unset, and without either the provider's default
-model applies (zai: `glm-4.7`).
+(how many batches review concurrently; 1 is sequential), and
+`DIFFTRACE_LOG` for `log_level` (`error` | `warn` | `info` (default) |
+`debug` | `trace`; `RUST_LOG`, when set, still wins for raw filter
+directives). At `debug` the logs carry the diagnostics: spans with
+busy-time on close (per round, fetch, batch, verification, summary),
+per-turn timing (total, tools, model ≈ turn minus tools), resolved
+config, prompt and evidence sizes, registry merge decisions
+(re-raised / new / fixed / manually resolved), and per-finding
+verification verdicts — decisions and sizes, never file content; the
+full prompts and responses stay in the trajectory JSONL. The HTTP
+stack's connection chatter is pinned to `info` so it doesn't drown the
+signal. An empty value counts as unset, and without either the
+provider's default model applies (zai: `glm-4.7`).
 
 Comments starting with `@difftrace` or `/difftrace` trigger commands
 in repos whose workflows listen for them: `review` re-runs the full
@@ -192,15 +239,27 @@ away from the default.
 
 ## Configuration
 
+`~/.difftrace/` is the one config home:
+
+- `config.toml` — settings (below), safe to copy or commit; no secrets.
+- `env` — optional `KEY=VALUE` secret file (`ZAI_API_KEY`,
+  `GITHUB_TOKEN`, …; `#` comments allowed; keep it `chmod 600`). It is
+  the lowest-priority source: a variable already in the environment
+  always wins, so CI and per-run overrides are untouched.
+- `reviews/` — one `.log` run transcript per local review (the run's
+  diagnostics plus the round body and standing render).
+- `trajectories/` — JSONL run captures for every local review (hosted
+  rounds upload theirs as the workflow's trajectory artifact instead).
+
 `~/.difftrace/config.toml` — every field optional:
 
 ```toml
 [provider]
-profile = "zai"      # anthropic | openai | zai | ollama
+profile = "zai"      # anthropic | openai | zai | ollama | local
 model = "glm-4.7"  # optional; ollama requires it; zai defaults to glm-4.7
 base_url = "…"             # optional endpoint override
 max_tokens = 131072        # optional per-response output budget (anthropic
-                           # and zai; default 8192 — raise it for thinking
+                           # and zai; default 32768 — raise it further for thinking
                            # models, which burn the budget on reasoning)
 
 [github]
@@ -213,10 +272,13 @@ batch_files = 4            # changed files per agent run
 max_parallel_batches = 1   # batches reviewing concurrently (1 = sequential)
 max_turns = 16             # turn budget per batch (soft stop)
 verify_findings = true     # cross-examine findings before posting
+scope = "diff"             # diff | deep | full — what the reviewer looks at
+focus = ["security", "tests"]  # optional; hunt only these issue kinds
+severity = "warning"       # optional; drop findings below this severity
 ```
 
 API keys and tokens are never read from the config file — environment
-only.
+only (with `~/.difftrace/env` as the lowest-priority fallback).
 
 ## Building and testing
 

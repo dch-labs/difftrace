@@ -16,8 +16,14 @@ pub struct Session {
     pub gateway: Arc<GitHubClient>,
 }
 
-pub fn open_session(repo: &str, config_path: Option<&Path>) -> Result<Session, DifftraceError> {
-    let repo = crate::cli::parse_repo(repo).map_err(DifftraceError::Cli)?;
+pub struct LocalSession {
+    pub config: DifftraceConfig,
+    pub client: Arc<DifftraceClient>,
+}
+
+fn load_config(
+    config_path: Option<&Path>,
+) -> Result<(DifftraceConfig, std::collections::BTreeMap<String, String>), DifftraceError> {
     let mut config = match config_path {
         Some(path) if !path.is_file() => {
             return Err(DifftraceError::Cli(format!(
@@ -28,14 +34,35 @@ pub fn open_session(repo: &str, config_path: Option<&Path>) -> Result<Session, D
         Some(path) => DifftraceConfig::load_from(path)?,
         None => DifftraceConfig::load()?,
     };
-    config.apply_env_overrides()?;
-    let client = Arc::new(crate::provider::build_client(&config)?);
-    let token = std::env::var("GITHUB_TOKEN")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or(DifftraceError::MissingApiKey {
+    let env_file = crate::config::load_env_file();
+    config.apply_env_overrides_with(&env_file)?;
+    tracing::debug!(
+        target: "difftrace::session",
+        profile = ?config.provider.profile,
+        model = ?config.provider.model,
+        max_tokens = ?config.provider.max_tokens,
+        log_level = ?config.log_level,
+        env_file_entries = env_file.len(),
+        "session resolved"
+    );
+    Ok((config, env_file))
+}
+
+pub fn open_local_session(config_path: Option<&Path>) -> Result<LocalSession, DifftraceError> {
+    let (config, env_file) = load_config(config_path)?;
+    let client = Arc::new(crate::provider::build_client_with(&config, &env_file)?);
+    Ok(LocalSession { config, client })
+}
+
+pub fn open_session(repo: &str, config_path: Option<&Path>) -> Result<Session, DifftraceError> {
+    let repo = crate::cli::parse_repo(repo).map_err(DifftraceError::Cli)?;
+    let (config, env_file) = load_config(config_path)?;
+    let client = Arc::new(crate::provider::build_client_with(&config, &env_file)?);
+    let token = crate::config::layered_lookup("GITHUB_TOKEN", &env_file).ok_or(
+        DifftraceError::MissingApiKey {
             env_var: "GITHUB_TOKEN",
-        })?;
+        },
+    )?;
     let gateway = Arc::new(GitHubClient::new(
         token,
         repo,

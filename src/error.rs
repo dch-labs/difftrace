@@ -13,10 +13,18 @@ pub enum DifftraceError {
     ConfigParse { source: toml::de::Error },
     #[error("cannot determine the home directory for the config path")]
     NoHomeDir,
-    #[error("no API key: set {env_var}")]
+    #[error("no API key: set {env_var} in the environment or ~/.difftrace/env")]
     MissingApiKey { env_var: &'static str },
     #[error("ollama profile requires provider.model to be set in the config")]
     OllamaModelMissing,
+    #[error(
+        "local profile requires provider.base_url (e.g. http://localhost:8080/v1 \
+        for llama.cpp, http://localhost:8000/v1 for vLLM, http://localhost:11434/v1 \
+        for Ollama)"
+    )]
+    LocalEndpointMissing,
+    #[error("local profile requires provider.model to be set in the config")]
+    LocalModelMissing,
     #[error("provider client construction failed: {source}")]
     ClientBuild {
         source: loopctl::api::error::ApiError,

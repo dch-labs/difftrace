@@ -67,7 +67,12 @@ impl ReviewScope {
     }
 
     #[must_use]
-    pub fn registry(&self, max_findings_per_file: usize) -> ToolRegistry {
+    pub fn registry(
+        &self,
+        max_findings_per_file: usize,
+        mode: crate::config::ReviewMode,
+        severity: crate::findings::Severity,
+    ) -> ToolRegistry {
         let scope = Arc::new(Self {
             gateway: Arc::clone(&self.gateway),
             index: Arc::clone(&self.index),
@@ -79,7 +84,12 @@ impl ReviewScope {
         registry.register(file_diff::FileDiffTool::new(Arc::clone(&scope)));
         registry.register(read_file::ReadFileTool::new(Arc::clone(&scope)));
         registry.register(comments::ListCommentsTool::new(Arc::clone(&scope)));
-        registry.register(submit::SubmitReviewTool::new(scope, max_findings_per_file));
+        registry.register(submit::SubmitReviewTool::new(
+            scope,
+            max_findings_per_file,
+            mode,
+            severity,
+        ));
         registry
     }
 
@@ -112,7 +122,11 @@ mod tests {
             1,
             "h",
         );
-        let registry = scope.registry(5);
+        let registry = scope.registry(
+            5,
+            crate::config::ReviewMode::Diff,
+            crate::findings::Severity::Nitpick,
+        );
         let names: Vec<&str> = registry
             .all_tools()
             .iter()

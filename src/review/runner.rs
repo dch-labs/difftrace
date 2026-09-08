@@ -161,22 +161,15 @@ fn summary_prompt(findings: &Findings) -> Result<String, DifftraceError> {
     ))
 }
 
-fn plain_summary(findings: &Findings) -> ReviewSummary {
+fn plain_summary(findings: &Findings, cause: &str) -> ReviewSummary {
     let count = findings.findings.len();
     ReviewSummary {
         summary: format!(
-            "The generated summary is unavailable this round (provider \
-             errors after every retry); all {count} recorded finding(s) \
-             are intact below."
+            "The generated summary is unavailable this round ({cause}); \
+             all {count} recorded finding(s) are intact below."
         ),
-        risk_notes: vec![
-            "Risk notes unavailable: the summary pass could not reach the \
-             provider."
-                .to_owned(),
-        ],
-        tests: "Test-coverage note unavailable: the summary pass could not \
-                reach the provider."
-            .to_owned(),
+        risk_notes: vec![format!("Risk notes unavailable: {cause}.")],
+        tests: format!("Test-coverage note unavailable: {cause}."),
     }
 }
 
@@ -301,6 +294,15 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         let mut run_config = RunConfig::default();
         run_config.max_turns = self.settings.max_turns;
         let prompt = batch_prompt(files, evidence, hunt);
+        tracing::debug!(
+            target: "difftrace::review",
+            files = files.len(),
+            evidence_chars = evidence.len(),
+            history_chars = history.len(),
+            prompt_chars = prompt.len(),
+            hunt,
+            "batch prompt assembled"
+        );
         let run = match agent.run(&prompt, &run_config).await {
             Ok(run) => Some(run),
             Err(LoopError::MaxTurnsExceeded { .. }) => None,
@@ -339,6 +341,8 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
         };
         agent.add_contributor(Box::new(
             rubric
+                .with_scope(self.settings.scope)
+                .with_focus(&self.settings.focus, self.settings.severity)
                 .with_history(history.to_owned())
                 .with_memory(self.settings.memory_content.clone()),
         ));
@@ -346,7 +350,7 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             Some(dir) => TrajectoryObserver::writing_to(dir),
             None => TrajectoryObserver::in_memory(),
         }));
-        agent.register_observer(Arc::new(LoggingObserver));
+        agent.register_observer(Arc::new(LoggingObserver::default()));
         let pipeline = ToolPipelineBuilder::new()
             .with_middleware(OutputLimitMiddleware::new(TOOL_OUTPUT_MAX_CHARS));
         agent
@@ -381,11 +385,11 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
                     api_attempt = api_attempt.saturating_add(1);
                     if api_attempt >= 3 {
                         tracing::warn!(
-                            target: "difftrace::review",
-                            error = %source,
+                                target: "difftrace::review",
+                                error = %source,
                             "summary generation failed after every retry; posting a plain summary"
                         );
-                        return Ok(plain_summary(&merged));
+                        return Ok(plain_summary(&merged, "provider errors after every retry"));
                     }
                     let wait = std::time::Duration::from_secs(2_u64.saturating_mul(api_attempt));
                     tracing::warn!(
@@ -402,7 +406,16 @@ impl<C: loopctl::api::ApiClient + 'static> ReviewRunner<C> {
             match ReviewSummary::from_value(value) {
                 Ok(summary) => return Ok(summary),
                 Err(source) if attempts_left == 0 => {
-                    return Err(DifftraceError::Summary { source });
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = %source,
+                        "summary never matched the schema after every corrective retry; \
+                         posting a plain summary"
+                    );
+                    return Ok(plain_summary(
+                        &merged,
+                        "the summaries never matched the schema after every corrective retry",
+                    ));
                 }
                 Err(source) => {
                     tracing::warn!(
@@ -1035,7 +1048,7 @@ diff --git a/src/lib.rs b/src/lib.rs
     }
 
     #[tokio::test]
-    async fn a_summary_still_malformed_after_the_retries_fails()
+    async fn a_summary_still_malformed_after_the_retries_falls_back_to_a_plain_summary()
     -> Result<(), Box<dyn std::error::Error>> {
         let bad = json!({
             "summary": { "text": "nested where a string belongs" },
@@ -1047,15 +1060,46 @@ diff --git a/src/lib.rs b/src/lib.rs
             text_response(&bad.to_string()),
             text_response(&bad.to_string()),
         ]);
-        let runner = runner(Arc::new(client.clone()), ReviewSettings::default(), None)?;
-        let err = runner
-            .summarize(&[Findings::default()])
-            .await
-            .err()
-            .ok_or("expected the retry exhaustion to fail")?;
+        let runner = runner(Arc::new(client), ReviewSettings::default(), None)?;
+        let findings = Findings {
+            findings: vec![crate::findings::Finding {
+                file: "src/lib.rs".to_owned(),
+                line: 2,
+                severity: crate::findings::Severity::Warning,
+                complexity: 3,
+                title: "Lock dropped early".to_owned(),
+                body: "The guard is dropped.".to_owned(),
+            }],
+        };
+        let summary = runner.summarize(&[findings]).await?;
         assert!(
-            err.to_string().contains("expected a string"),
-            "names the schema breach: {err}"
+            summary.summary.contains("unavailable"),
+            "the fallback states its limitation: {}",
+            summary.summary
+        );
+        assert!(
+            summary.summary.contains('1'),
+            "the fallback names the intact finding count: {}",
+            summary.summary
+        );
+        assert!(
+            summary
+                .summary
+                .contains("the summaries never matched the schema after every corrective retry"),
+            "the schema path names its own cause: {}",
+            summary.summary
+        );
+        assert!(
+            !summary.summary.contains("provider errors"),
+            "the schema path never claims provider errors: {}",
+            summary.summary
+        );
+        assert_eq!(
+            summary.risk_notes.first().map(String::as_str),
+            Some(
+                "Risk notes unavailable: the summaries never matched the schema after every corrective retry."
+            ),
+            "the risk note carries the same honest cause"
         );
         Ok(())
     }
@@ -1126,6 +1170,18 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(
             summary.summary.contains('1'),
             "the fallback names the intact finding count: {}",
+            summary.summary
+        );
+        assert!(
+            summary
+                .summary
+                .contains("provider errors after every retry"),
+            "the provider path names its own cause: {}",
+            summary.summary
+        );
+        assert!(
+            !summary.summary.contains("schema"),
+            "the provider path never claims a schema failure: {}",
             summary.summary
         );
         Ok(())

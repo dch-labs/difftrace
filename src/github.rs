@@ -372,6 +372,18 @@ pub trait PrGateway: Send + Sync {
         pr: u64,
         body: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), DifftraceError>> + Send + '_>>;
+
+    fn list_files(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, DifftraceError>> + Send + '_>> {
+        Box::pin(async {
+            Err(DifftraceError::Cli(
+                "this gateway cannot list repository files; full-scope review needs a \
+                 local checkout (--base)"
+                    .to_owned(),
+            ))
+        })
+    }
 }
 
 pub struct GitHubClient {

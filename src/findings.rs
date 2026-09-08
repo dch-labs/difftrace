@@ -6,7 +6,7 @@ use loopctl::structured::StructuredOutput;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Nitpick,
@@ -16,6 +16,16 @@ pub enum Severity {
 }
 
 impl Severity {
+    #[must_use]
+    pub(crate) fn rank(self) -> u8 {
+        match self {
+            Self::Nitpick => 0,
+            Self::Suggestion => 1,
+            Self::Warning => 2,
+            Self::Critical => 3,
+        }
+    }
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

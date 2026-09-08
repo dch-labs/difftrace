@@ -5,6 +5,241 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4] - 2026-09-08
+
+### Added
+
+- Three review scopes and a focus control on `difftrace review`:
+  `--scope diff` (the new default) reviews only the changed lines of the
+  changed files — evidence packs become hunk windows, and observations
+  outside the diff are suppressed with a one-line count telling you how
+  to see them; `--scope deep` reviews the whole content of every changed
+  file and files everything the diff cannot anchor into a separate
+  "Existing issues — not from this change" section with its own fix
+  prompt, non-blocking and outside the registry; `--scope full` audits
+  every tracked file in the repository (local `--base` runs only,
+  batches of at least four files, no miss-hunt — a weekly hygiene pass,
+  not a per-round tool). `--focus security,correctness,concurrency,
+  performance,tests,docs` narrows what the reviewer hunts, and
+  `--severity` drops milder findings unseen with a counted note.
+  Both also work as `review.scope`, `review.focus`, and
+  `review.severity` in the config file and `DIFFTRACE_SCOPE`,
+  `DIFFTRACE_FOCUS`, and `DIFFTRACE_SEVERITY` overrides (pinned by
+  the scope/focus/override tests in `config`, `cli`, `rubric`,
+  `evidence`, and `submit`, the existing-issues and suppression tests in
+  `prompts`, and `an_unmatched_out_of_hunk_finding_never_becomes_a_registry_issue`).
+  A narrowed round (`--focus` or `--severity` set) also never retires
+  registry issues it could not have re-raised — absence is not evidence
+  of a fix when the reviewer was not looking for that kind of issue
+  (pinned by `a_narrowed_round_never_retires_issues_it_cannot_re_raise`;
+  manually resolved threads still record their resolution).
+- Local rounds always run the miss-hunt: the second adversarial pass
+  previously skipped itself whenever the first pass found any blocking
+  finding, so rounds with warnings got one sample instead of two — and
+  per-pass recall is roughly a third, which is why every round surfaced
+  "new" warnings on unchanged code. Local `--base` rounds now always
+  take the second pass (`review.hunt_always` forces it; hosted rounds
+  keep the skip), and the hunt rubric no longer claims the first pass
+  was clean when it was not (pinned by
+  `a_blocking_first_pass_still_hunts_when_hunt_always_is_set` and the
+  hunt-rubric wording assertions).
+- The first self-review round (difftrace reviewing its own `--scope`
+  work) caught three defects, all fixed: the local run log recorded the
+  config-file scope instead of the `--scope` flag actually executed;
+  whole-file evidence packs labeled every large file "the file has no
+  parseable hunks" (a false coverage statement for the reviewer model —
+  the header now names the real reason: "whole-file mode requested");
+  and `SubmitReviewTool` hard-coded diff scope and no severity floor on
+  the tool-based submission path, ignoring the configured knobs — both
+  now thread through `ReviewScope::registry` (pinned by
+  `the_configured_floor_reaches_the_submit_tool` and the whole-file
+  header assertions).
+- Documentation findings are suggestion-grade by default: an imprecise,
+  incomplete, or stale comment is never a warning; warning is reserved
+  for a doc claim that misstates a behavioral contract a caller would
+  build against (safety, blocking, cancellation, lifetime, ordering) —
+  trusting the doc would ship a defect. Doc-accuracy warnings were the
+  main source of freshly-minted blockers on fix code (pinned by the
+  rubric assertion in `the_rubric_carries_rules_and_frame_every_turn`).
+- A `local` provider profile for any OpenAI-compatible server —
+  llama.cpp, vLLM, LM Studio, Ollama behind a proxy: requires
+  `provider.model` and `provider.base_url`, sends no key unless
+  `LOCAL_API_KEY` is set, and fails with the exact endpoint to configure
+  when either is missing (pinned by `a_local_profile_requires_an_explicit_endpoint`
+  and `a_local_profile_builds_at_any_openai_compatible_endpoint`).
+  The new `DIFFTRACE_BASE_URL` override points any profile at a
+  different endpoint for one run without touching the config file
+  (pinned by `the_base_url_env_override_replaces_the_configured_endpoint`).
+- A verbosity knob: `log_level` in the config file and the
+  `DIFFTRACE_LOG` override (`error`–`trace`, default `info`; works in
+  `~/.difftrace/env` and in workflow env blocks; `RUST_LOG` still wins
+  as the escape hatch, and a bare `debug`/`trace` there is clamped the
+  same way — only directive forms like `hyper=trace` pass through raw,
+  so no spelling of "debug" ever drowns the log in connection chatter
+  — pinned by the `filter_directive` tests). At `debug` the logs carry
+  timing spans —
+  every round, fetch, batch, verification, and summary pass closes a
+  span with its busy-time — plus per-turn timing (total, tools, model ≈
+  turn minus tools) from the logging observer, the resolved config,
+  prompt/evidence sizes, registry merge decisions per issue, and
+  per-finding verification verdicts (pinned by
+  `a_span_close_line_carries_the_busy_time`, the `DIFFTRACE_LOG`
+  override tests, and binary-verified at `DIFFTRACE_LOG=debug`). The
+  reqwest/hyper/rustls connection chatter is held at `info` so debug
+  stays readable.
+- Every local review run writes a full transcript to
+  `~/.difftrace/reviews/<checkout>-<timestamp>-<short sha>.log`
+  (the reviewed checkout's directory name and a local-time timestamp,
+  so runs of different repositories never blur together): the run's
+  diagnostics (progress, retries, warnings — the subscriber tees
+  stderr to the file) followed by the round body and the
+  standing-comment render, or the error chain when the run fails; a
+  logging failure never fails the review. Every run now opens by
+  naming its version — the first progress line on screen, the
+  transcript header, and the first log line — so a saved transcript
+  always names the difftrace that wrote it (pinned by
+  `a_local_review_log_name_carries_checkout_time_and_head` and
+  `the_tee_reaches_the_file`). The local progress lines moved from
+  bare stderr prints to the tracing subscriber so they land in both.
+- `~/.difftrace/env`: an optional `KEY=VALUE` secret file beside the
+  config — the lowest-priority source for provider API keys,
+  `GITHUB_TOKEN`, and every `DIFFTRACE_*` override, so local runs need
+  no shell exports. A variable already in the environment always wins
+  (CI and per-run overrides untouched); empty values count as unset on
+  both layers; the config file itself stays secret-free and
+  committable. The missing-key error now names both sources ("set
+  ZAI_API_KEY in the environment or ~/.difftrace/env") (pinned by
+  `the_env_file_parses_keys_and_skips_noise`,
+  `the_environment_wins_over_the_env_file`,
+  `a_profile_override_can_come_from_the_env_file`, and the
+  `build_client_with` file-key tests in the provider suite).
+- `difftrace review --base <ref>`: a fully offline pre-push review of
+  `merge-base(<base>, HEAD)..HEAD` from the current checkout — the
+  diff and file contents come from local git, no GitHub token is
+  demanded, nothing is posted, and the round renders to stdout. The
+  hosted rounds on loopctl#112 and dch#25 ran 11–61 minutes each and
+  collided on the shared provider key when both repositories pushed
+  within a minute; the local loop runs the same review before the
+  push, against a head that cannot move mid-round, so what it clears
+  stays cleared and the pull-request round that follows confirms
+  instead of re-raising (gateway pinned by `the_local_diff_is_the_branch_delta`
+  and friends in `local::tests`; CLI pinned by
+  `a_local_review_parses_with_the_base_flag_alone`).
+
+### Fixed
+
+- A partial round no longer marks standing issues on unreviewed files
+  as `Fixed` in the registry: `RoundFindings` now carries the round's
+  unreviewed files and `retire_unseen` leaves their issues open —
+  "not re-raised" cannot read as "fixed" for a file the round never
+  saw, so provider-failure rounds stop falsifying issue history and
+  resetting finding identity on the next full round (pinned by
+  `an_open_issue_on_an_unreviewed_file_survives_a_partial_merge`).
+  Unreviewed batches now travel the pipeline as structured file lists
+  instead of `", "`-joined display strings re-split at the thread
+  slate, so a filename containing the separator cannot corrupt the
+  unreviewed set.
+- The partial-review banner's literal whitespace run before "(provider
+  failures)" collapsed to a single space (pinned by the exact-spacing
+  assertion in `a_partial_round_leads_with_a_loud_banner`).
+- A summary that never matches the schema after every corrective
+  retry no longer fails the run: the summary pass now falls back to
+  the same plain machine-written summary as the provider-unreachable
+  path, so no post-findings failure mode can kill the round — only
+  posting to GitHub can (pinned by
+  `a_summary_still_malformed_after_the_retries_falls_back_to_a_plain_summary`).
+- A round where every batch goes unreviewed now fails instead of
+  posting: the loopctl#112 rate-limit round posted a hollow clean
+  review ("0 findings") and resolved 11 previous threads because
+  "not re-raised" read as "fixed" — with zero files reviewed, the
+  round now errors out before posting anything or resolving any
+  thread (pinned by
+  `a_round_where_every_batch_fails_posts_nothing_and_resolves_no_threads`).
+- Threads on unreviewed files are never resolved in partial rounds
+  either: only a file the round actually reviewed can conclude its
+  issues fixed (pinned by
+  `a_thread_on_an_unreviewed_file_is_never_slated_for_resolution`).
+- The miss-hunt no longer announces "hunting for misses" when every
+  batch went unreviewed — there is nothing to hunt (pinned by the
+  subscriber assertion in
+  `the_hunt_skips_batches_the_first_pass_could_not_complete`).
+- The unreviewed-files note no longer claims "the reviewer run failed
+  twice": batch retries have been configurable
+  (`review.batch_attempts`, default 10) since this release, so the
+  posted note now states the configured count ("failed after all N
+  attempt(s)") (the note assertions in
+  `a_batch_whose_runs_fail_is_recorded_unreviewed_and_the_review_continues`
+  pin the singular and plural forms).
+- The rate-limited round's root cause was two reviews bursting
+  simultaneously (loopctl and dch pushed a minute apart — 20 concurrent
+  streams on one provider account); a single review at 10 lanes passes
+  cleanly, so the lane count stays at 10 and the all-unreviewed guard
+  above is what makes the rare storm fail safely instead of
+  destructively.
+- A hunt-pass failure on a batch the first pass reviewed can no longer
+  trip the all-unreviewed failsafe: the hunt only ever re-runs
+  reviewed batches, so its failures now warn and leave the first-pass
+  results standing instead of merging into the unreviewed set — an
+  outage that starts mid-round degrades to a partial round instead of
+  discarding a successful batch's findings under a false "provider was
+  unreachable for the whole run" error (pinned by
+  `a_hunt_failure_on_a_reviewed_batch_stays_partial`).
+- The partial-review banner counts files, not batches: with
+  `review.batch_files` above 1, one failed batch of several files no
+  longer undercounts the gap as "1 file(s) could not be reviewed"
+  (pinned by `the_partial_banner_counts_files_not_batches`).
+- The plain-summary fallback names its true cause per path: the
+  provider-unreachable path keeps "(provider errors after every
+  retry)" while the schema path — where the provider answered on
+  schema three times — says the summaries never matched the schema
+  after every corrective retry; the risk-notes and tests fields carry
+  the same honest cause (pinned by the per-path assertions in
+  `a_summary_still_malformed_after_the_retries_falls_back_to_a_plain_summary`
+  and `a_summary_that_never_arrives_falls_back_to_a_plain_summary`).
+- The local `--base` review pins its materials at open: the gateway
+  resolves the head commit and merge-base once, and every read —
+  overview, numstat, diff — runs against that pinned pair, so a commit
+  landing after the open cannot slip into the reviewed diff or shift
+  the stamped head (pinned by
+  `a_commit_after_open_does_not_change_the_reviewed_diff`).
+
+### Changed
+
+- The default per-response output budget for the Anthropic/Zai profiles
+  rises from 8192 to 32768 tokens: a thinking model (the default zai
+  family) spends its reasoning inside `max_tokens`, so the old ceiling
+  truncated final turns before `record_findings` ever fired and every
+  affected batch failed. The Anthropic protocol requires a finite
+  `max_tokens` — there is no unlimited value — so raise
+  `provider.max_tokens` (or `DIFFTRACE_MAX_TOKENS`) further, up to the
+  endpoint's ceiling (the README example uses 131072), for models that
+  think longer.
+- A budget-truncated batch is no longer retried: the cap physically
+  prevented the verdict, so the retry ladder only re-spent the budget
+  up to nine more times with 8–90 s waits (observed live: a glm
+  thinking round burning 8192 tokens × 10 attempts per batch). The
+  batch now lands unreviewed on its first truncation with a warning
+  that names the knob (pinned by `a_truncated_batch_is_not_retried`;
+  `a_truncated_batch_is_recorded_unreviewed_instead_of_approved`
+  adapted to the no-retry shape).
+- The default provider profile is `zai`: a bare run with no config file
+  and no `DIFFTRACE_PROFILE` now resolves zai and asks for
+  `ZAI_API_KEY` (or its `ZHIPUAI_API_KEY` alias) instead of
+  `ANTHROPIC_API_KEY` — every deployed workflow already pins zai
+  explicitly, so this changes the fresh-machine story only (amends the
+  frontier-first default settled before the zai profile existed;
+  pinned by `a_partial_provider_section_keeps_other_defaults` and
+  `an_unset_or_empty_env_override_keeps_the_config`).
+- `difftrace review --base` now rejects `--pr` the way it already
+  rejects `--sha` (the local review has no pull request), and the
+  `--memory` help states that appending happens on posted rounds only.
+- The standing comment's issue history renders collapsed: the fixed and
+  manually-resolved list now sits inside a `<details>` container whose
+  summary names the count ("Fixed and resolved across N issue(s)"), so
+  a long-lived pull request's verdict stays readable instead of growing
+  a page of struck-through titles (pinned by the collapse assertions in
+  `two_rounds_leave_a_registry_with_open_and_fixed_issues`).
+
 ## [0.11.3] - 2026-09-08
 
 ### Fixed

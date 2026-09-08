@@ -6,6 +6,7 @@
 use futures::StreamExt;
 
 use loopctl::api::ApiClient;
+use tracing::Instrument as _;
 
 use crate::error::DifftraceError;
 use crate::findings::Finding;
@@ -16,9 +17,11 @@ use crate::github::CommentPosition;
 use crate::github::ReviewEvent;
 use crate::github::ReviewSubmission;
 use crate::github::ReviewThread;
+use crate::prompts::existing_issues_section;
 use crate::prompts::fix_all_section;
 use crate::prompts::re_raised_reply_body;
 use crate::prompts::review_round_body;
+use crate::prompts::suppressed_note;
 use crate::review::ReviewRunner;
 use crate::review::registry::Issue;
 use crate::review::registry::IssueStatus;
@@ -51,6 +54,7 @@ pub struct ReviewOutcome {
     pub findings: Vec<Finding>,
     pub comments: Vec<CommentPosition>,
     pub dropped: Vec<DroppedFinding>,
+    pub below_floor: usize,
     pub verified_out: Vec<(Finding, String)>,
     pub fixed_this_round: Vec<String>,
     pub unreviewed_batches: Vec<String>,
@@ -89,13 +93,14 @@ fn verification_note(verified: &[(Finding, String)]) -> String {
     format!("## Dropped after verification\n{items}")
 }
 
-fn unreviewed_note(batches: &[String]) -> String {
+fn unreviewed_note(batches: &[String], attempts: usize) -> String {
     if batches.is_empty() {
         return String::new();
     }
+    let noun = if attempts == 1 { "attempt" } else { "attempts" };
     let items = batches
         .iter()
-        .map(|files| format!("- `{files}` — the reviewer run failed twice"))
+        .map(|files| format!("- `{files}` — the reviewer run failed after all {attempts} {noun}"))
         .collect::<Vec<_>>()
         .join("\n");
     format!(
@@ -127,41 +132,24 @@ fn issue_anchor(issue: &Issue) -> String {
     }
 }
 
-fn registry_verdict_section(registry: &Registry, unreviewed: &[String]) -> String {
+fn registry_verdict_section(
+    registry: &Registry,
+    unreviewed: &[String],
+    coverage_gap: bool,
+) -> String {
     let unresolved = registry.unresolved();
     let blockers = unresolved
         .iter()
         .filter(|issue| is_blocking(issue.severity))
         .count();
-    let good = if unreviewed.is_empty() {
-        "🎉 Good to go"
-    } else {
+    let good = if !unreviewed.is_empty() {
         "⚠️ Approval withheld — some files went unreviewed (listed below)"
+    } else if coverage_gap {
+        "⚠️ Approval withheld — observations outside the diff were suppressed \
+         (see the round's note)"
+    } else {
+        "🎉 Good to go"
     };
-    if blockers == 0 {
-        if unresolved.is_empty() {
-            return format!("## Verdict\n\n{good} — no unresolved findings.");
-        }
-        let list = unresolved
-            .iter()
-            .enumerate()
-            .map(|(index, issue)| {
-                format!(
-                    "{}. {} — {} {} ({})",
-                    index.saturating_add(1),
-                    issue_anchor(issue),
-                    issue.severity.glyph(),
-                    issue.title,
-                    crate::findings::complexity_glyph(issue.complexity),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        return format!(
-            "## Verdict\n\n{good} — no unresolved blocking findings. Nitpicks and suggestions don't block:\n\n{list}"
-        );
-    }
-    let noun = if blockers == 1 { "finding" } else { "findings" };
     let list = unresolved
         .iter()
         .enumerate()
@@ -177,6 +165,15 @@ fn registry_verdict_section(registry: &Registry, unreviewed: &[String]) -> Strin
         })
         .collect::<Vec<_>>()
         .join("\n");
+    if blockers == 0 {
+        if unresolved.is_empty() {
+            return format!("## Verdict\n\n{good} — no unresolved findings.");
+        }
+        return format!(
+            "## Verdict\n\n{good} — no unresolved blocking findings. Nitpicks and suggestions don't block:\n\n{list}"
+        );
+    }
+    let noun = if blockers == 1 { "finding" } else { "findings" };
     format!(
         "## Verdict\n\n🔴 Not good to go — {blockers} blocking {noun} (all unresolved, blockers first):\n\n{list}\n\nTo be good to go: fix the blockers — each inline comment carries a fix prompt, and each round's review body carries a copy-all prompt for its findings."
     )
@@ -187,6 +184,7 @@ fn history_section(registry: &Registry) -> String {
     if done.is_empty() {
         return String::new();
     }
+    let count = done.len();
     let list = done
         .iter()
         .map(|issue| {
@@ -208,18 +206,25 @@ fn history_section(registry: &Registry) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    format!("## ✅ Issue history\n{list}")
+    format!(
+        "## ✅ Issue history\n\n<details>\n<summary>Fixed and resolved across {count} \
+         issue(s)</summary>\n\n{list}\n\n</details>"
+    )
 }
 
-fn standing_render(outcome: &ReviewOutcome, registry: &Registry) -> String {
+fn standing_render(outcome: &ReviewOutcome, registry: &Registry, attempts: usize) -> String {
     let sections = [
-        registry_verdict_section(registry, &outcome.unreviewed_batches),
+        registry_verdict_section(
+            registry,
+            &outcome.unreviewed_batches,
+            has_existing_issues(&outcome.dropped),
+        ),
         format!("## Summary\n{}", outcome.summary.summary),
         risks_section(&outcome.summary.risk_notes),
         format!("## Tests\n{}", outcome.summary.tests),
         drops_note(&outcome.dropped),
         verification_note(&outcome.verified_out),
-        unreviewed_note(&outcome.unreviewed_batches),
+        unreviewed_note(&outcome.unreviewed_batches, attempts),
         history_section(registry),
     ];
     sections
@@ -244,14 +249,20 @@ pub(crate) fn review_event(findings: &[Finding]) -> ReviewEvent {
     }
 }
 
-fn round_event(registry: &Registry, unreviewed: &[String]) -> ReviewEvent {
+fn round_event(registry: &Registry, unreviewed: &[String], coverage_gap: bool) -> ReviewEvent {
     if registry.has_unresolved_blockers() {
         ReviewEvent::ChangesRequested
-    } else if unreviewed.is_empty() {
+    } else if unreviewed.is_empty() && !coverage_gap {
         ReviewEvent::Approved
     } else {
         ReviewEvent::Commented
     }
+}
+
+fn has_existing_issues(dropped: &[DroppedFinding]) -> bool {
+    dropped
+        .iter()
+        .any(|entry| entry.reason == "line outside the changed hunks")
 }
 
 fn also_locations_by_comment(findings: &[Finding]) -> Vec<Vec<(String, u64)>> {
@@ -292,28 +303,61 @@ fn fixed_titles(registry: &Registry) -> Vec<String> {
         .collect()
 }
 
-fn render_round(outcome: &mut ReviewOutcome, registry: &Registry) {
-    let fix_all = fix_all_section(
-        &outcome.findings,
-        &outcome.dropped,
-        outcome.pr,
-        &outcome.head_sha,
-    );
-    let raised = outcome.findings.len().saturating_add(outcome.dropped.len());
-    let clean = raised == 0 && outcome.unreviewed_batches.is_empty();
-    outcome.round_body = review_round_body(&outcome.head_sha, raised, clean, &fix_all);
-    let gap_note = unreviewed_note(&outcome.unreviewed_batches);
+fn render_round(
+    outcome: &mut ReviewOutcome,
+    registry: &Registry,
+    attempts: usize,
+    unreviewed_files: usize,
+    mode: crate::config::ReviewMode,
+) {
+    let (existing, capped): (Vec<DroppedFinding>, Vec<DroppedFinding>) = outcome
+        .dropped
+        .iter()
+        .cloned()
+        .partition(|entry| entry.reason == "line outside the changed hunks");
+    let fix_all = fix_all_section(&outcome.findings, &capped, outcome.pr, &outcome.head_sha);
+    let raised = outcome.findings.len().saturating_add(capped.len());
+    let clean = raised == 0 && outcome.unreviewed_batches.is_empty() && existing.is_empty();
+    outcome.round_body =
+        review_round_body(&outcome.head_sha, raised, clean, unreviewed_files, &fix_all);
+    let gap_note = unreviewed_note(&outcome.unreviewed_batches, attempts);
     if !gap_note.is_empty() {
         outcome.round_body.push('\n');
         outcome.round_body.push_str(gap_note.trim_end());
     }
-    outcome.standing_body = standing_render(outcome, registry);
+    let existing_section = match mode {
+        crate::config::ReviewMode::Diff => suppressed_note(existing.len()),
+        crate::config::ReviewMode::Deep | crate::config::ReviewMode::Full => {
+            existing_issues_section(&existing, outcome.pr, &outcome.head_sha)
+        }
+    };
+    if !existing_section.is_empty() {
+        outcome.round_body.push('\n');
+        outcome.round_body.push_str(&existing_section);
+    }
+    if outcome.below_floor > 0 {
+        outcome
+            .round_body
+            .push_str(&below_floor_note(outcome.below_floor));
+    }
+    outcome.standing_body = standing_render(outcome, registry, attempts);
 }
 
-fn verdict_comment_body(outcome: &ReviewOutcome, registry: &Registry) -> Result<String, String> {
+fn below_floor_note(count: usize) -> String {
+    format!(
+        "\n\n🔇 {count} finding(s) below the configured severity floor were dropped \
+         unseen (`--severity`)."
+    )
+}
+
+fn verdict_comment_body(
+    outcome: &ReviewOutcome,
+    registry: &Registry,
+    attempts: usize,
+) -> Result<String, String> {
     let rendered = format!(
         "{VERDICT_MARKER}\n\n{}\n\n---\nReviewed commit: `{}`",
-        standing_render(outcome, registry).trim_end(),
+        standing_render(outcome, registry, attempts).trim_end(),
         outcome.head_sha
     );
     embed_registry(&rendered, registry)
@@ -547,10 +591,15 @@ fn same_issue(recorded_title: Option<&str>, comment_body: &str) -> bool {
     same_issue_title(recorded, &title)
 }
 
-fn threads_to_resolve(threads: &[ReviewThread], matched: &[String]) -> Vec<String> {
+fn threads_to_resolve(
+    threads: &[ReviewThread],
+    matched: &[String],
+    unreviewed_files: &[String],
+) -> Vec<String> {
     threads
         .iter()
         .filter(|thread| !matched.contains(&thread.id))
+        .filter(|thread| !unreviewed_files.contains(&thread.path))
         .map(|thread| thread.id.clone())
         .collect()
 }
@@ -573,25 +622,30 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         batches: &[Vec<String>],
         registry: &Registry,
         aggregated: &mut Findings,
-        skip: &[String],
-    ) -> Vec<String> {
+        skip: &[Vec<String>],
+    ) {
         if !self.settings().miss_hunt
-            || aggregated
-                .findings
-                .iter()
-                .any(|finding| is_blocking(finding.severity))
+            || self.settings().scope == crate::config::ReviewMode::Full
+            || (!self.settings().hunt_always
+                && aggregated
+                    .findings
+                    .iter()
+                    .any(|finding| is_blocking(finding.severity)))
         {
-            return Vec::new();
+            return;
+        }
+        let huntable: Vec<Vec<String>> = batches
+            .iter()
+            .filter(|batch| !skip.contains(*batch))
+            .cloned()
+            .collect();
+        if huntable.is_empty() {
+            return;
         }
         tracing::info!(
             target: "difftrace::review",
             "first pass recorded no blocking findings; hunting for misses"
         );
-        let huntable: Vec<Vec<String>> = batches
-            .iter()
-            .filter(|batch| !skip.contains(&batch.join(", ")))
-            .cloned()
-            .collect();
         let (hunted, unreviewed) = self.review_batches(&huntable, registry, true).await;
         for finding in hunted.findings {
             let duplicate = aggregated.findings.iter().any(|existing| {
@@ -603,15 +657,23 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                 aggregated.findings.push(finding);
             }
         }
-        unreviewed
+        for batch in &unreviewed {
+            tracing::warn!(
+                target: "difftrace::review",
+                files = %batch.join(", "),
+                "hunt batch failed after every attempt; the first-pass results stand"
+            );
+        }
     }
 
     async fn evidence_for(&self, files: &[String]) -> String {
+        let whole_files = self.settings().scope != crate::config::ReviewMode::Diff;
         crate::review::evidence::build_evidence(
             files,
             self.index(),
             &self.gateway(),
             self.head_sha(),
+            whole_files,
         )
         .await
     }
@@ -621,7 +683,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         batches: &[Vec<String>],
         registry: &Registry,
         hunt: bool,
-    ) -> (Findings, Vec<String>) {
+    ) -> (Findings, Vec<Vec<String>>) {
         let stage = if hunt {
             "hunt batch started"
         } else {
@@ -641,6 +703,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                     );
                     let attempted = self
                         .attempt_batch(batch, index, &history, &evidence, hunt)
+                        .instrument(tracing::debug_span!("batch", index, hunt))
                         .await;
                     if let Some(findings) = &attempted {
                         tracing::info!(
@@ -662,11 +725,11 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             }
         }
         let mut aggregated = Findings::default();
-        let mut unreviewed: Vec<String> = Vec::new();
+        let mut unreviewed: Vec<Vec<String>> = Vec::new();
         for (index, slot) in reviewed.into_iter().enumerate() {
             match (slot, batches.get(index)) {
                 (Some(findings), _) => aggregated.findings.extend(findings.findings),
-                (None, Some(batch)) => unreviewed.push(batch.join(", ")),
+                (None, Some(batch)) => unreviewed.push(batch.clone()),
                 (None, None) => {}
             }
         }
@@ -682,27 +745,49 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         hunt: bool,
     ) -> Option<Findings> {
         let mut attempted: Option<Findings> = None;
-        for attempt in 0..2usize {
+        let attempts = self.settings().batch_attempts.max(1);
+        for attempt in 0..attempts {
             match self.review_batch(batch, history, evidence, hunt).await {
                 Ok(findings) => {
                     attempted = Some(findings);
                     break;
                 }
-                Err(err) if attempt == 0 => {
-                    tracing::warn!(
-                        target: "difftrace::review",
-                        error = %crate::error::error_chain(&err),
-                        batch = index,
-                        "batch review failed; retrying once"
-                    );
-                }
                 Err(err) => {
+                    if matches!(err, DifftraceError::ReviewTruncated { .. }) {
+                        tracing::warn!(
+                            target: "difftrace::review",
+                            error = %crate::error::error_chain(&err),
+                            batch = index,
+                            "the output budget truncated the run; not retrying — raise \
+                             provider.max_tokens for thinking models"
+                        );
+                        break;
+                    }
+                    let remaining = attempts.saturating_sub(attempt).saturating_sub(1);
+                    if remaining == 0 {
+                        tracing::warn!(
+                            target: "difftrace::review",
+                            error = %crate::error::error_chain(&err),
+                            batch = index,
+                            "batch review failed after every attempt; recording the batch as unreviewed"
+                        );
+                        break;
+                    }
+                    let base = self.settings().retry_backoff_base_secs;
+                    let mut factor = 1_u64;
+                    for _ in 0..attempt.min(6) {
+                        factor = factor.saturating_mul(2);
+                    }
+                    let wait = std::time::Duration::from_secs(base.saturating_mul(factor).min(90));
                     tracing::warn!(
                         target: "difftrace::review",
                         error = %crate::error::error_chain(&err),
                         batch = index,
-                        "batch review failed again; recording the batch as unreviewed"
+                        ?wait,
+                        remaining,
+                        "batch review failed; retrying with backoff"
                     );
+                    tokio::time::sleep(wait).await;
                 }
             }
         }
@@ -735,20 +820,63 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
 
     pub async fn review_all(&self, dry_run: bool) -> Result<ReviewOutcome, DifftraceError> {
         let (all_threads, open_threads, registry, verifier_history) = self.round_context().await?;
-        let files = self.file_names();
-        let batches = plan_batches(&files, self.settings().batch_files);
+        let mode = self.settings().scope;
+        let files = match mode {
+            crate::config::ReviewMode::Full => {
+                let listed = self.gateway().list_files().await?;
+                if listed.is_empty() {
+                    return Err(DifftraceError::Cli(
+                        "the gateway listed no files; nothing to audit".to_owned(),
+                    ));
+                }
+                listed
+            }
+            _ => self.file_names(),
+        };
+        if files.is_empty() {
+            tracing::error!(
+                target: "difftrace::review",
+                "the reviewed range is empty; refusing to render a vacuous clean round"
+            );
+            return Err(DifftraceError::Cli(
+                "the reviewed range is empty — the head equals the merge-base, so \
+                 there is nothing to review; once the work is committed, pin --base \
+                 to the remote tip (e.g. origin/master) so local commits stay in \
+                 the range"
+                    .to_owned(),
+            ));
+        }
+        let batch_size = match mode {
+            crate::config::ReviewMode::Full => self.settings().batch_files.max(4),
+            _ => self.settings().batch_files,
+        };
+        let batches = plan_batches(&files, batch_size);
         tracing::info!(
             target: "difftrace::review",
             files = files.len(),
             batches = batches.len(),
             "reviewing"
         );
-        let (mut aggregated, unreviewed) = self.gather_findings(&batches, &registry).await;
+        let (mut aggregated, unreviewed) = self.review_batches(&batches, &registry, false).await;
+        self.hunt_misses(&batches, &registry, &mut aggregated, &unreviewed)
+            .await;
+        let unreviewed_files: Vec<String> = unreviewed.iter().flatten().cloned().collect();
+        if !batches.is_empty() && unreviewed.len() == batches.len() {
+            tracing::error!(
+                target: "difftrace::review",
+                "every batch went unreviewed; failing the round without posting or resolving anything"
+            );
+            return Err(DifftraceError::Cli(
+                "every batch went unreviewed — the provider was unreachable or rate-limited \
+                 for the whole run; nothing was posted and no threads were resolved"
+                    .to_owned(),
+            ));
+        }
         let verified_out = self
             .apply_verification(&mut aggregated, &verifier_history)
             .await;
         let (mut outcome, comment_of_finding) = self
-            .grounded_outcome(aggregated, verified_out, unreviewed)
+            .grounded_outcome(aggregated, verified_out, &unreviewed)
             .await?;
         let (merged, split) = self.attach_round_state(
             &mut outcome,
@@ -756,61 +884,67 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             &all_threads,
             &open_threads,
             &comment_of_finding,
+            &unreviewed_files,
         );
-        render_round(&mut outcome, &merged);
-        let event = round_event(&merged, &outcome.unreviewed_batches);
+        render_round(
+            &mut outcome,
+            &merged,
+            self.settings().batch_attempts.max(1),
+            unreviewed_files.len(),
+            mode,
+        );
+        let event = round_event(
+            &merged,
+            &outcome.unreviewed_batches,
+            has_existing_issues(&outcome.dropped),
+        );
         if dry_run {
             return Ok(outcome);
         }
-        self.publish_round(&mut outcome, &merged, split, &open_threads, event)
-            .await?;
+        self.publish_round(
+            &mut outcome,
+            &merged,
+            split,
+            &open_threads,
+            event,
+            &unreviewed_files,
+        )
+        .await?;
         Ok(outcome)
-    }
-
-    async fn gather_findings(
-        &self,
-        batches: &[Vec<String>],
-        registry: &Registry,
-    ) -> (Findings, Vec<String>) {
-        let (mut aggregated, first_pass_unreviewed) =
-            self.review_batches(batches, registry, false).await;
-        let mut unreviewed = first_pass_unreviewed;
-        let hunt_skipped = unreviewed.clone();
-        for batch in self
-            .hunt_misses(batches, registry, &mut aggregated, &hunt_skipped)
-            .await
-        {
-            if !unreviewed.contains(&batch) {
-                unreviewed.push(batch);
-            }
-        }
-        (aggregated, unreviewed)
     }
 
     async fn grounded_outcome(
         &self,
         aggregated: Findings,
         verified_out: Vec<(Finding, String)>,
-        unreviewed: Vec<String>,
+        unreviewed: &[Vec<String>],
     ) -> Result<(ReviewOutcome, Vec<Option<usize>>), DifftraceError> {
         let grounded = ground_findings(
             self.index(),
             aggregated.findings,
             self.settings().max_findings_per_file,
+            self.settings().scope,
+            self.settings().severity,
         );
         let comment_of_finding = grounded.comment_of_finding;
+        let below_floor = grounded.below_floor;
         let summary = self
             .summarize(&[Findings {
                 findings: grounded.findings.clone(),
             }])
+            .instrument(tracing::debug_span!(
+                "summary_pass",
+                findings = grounded.findings.len()
+            ))
             .await?;
         let outcome = ReviewOutcome {
             summary,
             findings: grounded.findings,
             comments: grounded.comments,
             dropped: grounded.dropped,
+            below_floor,
             verified_out,
-            unreviewed_batches: unreviewed,
+            unreviewed_batches: unreviewed.iter().map(|batch| batch.join(", ")).collect(),
             pr: self.pr(),
             head_sha: self.head_sha().to_owned(),
             posted: false,
@@ -828,6 +962,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         all_threads: &[ReviewThread],
         open_threads: &[ReviewThread],
         comment_of_finding: &[Option<usize>],
+        unreviewed_files: &[String],
     ) -> (Registry, ReplySplit) {
         let also_by_comment = also_locations_by_comment(&outcome.findings);
         let split = split_replies(
@@ -843,6 +978,8 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             .iter()
             .map(|entry| (entry.finding.clone(), entry.reason))
             .collect();
+        let narrowed = !self.settings().focus.is_empty()
+            || self.settings().severity != crate::findings::Severity::Nitpick;
         let merged = registry.merge(&RoundFindings {
             head_sha: self.head_sha(),
             grounded: &outcome.findings,
@@ -850,6 +987,8 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             dropped: &dropped,
             threads: all_threads,
             retired: &split.retired,
+            unreviewed_files,
+            narrowed,
         });
         outcome.fixed_this_round = fixed_titles(&merged);
         (merged, split)
@@ -862,6 +1001,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         split: ReplySplit,
         open_threads: &[ReviewThread],
         event: ReviewEvent,
+        unreviewed_files: &[String],
     ) -> Result<(), DifftraceError> {
         self.post_verdict_comment(outcome, registry).await;
         let submission = ReviewSubmission {
@@ -872,14 +1012,19 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         };
         self.submit(submission).await?;
         self.post_re_raised_replies(split.replies).await;
-        self.resolve_previous_threads(open_threads, &split.matched)
+        self.resolve_previous_threads(open_threads, &split.matched, unreviewed_files)
             .await;
         outcome.posted = true;
         Ok(())
     }
 
-    async fn resolve_previous_threads(&self, open_threads: &[ReviewThread], matched: &[String]) {
-        let resolved = threads_to_resolve(open_threads, matched);
+    async fn resolve_previous_threads(
+        &self,
+        open_threads: &[ReviewThread],
+        matched: &[String],
+        unreviewed_files: &[String],
+    ) {
+        let resolved = threads_to_resolve(open_threads, matched, unreviewed_files);
         for id in &resolved {
             if let Err(err) = self.resolve_thread(id.clone()).await {
                 tracing::warn!(
@@ -904,7 +1049,14 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         if !self.settings().verify_findings || aggregated.findings.is_empty() {
             return Vec::new();
         }
-        let verdicts = match self.verify(&aggregated.findings, history).await {
+        let verdicts = match self
+            .verify(&aggregated.findings, history)
+            .instrument(tracing::debug_span!(
+                "verification",
+                findings = aggregated.findings.len()
+            ))
+            .await
+        {
             Ok(verdicts) => verdicts,
             Err(err) => {
                 tracing::warn!(
@@ -932,6 +1084,14 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         removed.dedup_by(|a, b| a.0 == b.0);
         let mut verified_out = Vec::new();
         for (index, (finding, reason)) in removed {
+            tracing::debug!(
+                target: "difftrace::review",
+                index,
+                file = %finding.file,
+                line = finding.line,
+                reason = %reason,
+                "verification dropped a finding"
+            );
             aggregated.findings.remove(index);
             verified_out.push((finding, reason));
         }
@@ -1050,17 +1210,18 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
     }
 
     async fn post_verdict_comment(&self, outcome: &ReviewOutcome, registry: &Registry) {
-        let body = match verdict_comment_body(outcome, registry) {
-            Ok(body) => body,
-            Err(message) => {
-                tracing::warn!(
-                    target: "difftrace::review",
-                    error = message,
-                    "could not render the verdict comment; posting the review without it"
-                );
-                return;
-            }
-        };
+        let body =
+            match verdict_comment_body(outcome, registry, self.settings().batch_attempts.max(1)) {
+                Ok(body) => body,
+                Err(message) => {
+                    tracing::warn!(
+                        target: "difftrace::review",
+                        error = message,
+                        "could not render the verdict comment; posting the review without it"
+                    );
+                    return;
+                }
+            };
         if let Err(err) = self.upsert_verdict_comment(body).await {
             tracing::warn!(
                 target: "difftrace::review",
@@ -1257,6 +1418,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 batch_files: 1,
                 verify_findings: false,
                 miss_hunt: false,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -1336,7 +1498,7 @@ diff --git a/src/beta.rs b/src/beta.rs
         };
         blocked.issues.push(open_registry_issue(Severity::Critical));
         assert_eq!(
-            round_event(&blocked, &[]),
+            round_event(&blocked, &[], false),
             ReviewEvent::ChangesRequested,
             "an unresolved blocker must never approve"
         );
@@ -1344,13 +1506,13 @@ diff --git a/src/beta.rs b/src/beta.rs
             round: 2,
             issues: vec![],
         };
-        assert_eq!(round_event(&clean, &[]), ReviewEvent::Approved);
+        assert_eq!(round_event(&clean, &[], false), ReviewEvent::Approved);
         let unreviewed_only = Registry {
             round: 2,
             issues: vec![],
         };
         assert_eq!(
-            round_event(&unreviewed_only, &["a.rs, b.rs".to_owned()]),
+            round_event(&unreviewed_only, &["a.rs, b.rs".to_owned()], false),
             ReviewEvent::Commented,
             "a neutral review never satisfies branch protection"
         );
@@ -1359,7 +1521,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             issues: vec![open_registry_issue(Severity::Nitpick)],
         };
         assert_eq!(
-            round_event(&nit_only, &[]),
+            round_event(&nit_only, &[], false),
             ReviewEvent::Approved,
             "non-blocking issues do not block"
         );
@@ -1514,8 +1676,36 @@ diff --git a/src/beta.rs b/src/beta.rs
                 original_line: Some(40),
             },
         ];
-        let slated = threads_to_resolve(&threads, &["T_KEEP".to_owned()]);
+        let slated = threads_to_resolve(&threads, &["T_KEEP".to_owned()], &[]);
         assert_eq!(slated, vec!["T_FIXED".to_owned(), "T_MOVED".to_owned()]);
+    }
+
+    #[test]
+    fn a_thread_on_an_unreviewed_file_is_never_slated_for_resolution() {
+        let threads = vec![
+            ReviewThread {
+                id: "T_REVIEWED".to_owned(),
+                comment_id: 1,
+                resolved: false,
+                path: "src/lib.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_UNREVIEWED".to_owned(),
+                comment_id: 2,
+                resolved: false,
+                path: "src/skipped.rs".to_owned(),
+                line: Some(5),
+                original_line: Some(5),
+            },
+        ];
+        let slated = threads_to_resolve(&threads, &[], &["src/skipped.rs".to_owned()]);
+        assert_eq!(
+            slated,
+            vec!["T_REVIEWED".to_owned()],
+            "a thread whose file went unreviewed stays open — not re-raised is not fixed"
+        );
     }
 
     #[test]
@@ -1987,6 +2177,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             findings: Vec::new(),
             comments: Vec::new(),
             dropped: Vec::new(),
+            below_floor: 0,
             pr: 42,
             head_sha: "9f3b2c1".to_owned(),
             posted: false,
@@ -2014,7 +2205,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 resolved_sha: None,
             }],
         };
-        let body = verdict_comment_body(&outcome, &registry)
+        let body = verdict_comment_body(&outcome, &registry, 10)
             .map_err(Box::<dyn std::error::Error>::from)?;
         assert!(body.starts_with("<!-- difftrace:verdict -->\n"));
         assert!(body.contains("<!-- difftrace:registry "));
@@ -2192,25 +2383,31 @@ diff --git a/src/beta.rs b/src/beta.rs
         );
         let standing = &outcome.standing_body;
         assert!(standing.starts_with("## Verdict"));
-        assert!(standing.contains("🔴 Not good to go — 3 blocking findings"));
+        assert!(standing.contains("🔴 Not good to go — 2 blocking findings"));
         assert!(standing.contains("`src/alpha.rs:2` — ⚠️ Title in src/alpha.rs (🟡)"));
         assert!(standing.contains("`src/beta.rs:11` — ⚠️ Title in src/beta.rs (🟡)"));
         assert!(
-            standing.contains("`src/beta.rs` (unanchored) — ⚠️ Second issue"),
-            "the registry lists unanchored issues too, marked as such"
+            !standing.contains("unanchored"),
+            "an out-of-hunk observation is not registry state; it is the round's \
+             suppression note"
         );
         assert!(standing.contains("## Summary\nTwo files reviewed."));
         assert!(standing.contains("- Retry can outlive shutdown."));
         assert!(standing.contains("## Tests\nCovered by integration tests."));
         assert!(!standing.contains("Fix all findings"));
         let round = &outcome.round_body;
-        assert!(round.starts_with("🤖 difftrace reviewed `headsha` — 3 findings this round"));
+        assert!(round.starts_with("🤖 difftrace reviewed `headsha` — 2 findings this round"));
         assert!(round.contains("## 🤖 Fix all findings"));
         assert!(round.contains("`src/alpha.rs:2` — ⚠️ Title in src/alpha.rs (🟡)"));
         assert!(round.contains("`src/beta.rs:11` — ⚠️ Title in src/beta.rs (🟡)"));
-        assert!(round.contains(
-            "- `src/beta.rs:999` — ⚠️ Second issue (🟡, line outside the changed hunks)"
-        ));
+        assert!(
+            round.contains("1 observation outside the changed lines was suppressed"),
+            "the out-of-hunk finding is counted, not listed: {round}"
+        );
+        assert!(
+            !round.contains("src/beta.rs:999"),
+            "a suppressed observation never rides the round body"
+        );
         assert!(round.contains("PR #42"));
         assert!(round.contains("commit headsha"));
         assert!(round.contains("<summary>Copy the fix-all prompt for coding agents</summary>"));
@@ -2350,8 +2547,9 @@ diff --git a/src/beta.rs b/src/beta.rs
             .ok_or("the verdict comment must be posted")?;
         assert!(
             verdict.contains(
-                "🔴 Not good to go — 2 blocking findings (all unresolved, blockers first):"
-            )
+                "🔴 Not good to go — 1 blocking finding (all unresolved, blockers first):"
+            ),
+            "the out-of-hunk twin no longer registers as a round issue"
         );
         assert!(verdict.contains("## Risks\n\n(none flagged)"));
         assert!(verdict.contains("One finding"));
@@ -2426,19 +2624,30 @@ diff --git a/src/beta.rs b/src/beta.rs
         ]);
         let gateway = Arc::new(FakeGateway::empty());
         let runner = make_runner(Arc::new(client), Arc::clone(&gateway))?;
-        runner.review_all(false).await?;
+        let outcome = runner.review_all(false).await?;
         let submission = gateway.submitted().ok_or("expected a submission")?;
         assert_eq!(
             submission.event,
-            ReviewEvent::ChangesRequested,
-            "the event and the standing verdict share one blocking source: the merged registry"
+            ReviewEvent::Commented,
+            "an observation outside the diff is not a regression of this change — it withholds \
+             approval instead of requesting changes"
+        );
+        assert!(
+            outcome
+                .round_body
+                .contains("1 observation outside the changed lines was suppressed"),
+            "the suppression is counted, never silent: {}",
+            outcome.round_body
         );
         let verdict = gateway
             .posted_comments()
             .first()
             .map(|(_, body)| body.clone())
             .ok_or("the verdict comment must be posted")?;
-        assert!(verdict.contains("🔴 Not good to go — 1 blocking finding"));
+        assert!(
+            verdict.contains("Approval withheld"),
+            "the standing verdict never says good-to-go over a suppressed observation"
+        );
         Ok(())
     }
 
@@ -2660,6 +2869,7 @@ mod registry_flow_tests {
             overview(),
             crate::config::ReviewSettings {
                 verify_findings: false,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -2787,6 +2997,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 batch_files: 1,
                 verify_findings: false,
                 miss_hunt: false,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -2814,6 +3025,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 max_parallel_batches: 3,
                 verify_findings: false,
                 miss_hunt: false,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -2833,6 +3045,42 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             "each parallel lane records its own finding"
         );
         assert!(unreviewed.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_flaky_batch_is_retried_until_it_reviews() -> Result<(), Box<dyn std::error::Error>> {
+        let inner = MockApiClient::new("review-model").with_responses(vec![
+            tool_call("c1", json!({ "findings": [] })),
+            text_response("Done."),
+        ]);
+        let client = crate::review::runner::test_support::FlakyClient::new(inner, 2);
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            Arc::new(FakeGateway::empty()),
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_attempts: 5,
+                retry_backoff_base_secs: 0,
+                verify_findings: false,
+                miss_hunt: false,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let registry = Registry {
+            round: 0,
+            issues: Vec::new(),
+        };
+        let (findings, unreviewed) = runner
+            .review_batches(&[vec!["src/lib.rs".to_owned()]], &registry, false)
+            .await;
+        assert!(
+            unreviewed.is_empty(),
+            "a batch that fails twice then succeeds must still review"
+        );
+        assert!(findings.findings.is_empty());
         Ok(())
     }
 
@@ -2895,6 +3143,14 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
         assert!(
             updated.contains("✅ Issue history"),
             "the fixed issue lands in the history section"
+        );
+        assert!(
+            updated.contains("<details>") && updated.contains("</details>"),
+            "the history section renders collapsed"
+        );
+        assert!(
+            updated.contains("Fixed and resolved across 1 issue(s)"),
+            "the collapsed summary names the count"
         );
         assert!(
             updated.contains(
@@ -3067,6 +3323,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             crate::config::ReviewSettings {
                 batch_files: 1,
                 verify_findings: true,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3154,6 +3411,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             crate::config::ReviewSettings {
                 batch_files: 1,
                 verify_findings: true,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3230,6 +3488,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             crate::config::ReviewSettings {
                 batch_files: 1,
                 verify_findings: true,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3264,6 +3523,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 batch_files: 1,
                 verify_findings: false,
                 miss_hunt: true,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3281,6 +3541,57 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 .round_body
                 .contains("1 finding this round; fix prompts below."),
             "the hunt's finding rides the normal round body"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_blocking_first_pass_still_hunts_when_hunt_always_is_set()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway: Arc<dyn crate::github::PrGateway> = Arc::new(FakeGateway::empty());
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call("c1", json!({ "findings": [finding_json(2)] })),
+            text_response("Found one."),
+            tool_call(
+                "h1",
+                json!({ "findings": [{
+                    "file": "src/lib.rs",
+                    "line": 3,
+                    "severity": "warning",
+                    "complexity": 2,
+                    "title": "Hunt catch",
+                    "body": "Would only appear if the hunt ran."
+                }] }),
+            ),
+            text_response(&summary_json()),
+        ]);
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_files: 1,
+                verify_findings: false,
+                miss_hunt: true,
+                hunt_always: true,
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(false).await?;
+        assert!(
+            outcome
+                .findings
+                .iter()
+                .any(|finding| finding.title == "Hunt catch"),
+            "hunt-always runs the second pass even over blockers: {:?}",
+            outcome
+                .findings
+                .iter()
+                .map(|f| f.title.clone())
+                .collect::<Vec<_>>()
         );
         Ok(())
     }
@@ -3315,6 +3626,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 batch_files: 1,
                 verify_findings: false,
                 miss_hunt: true,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3366,6 +3678,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 batch_files: 1,
                 verify_findings: false,
                 miss_hunt: true,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3520,6 +3833,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 batch_files: 1,
                 verify_findings: false,
                 miss_hunt: true,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3536,6 +3850,13 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             vec!["src/force_quit.rs".to_owned()]
         );
         assert!(outcome.standing_body.contains("Approval withheld"));
+        assert!(
+            outcome
+                .round_body
+                .contains("PARTIAL REVIEW — 1 file(s) could not be reviewed"),
+            "the round body leads with the coverage gap: {}",
+            outcome.round_body
+        );
         assert!(
             !outcome.standing_body.contains("Good to go"),
             "an incomplete round never claims good-to-go"
@@ -3555,22 +3876,27 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
         let gateway = Arc::new(FakeGateway::empty());
         let gateway_handle = std::sync::Arc::clone(&gateway);
         let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
-        // Text-only turns at a 10-token budget read as truncated thinks:
-        // the silent-approval incident, pinned end to end.
+        // Text-only turns at a 10-token budget read as truncated: the
+        // first batch fails once and never retries; the second stays
+        // clean, so the round is partial and must withhold instead of
+        // approving.
         let inner = MockApiClient::new("review-model").with_responses(vec![
             text_response("…"),
-            text_response("…"),
+            tool_call("c1", json!({ "findings": [] })),
             text_response(&summary_json()),
         ]);
         let runner = ReviewRunner::new(
             Arc::new(inner),
             gateway_for_runner,
-            Arc::new(diff_index()?),
+            Arc::new(two_file_index()?),
             overview(),
             crate::config::ReviewSettings {
                 batch_files: 1,
+                max_turns: 1,
                 verify_findings: false,
-                miss_hunt: true,
+                miss_hunt: false,
+                batch_attempts: 2,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3583,15 +3909,147 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             ReviewEvent::Commented,
             "a round that could not read its files never approves"
         );
-        assert_eq!(outcome.unreviewed_batches, vec!["src/lib.rs".to_owned()]);
+        assert_eq!(
+            outcome.unreviewed_batches,
+            vec!["src/force_quit.rs".to_owned()]
+        );
         assert!(outcome.standing_body.contains("Approval withheld"));
         assert!(outcome.findings.is_empty());
         Ok(())
     }
 
     #[tokio::test]
+    async fn an_empty_range_errors_instead_of_rendering_a_clean_round()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> =
+            Arc::new(FakeGateway::empty().and_diff(""));
+        let runner = ReviewRunner::new(
+            Arc::new(MockApiClient::new("review-model")),
+            gateway_for_runner,
+            Arc::new(crate::diff::DiffIndex::parse("")?),
+            overview(),
+            crate::config::ReviewSettings {
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let err = runner
+            .review_all(true)
+            .await
+            .err()
+            .ok_or("an empty range must not render a round")?;
+        assert!(
+            err.to_string().contains("the reviewed range is empty"),
+            "the failure names the vacuous range: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_deep_round_lists_out_of_hunk_findings_as_existing_issues()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = Arc::new(FakeGateway::empty());
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call(
+                "c1",
+                json!({ "findings": [
+                    finding_json(2),
+                    json!({
+                        "file": "src/lib.rs",
+                        "line": 900,
+                        "severity": "warning",
+                        "complexity": 2,
+                        "title": "Ancient debt",
+                        "body": "Pre-dates this branch."
+                    })
+                ] }),
+            ),
+            text_response("Done."),
+            text_response(&summary_json()),
+        ]);
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway_for_runner,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                scope: crate::config::ReviewMode::Deep,
+                verify_findings: false,
+                miss_hunt: false,
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(true).await?;
+        assert!(
+            outcome
+                .round_body
+                .contains("Existing issues — not from this change"),
+            "the out-of-hunk finding is documented, not suppressed: {}",
+            outcome.round_body
+        );
+        assert!(outcome.round_body.contains("`src/lib.rs:900`"));
+        assert!(
+            outcome
+                .round_body
+                .contains("Fix prompt for these pre-existing issues"),
+            "existing issues carry their own fix prompt"
+        );
+        assert_eq!(
+            outcome.findings.len(),
+            1,
+            "only the in-hunk finding is round state"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_full_round_reviews_every_listed_file_on_any_line()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = Arc::new(
+            FakeGateway::empty()
+                .and_diff("diff --git a/src/lib.rs b/src/lib.rs")
+                .and_file_list(vec!["src/lib.rs".to_owned(), "src/other.rs".to_owned()]),
+        );
+        let client = MockApiClient::new("review-model").with_responses(vec![
+            tool_call("c1", json!({ "findings": [finding_json(900)] })),
+            text_response("Done."),
+            text_response(&summary_json()),
+        ]);
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway_for_runner,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                scope: crate::config::ReviewMode::Full,
+                batch_files: 1,
+                verify_findings: false,
+                miss_hunt: true,
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(true).await?;
+        assert_eq!(
+            outcome.findings.first().map(|finding| finding.line),
+            Some(900),
+            "a full audit anchors lines the diff never touched"
+        );
+        assert!(
+            outcome.unreviewed_batches.is_empty(),
+            "the single batch covers both listed files"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn the_hunt_skips_batches_the_first_pass_could_not_complete()
     -> Result<(), Box<dyn std::error::Error>> {
+        let (logs, _guard) = crate::review::logging::test_support::install();
         let gateway = Arc::new(FakeGateway::empty());
         let gateway_handle = std::sync::Arc::clone(&gateway);
         let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
@@ -3604,7 +4062,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             None,
         );
         let mut aggregated = Findings::default();
-        let hunted = runner
+        runner
             .hunt_misses(
                 &[vec!["src/lib.rs".to_owned()]],
                 &Registry {
@@ -3612,12 +4070,49 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                     issues: Vec::new(),
                 },
                 &mut aggregated,
-                &["src/lib.rs".to_owned()],
+                &[vec!["src/lib.rs".to_owned()]],
             )
             .await;
         assert!(
-            hunted.is_empty(),
-            "a batch that already failed twice is not hunted a third time"
+            !logs.text().contains("hunting for misses"),
+            "a batch the first pass could not complete is not hunted, and the hunt never \
+             announces itself over nothing"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_round_where_every_batch_fails_posts_nothing_and_resolves_no_threads()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let runner = ReviewRunner::new(
+            Arc::new(StreamFailingClient),
+            Arc::clone(&gateway) as Arc<dyn crate::github::PrGateway>,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_attempts: 1,
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let err = runner
+            .review_all(false)
+            .await
+            .err()
+            .ok_or("a fully unreviewed round must fail instead of posting")?;
+        assert!(
+            err.to_string().contains("every batch went unreviewed"),
+            "the failure names the cause: {err}"
+        );
+        assert!(
+            gateway.submitted().is_none() && gateway.posted_comments().is_empty(),
+            "no review and no standing comment were posted"
+        );
+        assert!(
+            gateway.resolved_threads().is_empty(),
+            "previous threads must not be resolved by a round that reviewed nothing"
         );
         Ok(())
     }
@@ -3637,6 +4132,8 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 batch_files: 1,
                 verify_findings: false,
                 miss_hunt: false,
+                batch_attempts: 1,
+                retry_backoff_base_secs: 0,
                 ..crate::config::ReviewSettings::default()
             },
             None,
@@ -3652,11 +4149,400 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
             )
             .await;
         assert!(findings.findings.is_empty());
-        assert_eq!(unreviewed, vec!["src/lib.rs".to_owned()]);
-        let section = unreviewed_note(&unreviewed);
+        assert_eq!(unreviewed, vec![vec!["src/lib.rs".to_owned()]]);
+        let joined: Vec<String> = unreviewed.iter().map(|batch| batch.join(", ")).collect();
+        let section = unreviewed_note(&joined, 1);
         assert!(section.contains("⚠️ Unreviewed files"));
         assert!(section.contains("`src/lib.rs`"));
-        assert!(section.contains("the reviewer run failed twice"));
+        assert!(section.contains("the reviewer run failed after all 1 attempt"));
+        let plural = unreviewed_note(&joined, 3);
+        assert!(plural.contains("the reviewer run failed after all 3 attempts"));
+        Ok(())
+    }
+
+    struct SelectiveFailingClient {
+        inner: MockApiClient,
+        markers: Vec<String>,
+    }
+
+    impl SelectiveFailingClient {
+        fn new(inner: MockApiClient, markers: &[&str]) -> Self {
+            Self {
+                inner,
+                markers: markers.iter().map(|marker| (*marker).to_owned()).collect(),
+            }
+        }
+
+        fn request_carries_a_marker(&self, request: &loopctl::api::StreamRequest) -> bool {
+            let body = serde_json::to_string(&request.messages).unwrap_or_default();
+            self.markers.iter().any(|marker| body.contains(marker))
+        }
+    }
+
+    impl loopctl::api::ApiClient for SelectiveFailingClient {
+        fn model(&self) -> String {
+            self.inner.model()
+        }
+
+        fn stream_messages(
+            &self,
+            request: &loopctl::api::StreamRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<loopctl::stream::StreamEvent, loopctl::api::error::ApiError>,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            if self.request_carries_a_marker(request) {
+                return Box::pin(futures::stream::once(async move {
+                    Err(loopctl::api::error::ApiError::api(
+                        "stream reset mid-flight",
+                    ))
+                }));
+            }
+            self.inner.stream_messages(request)
+        }
+
+        fn stream_messages_with_options(
+            &self,
+            request: &loopctl::api::StreamRequest,
+            _options: loopctl::structured::RequestOptions,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<loopctl::stream::StreamEvent, loopctl::api::error::ApiError>,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            self.stream_messages(request)
+        }
+
+        fn create_message(
+            &self,
+            request: &loopctl::api::StreamRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            loopctl::api::NonStreamingResponse,
+                            loopctl::api::error::ApiError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            if self.request_carries_a_marker(request) {
+                return Box::pin(async move {
+                    Err(loopctl::api::error::ApiError::api(
+                        "network error during the request",
+                    ))
+                });
+            }
+            self.inner.create_message(request)
+        }
+
+        fn create_message_with_options(
+            &self,
+            request: &loopctl::api::StreamRequest,
+            options: loopctl::structured::RequestOptions,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            loopctl::api::NonStreamingResponse,
+                            loopctl::api::error::ApiError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            if self.request_carries_a_marker(request) {
+                return Box::pin(async move {
+                    Err(loopctl::api::error::ApiError::api(
+                        "network error during the request",
+                    ))
+                });
+            }
+            self.inner.create_message_with_options(request, options)
+        }
+    }
+
+    fn diff_index_two_files() -> Result<crate::diff::DiffIndex, Box<dyn std::error::Error>> {
+        let diff = "\
+diff --git a/src/alpha.rs b/src/alpha.rs
+--- a/src/alpha.rs
++++ b/src/alpha.rs
+@@ -1,3 +1,3 @@
+ ctx
+-old
++new
+ tail
+diff --git a/src/beta.rs b/src/beta.rs
+--- a/src/beta.rs
++++ b/src/beta.rs
+@@ -10,3 +10,3 @@
+ keep
+-removed
++added
+ done
+";
+        Ok(crate::diff::DiffIndex::parse(diff)?)
+    }
+
+    #[tokio::test]
+    async fn a_hunt_failure_on_a_reviewed_batch_stays_partial()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (logs, _guard) = crate::review::logging::test_support::install();
+        let gateway = Arc::new(FakeGateway::empty());
+        let client = SelectiveFailingClient::new(
+            MockApiClient::new("review-model").with_responses(vec![
+                tool_call("c1", json!({ "findings": [] })),
+                text_response("First pass is clean."),
+                text_response(&summary_json()),
+            ]),
+            &["src/beta.rs", "Argue against that"],
+        );
+        let gateway_handle = std::sync::Arc::clone(&gateway);
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway_for_runner,
+            Arc::new(diff_index_two_files()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_files: 1,
+                verify_findings: false,
+                miss_hunt: true,
+                batch_attempts: 1,
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(false).await?;
+        assert_eq!(
+            outcome.unreviewed_batches,
+            vec!["src/beta.rs".to_owned()],
+            "only the first-pass failure is unreviewed; a hunt failure on a reviewed \
+             batch never joins the unreviewed set"
+        );
+        assert!(
+            outcome
+                .round_body
+                .contains("PARTIAL REVIEW — 1 file(s) could not be reviewed"),
+            "the round stays partial instead of erroring as fully unreviewed: {}",
+            outcome.round_body
+        );
+        assert!(
+            logs.text().contains("the first-pass results stand"),
+            "the hunt provably failed on the reviewed batch and only warned: {}",
+            logs.text()
+        );
+        Ok(())
+    }
+
+    fn diff_index_three_files() -> Result<crate::diff::DiffIndex, Box<dyn std::error::Error>> {
+        let diff = "\
+diff --git a/src/alpha.rs b/src/alpha.rs
+--- a/src/alpha.rs
++++ b/src/alpha.rs
+@@ -1,3 +1,3 @@
+ ctx
+-old
++new
+ tail
+diff --git a/src/beta.rs b/src/beta.rs
+--- a/src/beta.rs
++++ b/src/beta.rs
+@@ -10,3 +10,3 @@
+ keep
+-removed
++added
+ done
+diff --git a/src/gamma.rs b/src/gamma.rs
+--- a/src/gamma.rs
++++ b/src/gamma.rs
+@@ -1,3 +1,3 @@
+ ctx
+-old
++new
+ tail
+";
+        Ok(crate::diff::DiffIndex::parse(diff)?)
+    }
+
+    #[tokio::test]
+    async fn the_partial_banner_counts_files_not_batches() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let gateway = Arc::new(FakeGateway::empty());
+        let client = SelectiveFailingClient::new(
+            MockApiClient::new("review-model").with_responses(vec![
+                tool_call("c1", json!({ "findings": [] })),
+                text_response("Second batch done."),
+                text_response(&summary_json()),
+            ]),
+            &["src/alpha.rs"],
+        );
+        let gateway_handle = std::sync::Arc::clone(&gateway);
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway_for_runner,
+            Arc::new(diff_index_three_files()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_files: 2,
+                verify_findings: false,
+                miss_hunt: false,
+                batch_attempts: 1,
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        );
+        let outcome = runner.review_all(true).await?;
+        assert_eq!(
+            outcome.unreviewed_batches,
+            vec!["src/alpha.rs, src/beta.rs".to_owned()],
+            "one failed batch of two files"
+        );
+        assert!(
+            outcome
+                .round_body
+                .contains("PARTIAL REVIEW — 2 file(s) could not be reviewed"),
+            "the banner counts files, not batches: {}",
+            outcome.round_body
+        );
+        assert!(
+            outcome
+                .round_body
+                .contains("`src/alpha.rs, src/beta.rs` — the reviewer run failed"),
+            "the note still names every unreviewed file"
+        );
+        Ok(())
+    }
+
+    struct CountingClient {
+        inner: MockApiClient,
+        streams: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl loopctl::api::ApiClient for CountingClient {
+        fn model(&self) -> String {
+            self.inner.model()
+        }
+
+        fn stream_messages(
+            &self,
+            request: &loopctl::api::StreamRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<loopctl::stream::StreamEvent, loopctl::api::error::ApiError>,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            let _counted = self
+                .streams
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.stream_messages(request)
+        }
+
+        fn stream_messages_with_options(
+            &self,
+            request: &loopctl::api::StreamRequest,
+            _options: loopctl::structured::RequestOptions,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<loopctl::stream::StreamEvent, loopctl::api::error::ApiError>,
+                    > + Send
+                    + 'static,
+            >,
+        > {
+            self.stream_messages(request)
+        }
+
+        fn create_message(
+            &self,
+            request: &loopctl::api::StreamRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            loopctl::api::NonStreamingResponse,
+                            loopctl::api::error::ApiError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.inner.create_message(request)
+        }
+
+        fn create_message_with_options(
+            &self,
+            request: &loopctl::api::StreamRequest,
+            options: loopctl::structured::RequestOptions,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            loopctl::api::NonStreamingResponse,
+                            loopctl::api::error::ApiError,
+                        >,
+                    > + Send
+                    + '_,
+            >,
+        > {
+            self.inner.create_message_with_options(request, options)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_truncated_batch_is_not_retried() -> Result<(), Box<dyn std::error::Error>> {
+        let gateway = Arc::new(FakeGateway::empty());
+        let streams = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let client = CountingClient {
+            inner: MockApiClient::new("review-model").with_responses(vec![text_response("…")]),
+            streams: std::sync::Arc::clone(&streams),
+        };
+        let gateway_handle = std::sync::Arc::clone(&gateway);
+        let gateway_for_runner: Arc<dyn crate::github::PrGateway> = gateway_handle;
+        let runner = ReviewRunner::new(
+            Arc::new(client),
+            gateway_for_runner,
+            Arc::new(diff_index()?),
+            overview(),
+            crate::config::ReviewSettings {
+                batch_attempts: 5,
+                retry_backoff_base_secs: 0,
+                ..crate::config::ReviewSettings::default()
+            },
+            None,
+        )
+        .with_output_budget(Some(10));
+        let (findings, unreviewed) = runner
+            .review_batches(
+                &[vec!["src/lib.rs".to_owned()]],
+                &Registry {
+                    round: 1,
+                    issues: Vec::new(),
+                },
+                false,
+            )
+            .await;
+        assert_eq!(
+            streams.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the truncation error is terminal: one attempt, no backoff ladder"
+        );
+        assert!(findings.findings.is_empty());
+        assert_eq!(unreviewed.len(), 1, "the batch lands unreviewed");
         Ok(())
     }
 
