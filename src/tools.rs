@@ -72,6 +72,7 @@ impl ReviewScope {
         max_findings_per_file: usize,
         mode: crate::config::ReviewMode,
         severity: crate::findings::Severity,
+        focus: Vec<crate::config::IssueKind>,
     ) -> ToolRegistry {
         let scope = Arc::new(Self {
             gateway: Arc::clone(&self.gateway),
@@ -89,6 +90,7 @@ impl ReviewScope {
             max_findings_per_file,
             mode,
             severity,
+            focus,
         ));
         registry
     }
@@ -126,6 +128,7 @@ mod tests {
             5,
             crate::config::ReviewMode::Diff,
             crate::findings::Severity::Nitpick,
+            Vec::new(),
         );
         let names: Vec<&str> = registry
             .all_tools()

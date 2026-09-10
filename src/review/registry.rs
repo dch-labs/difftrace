@@ -354,6 +354,7 @@ mod tests {
             file: file.to_owned(),
             line,
             severity,
+            kind: crate::config::IssueKind::Correctness,
             complexity: 3,
             title: "Lock dropped early".to_owned(),
             body: "The guard is dropped before the read completes.".to_owned(),
@@ -416,6 +417,7 @@ mod tests {
         let stray = Finding {
             file: "src/old.rs".to_owned(),
             line: 400,
+            kind: crate::config::IssueKind::Correctness,
             severity: Severity::Warning,
             complexity: 2,
             title: "Ancient debt".to_owned(),
@@ -756,6 +758,7 @@ mod tests {
         let dropped_finding = Finding {
             file: "src/gone.rs".to_owned(),
             line: 999,
+            kind: crate::config::IssueKind::Correctness,
             severity: Severity::Suggestion,
             complexity: 2,
             title: "Wide net".to_owned(),
@@ -881,6 +884,7 @@ mod tests {
         let dropped_finding = Finding {
             file: "src/alpha.rs".to_owned(),
             line: 999,
+            kind: crate::config::IssueKind::Correctness,
             severity: Severity::Warning,
             complexity: 3,
             title: "Lock dropped early".to_owned(),

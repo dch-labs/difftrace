@@ -40,6 +40,7 @@ pub struct FileDiff {
     pub hunks: Vec<Hunk>,
     pub binary: bool,
     pub anchor_lines: Vec<usize>,
+    pub added_lines: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -110,6 +111,15 @@ impl DiffIndex {
     pub fn clamp_to_hunk(&self, file: &str, line: usize) -> Option<usize> {
         let file = self.file(file)?;
         match file.anchor_lines.binary_search(&line) {
+            Ok(_) => Some(line),
+            Err(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn clamp_to_added(&self, file: &str, line: usize) -> Option<usize> {
+        let file = self.file(file)?;
+        match file.added_lines.binary_search(&line) {
             Ok(_) => Some(line),
             Err(_) => None,
         }

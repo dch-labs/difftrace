@@ -13,8 +13,8 @@ use crate::review::registry::Registry;
 const RULES: &str = "\
 You are reviewing one batch of the pull request's changed files.
 Rules:
-- Cite only lines inside the changed hunks of each file; a finding outside
-  them will be dropped.
+- Cite only lines this change itself added; a finding on an unchanged or
+  removed line is dropped, however close it sits to the change.
 - Severity: nitpick, suggestion, warning, critical — reserve critical for
   defects that will bite in production.
 - Documentation findings are suggestion-grade by default: an imprecise,
@@ -199,13 +199,12 @@ impl ReviewRubric {
         let line = match scope {
             crate::config::ReviewMode::Diff => "",
             crate::config::ReviewMode::Deep => {
-                "This round supersedes the changed-hunks-only rule: review the whole \
-                 content of every changed file. Issues on lines this change never \
-                 touched are welcome — report them like any other; they are filed \
-                 separately as pre-existing issues, not as regressions."
+                "This round relaxes the citation rule to the changed hunks as a \
+                 whole: context and removed lines inside changed hunks may carry \
+                 findings. Lines outside every hunk stay out of scope."
             }
             crate::config::ReviewMode::Full => {
-                "This round supersedes the changed-hunks-only rule: this is a \
+                "This round suspends the citation rule entirely: this is a \
                  full-repository audit. Every listed file is in scope on every line, \
                  and every finding is a pre-existing issue by definition — the branch \
                  under review is not what introduced it."
@@ -312,8 +311,8 @@ mod tests {
             })
             .ok_or("expected rubric text")?;
         assert!(
-            text.contains("supersedes the changed-hunks-only rule"),
-            "deep scope invites whole-file findings: {text}"
+            text.contains("relaxes the citation rule to the changed hunks as a whole"),
+            "deep scope widens anchoring to whole hunks: {text}"
         );
         assert!(
             text.contains("Hunt only for these kinds of issues"),

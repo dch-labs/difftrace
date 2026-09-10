@@ -43,6 +43,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was clean when it was not (pinned by
   `a_blocking_first_pass_still_hunts_when_hunt_always_is_set` and the
   hunt-rubric wording assertions).
+- A local findings ledger makes repeated rounds converge (and suppressed
+  re-reports count as presence): findings the model re-reported at lines
+  the diff no longer marks as added — dropped by strict anchoring —
+  reset the ledger's miss counter instead of accruing toward a false
+  `fixed`, so scope suppression and line drift can never retire an
+  issue that is still being reported (pinned by
+  `a_suppressed_refind_on_an_unchanged_line_prevents_retirement`). every local
+  review merges its findings into
+  `~/.difftrace/reviews/<checkout>.ledger.json` with fuzzy identity
+  (same file, line within ±5, majority token overlap), so a rephrased
+  re-find at a shifted line is the same issue, not a new one. The round
+  now reports `new / fixed this round / standing (fixed all-time)` —
+  fixed means the issue stayed unfound across two consecutive covered
+  rounds — one absence is not evidence at a third-per-pass recall;
+  partial rounds never retire; a fixed issue that reappears reopens
+  instead of duplicating (pinned by the ledger merge tests).
+  Per-run recall is roughly a third, so without the ledger each round
+  re-samples a different subset and the count fluctuates instead of
+  shrinking; with it, standing decreases geometrically per fix wave.
+- Findings now carry a structured `kind` (security, correctness,
+  concurrency, performance, tests, docs) on the wire, and two contracts
+  are enforced mechanically instead of by prompt: `kind: docs` findings
+  are capped at suggestion severity no matter what the model stamped —
+  documentation can never block a round — and `--focus` now drops
+  out-of-focus findings in grounding with a counted note instead of
+  only steering the rubric (pinned by the grounding tests).
+- Diff scope anchors findings to added lines only: a finding citing an
+  unchanged context line inside a hunk (or a removed line) is now
+  dropped like an out-of-hunk one and counted in the suppression note,
+  instead of riding through as a round finding — "review the diff"
+  now means the lines the diff actually added, not the ±3 context
+  around them. Deep scope keeps whole-hunk anchoring and full scope
+  still anchors anywhere (pinned by
+  `diff_scope_drops_findings_on_unchanged_context_lines` and
+  `deep_scope_still_admits_hunk_context_lines`).
 - The first self-review round (difftrace reviewing its own `--scope`
   work) caught three defects, all fixed: the local run log recorded the
   config-file scope instead of the `--scope` flag actually executed;

@@ -53,6 +53,7 @@ struct FileBuilder {
     hunks: Vec<Hunk>,
     active: Option<ActiveHunk>,
     anchors: Vec<usize>,
+    added_anchors: Vec<usize>,
 }
 
 struct ActiveHunk {
@@ -77,6 +78,7 @@ impl FileBuilder {
             hunks: Vec::new(),
             active: None,
             anchors: Vec::new(),
+            added_anchors: Vec::new(),
         })
     }
 
@@ -142,6 +144,9 @@ impl FileBuilder {
         };
         if let Some(anchor) = line.new_line() {
             self.anchors.push(anchor);
+            if matches!(line, DiffLine::Added { .. }) {
+                self.added_anchors.push(anchor);
+            }
         }
         active.hunk.lines.push(line);
         Ok(())
@@ -184,6 +189,8 @@ impl FileBuilder {
         self.seal_hunk();
         let mut anchors = self.anchors;
         anchors.sort_unstable();
+        let mut added = self.added_anchors;
+        added.sort_unstable();
         let old_path = self.dash_old.clone();
         let new_path = self
             .dash_new
@@ -198,6 +205,7 @@ impl FileBuilder {
             hunks: self.hunks,
             binary: self.binary,
             anchor_lines: anchors,
+            added_lines: added,
         })
     }
 }

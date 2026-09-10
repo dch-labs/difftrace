@@ -20,7 +20,7 @@ pub enum Command {
 #[command(
     name = "difftrace",
     version,
-    about = "AI pull-request reviewer for GitHub"
+    about = "LLM pull-request reviewer for GitHub"
 )]
 pub struct Cli {
     #[command(subcommand)]

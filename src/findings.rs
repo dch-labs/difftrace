@@ -92,6 +92,8 @@ pub struct Finding {
     pub file: String,
     pub line: usize,
     pub severity: Severity,
+    #[serde(default)]
+    pub kind: crate::config::IssueKind,
     pub complexity: u8,
     pub title: String,
     pub body: String,
@@ -139,6 +141,11 @@ pub fn findings_array_schema() -> serde_json::Value {
                     "type": "string",
                     "enum": ["nitpick", "suggestion", "warning", "critical"]
                 },
+                "kind": {
+                    "type": "string",
+                    "enum": ["security", "correctness", "concurrency", "performance", "tests", "docs"],
+                    "description": "The issue category: docs findings are capped at suggestion severity."
+                },
                 "complexity": {
                     "type": "integer",
                     "minimum": 1,
@@ -148,7 +155,7 @@ pub fn findings_array_schema() -> serde_json::Value {
                 "title": { "type": "string" },
                 "body": { "type": "string" }
             },
-            "required": ["file", "line", "severity", "complexity", "title", "body"],
+            "required": ["file", "line", "severity", "kind", "complexity", "title", "body"],
             "additionalProperties": false
         }
     })
@@ -411,6 +418,7 @@ mod tests {
         let finding = |complexity: u8| Finding {
             file: "src/lib.rs".to_owned(),
             line: 2,
+            kind: crate::config::IssueKind::Correctness,
             severity: Severity::Warning,
             complexity,
             title: "T".to_owned(),

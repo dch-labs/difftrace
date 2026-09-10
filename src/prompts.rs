@@ -379,6 +379,7 @@ mod tests {
         Finding {
             file: file.to_owned(),
             line,
+            kind: crate::config::IssueKind::Correctness,
             severity: Severity::Warning,
             complexity: 3,
             title: "Lock dropped early".to_owned(),

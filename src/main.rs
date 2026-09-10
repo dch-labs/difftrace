@@ -75,6 +75,46 @@ fn finish(result: Result<ExitCode, DifftraceError>) -> ExitCode {
     }
 }
 
+fn update_local_ledger(
+    outcome: &difftrace::review::ReviewOutcome,
+    head_sha: &str,
+) -> Option<difftrace::review::ledger::LedgerReport> {
+    let reviews = local_reviews_dir()?;
+    let path = reviews.join(format!("{}.ledger.json", checkout_label()));
+    let mut ledger = difftrace::review::ledger::Ledger::load(&path);
+    let may_retire = outcome.unreviewed_batches.is_empty();
+    let rereported: Vec<difftrace::findings::Finding> = outcome
+        .dropped
+        .iter()
+        .filter(|entry| {
+            entry.reason == difftrace::tools::submit::OUT_OF_HUNK
+                || entry.reason == difftrace::tools::submit::UNCHANGED_LINE
+        })
+        .map(|entry| entry.finding.clone())
+        .collect();
+    let report = ledger.merge(&outcome.findings, &rereported, head_sha, may_retire);
+    if let Err(err) = ledger.save(&path) {
+        eprintln!("difftrace: cannot write {}: {err}", path.display());
+        return None;
+    }
+    Some(report)
+}
+
+fn local_reviews_dir() -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let dir = home.join(".difftrace").join("reviews");
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(err) => {
+            eprintln!(
+                "difftrace: cannot create {}: {err}; no ledger",
+                dir.display()
+            );
+            None
+        }
+    }
+}
+
 fn apply_review_overrides(
     args: &difftrace::cli::ReviewArgs,
     settings: &mut difftrace::config::ReviewSettings,
@@ -185,9 +225,16 @@ async fn run_local(
             "--pr does not apply with --base: the local review has no pull request".to_owned(),
         ));
     }
+    if args.repo.is_some() {
+        return Err(DifftraceError::Cli(
+            "--repo does not apply with --base: the local review runs in the current \
+             checkout"
+                .to_owned(),
+        ));
+    }
     let difftrace::session::LocalSession { mut config, client } =
         difftrace::session::open_local_session(args.config.as_deref())?;
-    let gateway = difftrace::local::LocalGateway::new(std::path::Path::new("."), base)?;
+    let gateway = difftrace::local::LocalGateway::new(&difftrace::local::repo_root()?, base)?;
     let overview = gateway.pr_overview(0).await?;
     let raw_diff = gateway.pr_diff(0).await?;
     let index = std::sync::Arc::new(DiffIndex::parse(&raw_diff)?);
@@ -247,6 +294,11 @@ async fn run_local(
             return Err(err);
         }
     };
+    let ledger_report = update_local_ledger(&outcome, &outcome.head_sha);
+    if let Some(report) = ledger_report {
+        println!("{}", report.line());
+        append_run_log(log.as_deref(), &format!("\n{}\n", report.line()));
+    }
     report_outcome(true, "local", &outcome);
     append_run_log(
         log.as_deref(),
@@ -263,13 +315,28 @@ async fn run_local(
 }
 
 fn checkout_label() -> String {
-    std::env::current_dir()
+    let raw = std::env::current_dir()
         .ok()
         .and_then(|dir| {
             dir.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| "checkout".to_owned())
+        .unwrap_or_else(|| "checkout".to_owned());
+    let safe: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if safe.is_empty() {
+        "checkout".to_owned()
+    } else {
+        safe
+    }
 }
 
 fn local_run_log(overview: &difftrace::github::PrOverview) -> Option<std::path::PathBuf> {

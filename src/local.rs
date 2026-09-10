@@ -50,6 +50,21 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String, DifftraceError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+pub fn repo_root() -> Result<PathBuf, DifftraceError> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|err| DifftraceError::Cli(format!("cannot run git: {err}")))?;
+    if !output.status.success() {
+        return Err(DifftraceError::Cli(
+            "not inside a git work tree: --base reviews the current checkout".to_owned(),
+        ));
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+    ))
+}
+
 impl LocalGateway {
     pub fn new(dir: &Path, base: &str) -> Result<Self, DifftraceError> {
         let head = git_in(dir, &["rev-parse", "--verify", "HEAD"])?

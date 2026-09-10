@@ -55,6 +55,7 @@ pub struct ReviewOutcome {
     pub comments: Vec<CommentPosition>,
     pub dropped: Vec<DroppedFinding>,
     pub below_floor: usize,
+    pub out_of_focus: usize,
     pub verified_out: Vec<(Finding, String)>,
     pub fixed_this_round: Vec<String>,
     pub unreviewed_batches: Vec<String>,
@@ -260,9 +261,10 @@ fn round_event(registry: &Registry, unreviewed: &[String], coverage_gap: bool) -
 }
 
 fn has_existing_issues(dropped: &[DroppedFinding]) -> bool {
-    dropped
-        .iter()
-        .any(|entry| entry.reason == "line outside the changed hunks")
+    dropped.iter().any(|entry| {
+        entry.reason == crate::tools::submit::OUT_OF_HUNK
+            || entry.reason == crate::tools::submit::UNCHANGED_LINE
+    })
 }
 
 fn also_locations_by_comment(findings: &[Finding]) -> Vec<Vec<(String, u64)>> {
@@ -310,11 +312,11 @@ fn render_round(
     unreviewed_files: usize,
     mode: crate::config::ReviewMode,
 ) {
-    let (existing, capped): (Vec<DroppedFinding>, Vec<DroppedFinding>) = outcome
-        .dropped
-        .iter()
-        .cloned()
-        .partition(|entry| entry.reason == "line outside the changed hunks");
+    let (existing, capped): (Vec<DroppedFinding>, Vec<DroppedFinding>) =
+        outcome.dropped.iter().cloned().partition(|entry| {
+            entry.reason == crate::tools::submit::OUT_OF_HUNK
+                || entry.reason == crate::tools::submit::UNCHANGED_LINE
+        });
     let fix_all = fix_all_section(&outcome.findings, &capped, outcome.pr, &outcome.head_sha);
     let raised = outcome.findings.len().saturating_add(capped.len());
     let clean = raised == 0 && outcome.unreviewed_batches.is_empty() && existing.is_empty();
@@ -339,6 +341,13 @@ fn render_round(
         outcome
             .round_body
             .push_str(&below_floor_note(outcome.below_floor));
+    }
+    if outcome.out_of_focus > 0 {
+        let note = format!(
+            "\n\n🔇 {} finding(s) outside the configured focus were dropped (`--focus`).",
+            outcome.out_of_focus
+        );
+        outcome.round_body.push_str(&note);
     }
     outcome.standing_body = standing_render(outcome, registry, attempts);
 }
@@ -925,9 +934,11 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             self.settings().max_findings_per_file,
             self.settings().scope,
             self.settings().severity,
+            &self.settings().focus,
         );
         let comment_of_finding = grounded.comment_of_finding;
         let below_floor = grounded.below_floor;
+        let out_of_focus = grounded.out_of_focus;
         let summary = self
             .summarize(&[Findings {
                 findings: grounded.findings.clone(),
@@ -943,6 +954,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             comments: grounded.comments,
             dropped: grounded.dropped,
             below_floor,
+            out_of_focus,
             verified_out,
             unreviewed_batches: unreviewed.iter().map(|batch| batch.join(", ")).collect(),
             pr: self.pr(),
@@ -1012,8 +1024,17 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         };
         self.submit(submission).await?;
         self.post_re_raised_replies(split.replies).await;
-        self.resolve_previous_threads(open_threads, &split.matched, unreviewed_files)
-            .await;
+        let narrowed = !self.settings().focus.is_empty()
+            || self.settings().severity != crate::findings::Severity::Nitpick;
+        if narrowed {
+            tracing::info!(
+                target: "difftrace::review",
+                "a narrowed round resolves only re-raised threads; absence is not a fix"
+            );
+        } else {
+            self.resolve_previous_threads(open_threads, &split.matched, unreviewed_files)
+                .await;
+        }
         outcome.posted = true;
         Ok(())
     }
@@ -1465,6 +1486,7 @@ diff --git a/src/beta.rs b/src/beta.rs
         Finding {
             file: file.to_owned(),
             line,
+            kind: crate::config::IssueKind::Correctness,
             severity: Severity::Warning,
             complexity: 3,
             title: title.to_owned(),
@@ -2178,6 +2200,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             comments: Vec::new(),
             dropped: Vec::new(),
             below_floor: 0,
+            out_of_focus: 0,
             pr: 42,
             head_sha: "9f3b2c1".to_owned(),
             posted: false,
@@ -2913,10 +2936,11 @@ mod registry_flow_tests {
 diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,3 +1,3 @@
+@@ -1,3 +1,4 @@
  ctx
 -old
 +new
++newer
  tail
 ";
         crate::diff::DiffIndex::parse(diff).map_err(Into::into)
@@ -4365,10 +4389,11 @@ diff --git a/src/beta.rs b/src/beta.rs
 diff --git a/src/gamma.rs b/src/gamma.rs
 --- a/src/gamma.rs
 +++ b/src/gamma.rs
-@@ -1,3 +1,3 @@
+@@ -1,3 +1,4 @@
  ctx
 -old
 +new
++newer
  tail
 ";
         Ok(crate::diff::DiffIndex::parse(diff)?)

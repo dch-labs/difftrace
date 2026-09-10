@@ -36,6 +36,7 @@ pub struct SubmitReviewTool {
     max_per_file: usize,
     mode: crate::config::ReviewMode,
     severity: crate::findings::Severity,
+    focus: Vec<crate::config::IssueKind>,
     submitted: AtomicBool,
 }
 
@@ -44,6 +45,9 @@ struct SubmitInput {
     summary: String,
     findings: Vec<Finding>,
 }
+
+pub const OUT_OF_HUNK: &str = "line outside the changed hunks";
+pub const UNCHANGED_LINE: &str = "line unchanged by this diff";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DroppedFinding {
@@ -62,6 +66,8 @@ pub(crate) struct Grounded {
     // Findings dropped unseen for sitting below the configured severity
     // floor; counted so the round body can say how many were silenced.
     pub(crate) below_floor: usize,
+    // Findings dropped for falling outside the configured focus kinds.
+    pub(crate) out_of_focus: usize,
 }
 
 pub(crate) fn ground_findings(
@@ -70,23 +76,49 @@ pub(crate) fn ground_findings(
     max_per_file: usize,
     mode: crate::config::ReviewMode,
     severity: crate::findings::Severity,
+    focus: &[crate::config::IssueKind],
 ) -> Grounded {
     let clamp = mode != crate::config::ReviewMode::Full;
     let mut accepted: Vec<Finding> = Vec::new();
     let mut dropped = Vec::new();
     let mut below_floor = 0usize;
+    let mut out_of_focus = 0usize;
     let mut per_file_counts = std::collections::BTreeMap::new();
-    for finding in findings {
+    for mut finding in findings {
+        if finding.kind == crate::config::IssueKind::Docs
+            && finding.severity.rank() > crate::findings::Severity::Suggestion.rank()
+        {
+            tracing::debug!(
+                target: "difftrace::review",
+                file = %finding.file,
+                line = finding.line,
+                "docs finding capped at suggestion severity"
+            );
+            finding.severity = crate::findings::Severity::Suggestion;
+        }
+        if !focus.is_empty() && !focus.contains(&finding.kind) {
+            out_of_focus = out_of_focus.saturating_add(1);
+            continue;
+        }
         if finding.severity.rank() < severity.rank() {
             below_floor = below_floor.saturating_add(1);
             continue;
         }
-        if clamp && index.clamp_to_hunk(&finding.file, finding.line).is_none() {
-            dropped.push(DroppedFinding {
-                finding,
-                reason: "line outside the changed hunks",
-            });
-            continue;
+        if clamp {
+            let admits = if mode == crate::config::ReviewMode::Diff {
+                index.clamp_to_added(&finding.file, finding.line).is_some()
+            } else {
+                index.clamp_to_hunk(&finding.file, finding.line).is_some()
+            };
+            if !admits {
+                let reason = if index.clamp_to_hunk(&finding.file, finding.line).is_some() {
+                    UNCHANGED_LINE
+                } else {
+                    OUT_OF_HUNK
+                };
+                dropped.push(DroppedFinding { finding, reason });
+                continue;
+            }
         }
         let count = per_file_counts
             .entry(finding.file.clone())
@@ -125,6 +157,7 @@ pub(crate) fn ground_findings(
         dropped,
         comment_of_finding,
         below_floor,
+        out_of_focus,
     }
 }
 
@@ -155,12 +188,14 @@ impl SubmitReviewTool {
         max_per_file: usize,
         mode: crate::config::ReviewMode,
         severity: crate::findings::Severity,
+        focus: Vec<crate::config::IssueKind>,
     ) -> Self {
         Self {
             scope,
             max_per_file,
             mode,
             severity,
+            focus,
             submitted: AtomicBool::new(false),
         }
     }
@@ -172,6 +207,7 @@ impl SubmitReviewTool {
             self.max_per_file,
             self.mode,
             self.severity,
+            &self.focus,
         )
     }
 }
@@ -269,10 +305,11 @@ mod tests {
 diff --git a/src/lib.rs b/src/lib.rs
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -1,3 +1,3 @@
+@@ -1,3 +1,4 @@
  ctx
 -old
 +new
++newer
  tail
 ";
         DiffIndex::parse(diff).map_err(Into::into)
@@ -294,6 +331,7 @@ diff --git a/src/lib.rs b/src/lib.rs
                 max_per_file,
                 crate::config::ReviewMode::Diff,
                 crate::findings::Severity::Nitpick,
+                Vec::new(),
             ),
             gateway,
         ))
@@ -307,6 +345,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         Finding {
             file: file.to_owned(),
             line,
+            kind: crate::config::IssueKind::Correctness,
             severity: crate::findings::Severity::Warning,
             complexity: 3,
             title: "Title".to_owned(),
@@ -338,6 +377,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             5,
             crate::config::ReviewMode::Diff,
             crate::findings::Severity::Critical,
+            Vec::new(),
         );
         let grounded = tool.ground(vec![finding("src/lib.rs", 1)]);
         assert!(
@@ -348,6 +388,66 @@ diff --git a/src/lib.rs b/src/lib.rs
             grounded.below_floor, 1,
             "the tool counts the silencing like the batch path does"
         );
+    }
+
+    #[test]
+    fn diff_scope_drops_findings_on_unchanged_context_lines()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let index = diff_index()?;
+        let grounded = ground_findings(
+            &index,
+            vec![
+                finding("src/lib.rs", 1),
+                finding("src/lib.rs", 4),
+                finding("src/lib.rs", 9),
+            ],
+            5,
+            crate::config::ReviewMode::Diff,
+            crate::findings::Severity::Nitpick,
+            &[],
+        );
+        assert!(
+            grounded.findings.is_empty(),
+            "context and untouched lines never carry diff-scope findings"
+        );
+        assert!(
+            grounded
+                .dropped
+                .iter()
+                .any(|entry| entry.finding.line == 1 && entry.reason == UNCHANGED_LINE)
+        );
+        assert!(
+            grounded
+                .dropped
+                .iter()
+                .any(|entry| entry.finding.line == 4 && entry.reason == UNCHANGED_LINE)
+        );
+        assert!(
+            grounded
+                .dropped
+                .iter()
+                .any(|entry| entry.finding.line == 9 && entry.reason == OUT_OF_HUNK)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deep_scope_still_admits_hunk_context_lines() -> Result<(), Box<dyn std::error::Error>> {
+        let index = diff_index()?;
+        let grounded = ground_findings(
+            &index,
+            vec![finding("src/lib.rs", 1)],
+            5,
+            crate::config::ReviewMode::Deep,
+            crate::findings::Severity::Nitpick,
+            &[],
+        );
+        assert_eq!(
+            grounded.findings.len(),
+            1,
+            "deep scope anchors anywhere inside the changed hunks"
+        );
+        Ok(())
     }
 
     #[test]
@@ -363,6 +463,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             5,
             crate::config::ReviewMode::Diff,
             crate::findings::Severity::Nitpick,
+            &[],
         );
         assert_eq!(grounded.findings.len(), 1);
         assert_eq!(
@@ -392,6 +493,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             5,
             crate::config::ReviewMode::Full,
             crate::findings::Severity::Nitpick,
+            &[],
         );
         assert_eq!(grounded.findings.len(), 1, "a full audit anchors any line");
         assert!(grounded.dropped.is_empty());
@@ -408,6 +510,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             5,
             crate::config::ReviewMode::Diff,
             crate::findings::Severity::Critical,
+            &[],
         );
         assert!(
             grounded.findings.is_empty(),
@@ -428,12 +531,13 @@ diff --git a/src/lib.rs b/src/lib.rs
             &index,
             vec![
                 finding("src/lib.rs", 2),
-                finding("src/lib.rs", 1),
+                finding("src/lib.rs", 2),
                 finding("src/lib.rs", 3),
             ],
             5,
             crate::config::ReviewMode::Diff,
             crate::findings::Severity::Nitpick,
+            &[],
         );
         assert_eq!(
             grounded.findings.len(),
@@ -451,9 +555,9 @@ diff --git a/src/lib.rs b/src/lib.rs
         assert!(
             comment
                 .body
-                .contains("Also occurs at: `src/lib.rs:1`, `src/lib.rs:3`")
+                .contains("Also occurs at: `src/lib.rs:2`, `src/lib.rs:3`")
         );
-        assert!(comment.body.contains("Also at: src/lib.rs, line 1"));
+        assert!(comment.body.contains("Also at: src/lib.rs, line 2"));
         assert!(comment.body.contains("Also at: src/lib.rs, line 3"));
         assert_eq!(
             grounded.comment_of_finding,
@@ -549,7 +653,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             .call(
                 input(
                     "Summary.",
-                    &[finding_json("src/lib.rs", 1), finding_json("src/lib.rs", 3)],
+                    &[finding_json("src/lib.rs", 2), finding_json("src/lib.rs", 2)],
                 ),
                 &ToolContext::default(),
             )

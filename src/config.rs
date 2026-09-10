@@ -54,12 +54,21 @@ pub enum ReviewMode {
 }
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, clap::ValueEnum,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+    clap::ValueEnum,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum IssueKind {
-    Security,
+    #[default]
     Correctness,
+    Security,
     Concurrency,
     Performance,
     Tests,

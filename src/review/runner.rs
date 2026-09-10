@@ -829,6 +829,7 @@ diff --git a/src/lib.rs b/src/lib.rs
         let findings = vec![crate::findings::Finding {
             file: "src/lib.rs".to_owned(),
             line: 2,
+            kind: crate::config::IssueKind::Correctness,
             severity: crate::findings::Severity::Warning,
             complexity: 3,
             title: "Lock dropped early".to_owned(),
@@ -1065,6 +1066,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             findings: vec![crate::findings::Finding {
                 file: "src/lib.rs".to_owned(),
                 line: 2,
+                kind: crate::config::IssueKind::Correctness,
                 severity: crate::findings::Severity::Warning,
                 complexity: 3,
                 title: "Lock dropped early".to_owned(),
@@ -1155,6 +1157,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             findings: vec![crate::findings::Finding {
                 file: "src/lib.rs".to_owned(),
                 line: 2,
+                kind: crate::config::IssueKind::Correctness,
                 severity: crate::findings::Severity::Warning,
                 complexity: 3,
                 title: "Lock dropped early".to_owned(),
