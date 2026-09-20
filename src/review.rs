@@ -6,6 +6,7 @@
 
 pub mod batch;
 pub mod evidence;
+pub mod identity;
 pub mod ledger;
 pub mod logging;
 pub mod memory;

@@ -139,7 +139,7 @@ pub struct ReviewRunner<C: loopctl::api::ApiClient> {
 fn batch_prompt(files: &[String], evidence: &str, hunt: bool) -> String {
     let list = files.join("\n");
     let ask = if hunt {
-        "A first pass recorded no blocking findings in these files. Argue against that: hunt for what it missed."
+        "A first pass already reviewed these files. Argue against it: hunt for what it missed, whether or not it recorded findings."
     } else {
         "Review these changed files:"
     };
@@ -619,6 +619,16 @@ diff --git a/src/lib.rs b/src/lib.rs
  tail
 ";
         DiffIndex::parse(diff).map_err(Into::into)
+    }
+
+    #[test]
+    fn the_hunt_prompt_makes_no_cleanliness_claim_about_the_first_pass() {
+        let prompt = batch_prompt(&[String::from("src/lib.rs")], "evidence", true);
+        assert!(
+            !prompt.contains("recorded no blocking findings"),
+            "the hunt premise must not claim a clean first pass: {prompt}"
+        );
+        assert!(prompt.contains("whether or not it recorded findings"));
     }
 
     #[tokio::test]

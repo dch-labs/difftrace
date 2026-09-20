@@ -1,13 +1,21 @@
 //! The cross-round issue registry: every issue difftrace ever raised on a
 //! pull request, kept as hidden JSON inside the marker comment and merged
-//! each run — open issues carry across rounds, fixed ones close with the
-//! round that fixed them, and the visible lists render from the state.
+//! each run. Issues match across rounds by file, nearby line, and shared
+//! wording — not exact lines and titles — a retired issue the model
+//! re-finds reopens instead of duplicating, and an unseen issue closes
+//! only after two consecutive full rounds stop re-raising it, because
+//! per-pass recall misses real issues. The visible lists render from the
+//! state.
 
 use crate::findings::Finding;
 use crate::findings::Severity;
 use crate::github::ReviewThread;
+use crate::review::identity::same_spot;
+use crate::review::identity::shares_any_token;
 
 pub(crate) const REGISTRY_MARKER: &str = "<!-- difftrace:registry ";
+
+const RETIRE_AFTER_CONSECUTIVE_MISSES: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +38,8 @@ pub(crate) struct Issue {
     pub raised_round: u32,
     pub raised_sha: String,
     pub last_round: u32,
+    #[serde(default)]
+    pub misses: u32,
     pub resolved_round: Option<u32>,
     pub resolved_sha: Option<String>,
 }
@@ -92,7 +102,7 @@ impl Registry {
 
     fn ingest_grounded(&mut self, round: &RoundFindings<'_>, round_no: u32, seen: &mut Vec<bool>) {
         for (finding, thread_id) in grounded_with_threads(round.grounded, round.finding_threads) {
-            let index = self.match_open_index(finding, thread_id, round.retired);
+            let index = self.match_open_index(finding, thread_id, round.retired, round_no);
             if let Some(i) = index {
                 tracing::debug!(
                     target: "difftrace::registry",
@@ -109,6 +119,35 @@ impl Registry {
                 issue.title.clone_from(&finding.title);
                 issue.severity = finding.severity;
                 issue.complexity = finding.complexity;
+                issue.line = Some(finding.line as u64);
+                issue.misses = 0;
+                if let Some(id) = thread_id {
+                    issue.thread_id = Some(id.to_owned());
+                }
+                if let Some(flag) = seen.get_mut(i) {
+                    *flag = true;
+                }
+            } else if let Some(i) = self.match_retired_index(finding, round.retired) {
+                tracing::debug!(
+                    target: "difftrace::registry",
+                    decision = "reopened",
+                    file = %finding.file,
+                    line = finding.line,
+                    title = %finding.title,
+                    "registry merge reopened a retired issue"
+                );
+                let Some(issue) = self.issues.get_mut(i) else {
+                    continue;
+                };
+                issue.status = IssueStatus::Open;
+                issue.title.clone_from(&finding.title);
+                issue.severity = finding.severity;
+                issue.complexity = finding.complexity;
+                issue.line = Some(finding.line as u64);
+                issue.misses = 0;
+                issue.last_round = round_no;
+                issue.resolved_round = None;
+                issue.resolved_sha = None;
                 if let Some(id) = thread_id {
                     issue.thread_id = Some(id.to_owned());
                 }
@@ -136,7 +175,7 @@ impl Registry {
             let Some(i) = self.issues.iter().position(|issue| {
                 issue.status == IssueStatus::Open
                     && issue.file == finding.file
-                    && issue.title == finding.title
+                    && shares_any_token(&issue.title, &finding.title)
             }) else {
                 // A dropped finding matching no open issue stays out of the
                 // registry: it cites a line this round never touched, so it
@@ -159,6 +198,7 @@ impl Registry {
             );
             if let Some(issue) = self.issues.get_mut(i) {
                 issue.last_round = round_no;
+                issue.misses = 0;
             }
             if let Some(flag) = seen.get_mut(i) {
                 *flag = true;
@@ -194,20 +234,67 @@ impl Registry {
                 .thread_id
                 .as_ref()
                 .is_some_and(|id| resolved_threads.iter().any(|t| &t.id == id));
-            if round.narrowed && !manually {
+            if issue
+                .thread_id
+                .as_ref()
+                .is_some_and(|id| round.retired.iter().any(|retired_id| retired_id == id))
+            {
+                // The thread was displaced by a different issue reported at
+                // its anchor this round — replacement, not absence, so the
+                // recorded issue retires immediately.
+                issue.status = IssueStatus::Fixed;
+                tracing::debug!(
+                    target: "difftrace::registry",
+                    decision = "displaced",
+                    file = %issue.file,
+                    title = %issue.title,
+                    round = round_no,
+                    "registry merge retired a displaced issue"
+                );
+                issue.resolved_round = Some(round_no);
+                issue.resolved_sha = Some(round.head_sha.to_owned());
+                continue;
+            }
+            if manually {
+                issue.status = IssueStatus::ManuallyResolved;
+                tracing::debug!(
+                    target: "difftrace::registry",
+                    decision = "manually resolved",
+                    file = %issue.file,
+                    title = %issue.title,
+                    round = round_no,
+                    "registry merge recorded a manual resolution"
+                );
+                issue.resolved_round = Some(round_no);
+                issue.resolved_sha = Some(round.head_sha.to_owned());
+                continue;
+            }
+            if round.narrowed {
                 // A narrowed round (focus or severity floor set) cannot
                 // re-raise out-of-scope issues; absence is not evidence
                 // of a fix, so the issue stays open for a full round.
                 continue;
             }
-            issue.status = if manually {
-                IssueStatus::ManuallyResolved
-            } else {
-                IssueStatus::Fixed
-            };
+            // A full round that covered the file and stopped re-raising the
+            // issue is one miss; per-pass recall misses real issues, so a
+            // single absence retires nothing.
+            issue.misses = issue.misses.saturating_add(1);
+            if issue.misses < RETIRE_AFTER_CONSECUTIVE_MISSES {
+                tracing::debug!(
+                    target: "difftrace::registry",
+                    decision = "missed",
+                    file = %issue.file,
+                    title = %issue.title,
+                    round = round_no,
+                    misses = issue.misses,
+                    "registry merge counts one miss; the issue stays open"
+                );
+                continue;
+            }
+            issue.status = IssueStatus::Fixed;
             tracing::debug!(
                 target: "difftrace::registry",
-                decision = if manually { "manually resolved" } else { "fixed" },
+                decision = "fixed",
                 file = %issue.file,
                 title = %issue.title,
                 round = round_no,
@@ -223,6 +310,7 @@ impl Registry {
         finding: &Finding,
         thread_id: Option<&str>,
         retired: &[String],
+        round_no: u32,
     ) -> Option<usize> {
         if let Some(id) = thread_id
             && let Some(i) = self.issues.iter().position(|issue| {
@@ -233,10 +321,22 @@ impl Registry {
         }
         self.issues.iter().position(|issue| {
             issue.status == IssueStatus::Open
-                && issue.anchored
-                && issue.file == finding.file
-                && issue.line == Some(finding.line as u64)
-                && same_issue_title(&issue.title, &finding.title)
+                && spot_matches(issue, finding)
+                // The fuzzy identity dedupes across rounds; two findings
+                // raised in the same round are distinct locations of one
+                // group, each tracked as its own issue, unless identical.
+                && (issue.last_round < round_no || exact_spot(issue, finding))
+                && issue
+                    .thread_id
+                    .as_deref()
+                    .is_none_or(|id| !retired.iter().any(|retired_id| retired_id == id))
+        })
+    }
+
+    fn match_retired_index(&self, finding: &Finding, retired: &[String]) -> Option<usize> {
+        self.issues.iter().position(|issue| {
+            issue.status != IssueStatus::Open
+                && spot_matches(issue, finding)
                 && issue
                     .thread_id
                     .as_deref()
@@ -245,13 +345,27 @@ impl Registry {
     }
 }
 
+fn spot_matches(issue: &Issue, finding: &Finding) -> bool {
+    issue.anchored
+        && issue.file == finding.file
+        && issue
+            .line
+            .is_some_and(|line| same_spot(line, &issue.title, finding.line as u64, &finding.title))
+}
+
+fn exact_spot(issue: &Issue, finding: &Finding) -> bool {
+    issue.file == finding.file
+        && issue.line == Some(finding.line as u64)
+        && normalize_title(&issue.title) == normalize_title(&finding.title)
+}
+
 // The shared issue-identity key: trimmed, case-folded over Unicode.
 pub(crate) fn normalize_title(title: &str) -> String {
     title.trim().to_lowercase()
 }
 
 pub(crate) fn same_issue_title(a: &str, b: &str) -> bool {
-    normalize_title(a) == normalize_title(b)
+    crate::review::identity::titles_overlap_enough(a, b)
 }
 
 fn raised_issue(finding: &Finding, thread_id: Option<&str>, round_no: u32, sha: &str) -> Issue {
@@ -267,6 +381,7 @@ fn raised_issue(finding: &Finding, thread_id: Option<&str>, round_no: u32, sha: 
         raised_round: round_no,
         raised_sha: sha.to_owned(),
         last_round: round_no,
+        misses: 0,
         resolved_round: None,
         resolved_sha: None,
     }
@@ -374,6 +489,7 @@ mod tests {
             raised_round: 1,
             raised_sha: "round1sha".to_owned(),
             last_round: 1,
+            misses: 0,
             resolved_round: None,
             resolved_sha: None,
         }
@@ -468,14 +584,35 @@ mod tests {
             .issues
             .get(1)
             .ok_or("the raised issue is appended")?;
-        assert_eq!(first.status, IssueStatus::Fixed);
-        assert_eq!(first.resolved_sha.as_deref(), Some("round2sha"));
-        assert_eq!(first.resolved_round, Some(2));
+        assert_eq!(
+            first.status,
+            IssueStatus::Open,
+            "one covered absence is a miss, not a fix"
+        );
+        assert_eq!(first.misses, 1);
         assert_eq!(
             second.status,
             IssueStatus::ManuallyResolved,
             "a thread resolved by hand records the manual outcome"
         );
+        let round_after = RoundFindings {
+            head_sha: "round3sha",
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[],
+            threads: &[],
+            retired: &[],
+            unreviewed_files: &[],
+            narrowed: false,
+        };
+        registry.retire_unseen(&round_after, 3, 2, &[]);
+        let first = registry
+            .issues
+            .first()
+            .ok_or("the missed issue stays in the registry")?;
+        assert_eq!(first.status, IssueStatus::Fixed);
+        assert_eq!(first.resolved_sha.as_deref(), Some("round3sha"));
+        assert_eq!(first.resolved_round, Some(3));
         Ok(())
     }
 
@@ -505,13 +642,36 @@ mod tests {
             .collect();
         assert_eq!(
             statuses,
-            vec![IssueStatus::Fixed, IssueStatus::Open],
-            "the freshly raised issue is never retired in its own round"
+            vec![IssueStatus::Open, IssueStatus::Open],
+            "one miss retires nothing, and the freshly raised issue is never counted"
+        );
+        let round_after = RoundFindings {
+            head_sha: "s3",
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[],
+            threads: &[],
+            retired: &[],
+            unreviewed_files: &[],
+            narrowed: false,
+        };
+        registry.retire_unseen(&round_after, 3, 2, &[]);
+        let old = registry.issues.first();
+        let fresh = registry.issues.get(1);
+        assert_eq!(
+            old.map(|issue| issue.status.clone()),
+            Some(IssueStatus::Fixed),
+            "the second consecutive miss retires the old issue"
+        );
+        assert_eq!(
+            fresh.map(|issue| (issue.status.clone(), issue.misses)),
+            Some((IssueStatus::Open, 1)),
+            "the freshly raised issue is on its first miss, still open"
         );
     }
 
     #[test]
-    fn merge_marks_unregraounded_issues_fixed_with_the_round_sha()
+    fn merge_marks_unregraunded_issues_fixed_with_the_round_sha()
     -> Result<(), Box<dyn std::error::Error>> {
         let registry = Registry {
             round: 1,
@@ -531,13 +691,31 @@ mod tests {
             narrowed: false,
         });
         assert_eq!(merged.round, 2);
-        let fixed = merged.issues.first().ok_or("expected an issue")?;
-        assert_eq!(fixed.status, IssueStatus::Fixed);
-        assert_eq!(fixed.resolved_sha.as_deref(), Some("round2sha"));
+        let held = merged.issues.first().ok_or("expected an issue")?;
+        assert_eq!(
+            (held.status.clone(), held.misses),
+            (IssueStatus::Open, 1),
+            "the first full round without a re-raise counts one miss"
+        );
         assert_eq!(
             merged.issues.get(1).map(|i| i.status.clone()),
             Some(IssueStatus::Open)
         );
+        let concluded = merged.merge(&RoundFindings {
+            head_sha: "round3sha",
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[],
+            threads: &[],
+            retired: &[],
+            unreviewed_files: &[],
+            narrowed: false,
+        });
+        assert_eq!(concluded.round, 3);
+        let fixed = concluded.issues.first().ok_or("expected an issue")?;
+        assert_eq!(fixed.status, IssueStatus::Fixed);
+        assert_eq!(fixed.resolved_sha.as_deref(), Some("round3sha"));
+        assert_eq!(fixed.resolved_round, Some(3));
         Ok(())
     }
 
@@ -577,9 +755,38 @@ mod tests {
         assert_eq!(gone.last_round, 1, "the untouched issue keeps its history");
         let seen = merged.issues.get(1).ok_or("expected the reviewed issue")?;
         assert_eq!(
+            (seen.status.clone(), seen.misses),
+            (IssueStatus::Open, 1),
+            "a reviewed file that re-raised nothing counts one miss, not a fix"
+        );
+        let concluded = merged.merge(&RoundFindings {
+            head_sha: "round3sha",
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[],
+            threads: &[],
+            retired: &[],
+            unreviewed_files: &["src/gone.rs".to_owned()],
+            narrowed: false,
+        });
+        let gone = concluded
+            .issues
+            .first()
+            .ok_or("expected the unreviewed issue")?;
+        assert_eq!(
+            gone.status,
+            IssueStatus::Open,
+            "an unreviewed file still cannot conclude its issues fixed"
+        );
+        assert_eq!(gone.misses, 0, "an unreviewed file accrues no misses");
+        let seen = concluded
+            .issues
+            .get(1)
+            .ok_or("expected the reviewed issue")?;
+        assert_eq!(
             seen.status,
             IssueStatus::Fixed,
-            "a reviewed file that re-raised nothing concludes fixed"
+            "a second full round without a re-raise concludes fixed"
         );
         Ok(())
     }
@@ -700,12 +907,12 @@ mod tests {
         });
         let held = merged.issues.first().ok_or("expected the open issue")?;
         assert_eq!(
-            held.status,
-            IssueStatus::Fixed,
-            "not re-raised, the issue is recorded fixed — never overwritten"
+            (held.status.clone(), held.misses),
+            (IssueStatus::Open, 1),
+            "not re-raised, the issue takes a miss — never overwritten"
         );
         assert_eq!(held.title, "Lock dropped early");
-        assert_eq!(held.resolved_sha.as_deref(), Some("round2sha"));
+        assert_eq!(held.resolved_sha, None);
         let raised = merged.issues.get(1).ok_or("expected the fresh issue")?;
         assert_eq!(raised.status, IssueStatus::Open);
         assert_eq!(raised.title, "A different issue");
@@ -751,6 +958,7 @@ mod tests {
                 raised_round: 1,
                 raised_sha: "round1sha".to_owned(),
                 last_round: 1,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             }],
@@ -972,6 +1180,164 @@ mod tests {
             rewritten.find(REGISTRY_MARKER),
             rewritten.rfind(REGISTRY_MARKER)
         );
+        Ok(())
+    }
+
+    fn empty_round(sha: &'static str) -> RoundFindings<'static> {
+        RoundFindings {
+            head_sha: sha,
+            grounded: &[],
+            finding_threads: &[],
+            dropped: &[],
+            threads: &[],
+            retired: &[],
+            unreviewed_files: &[],
+            narrowed: false,
+        }
+    }
+
+    #[test]
+    fn a_rephrased_refind_at_a_drifted_line_refreshes_the_standing_issue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = Registry {
+            round: 1,
+            issues: vec![open_issue("src/a.rs", 40, Severity::Warning, "T_A")],
+        };
+        let mut drifted = finding("src/a.rs", 43, Severity::Warning);
+        drifted.title = "The lock is dropped early".to_owned();
+        let merged = registry.merge(&RoundFindings {
+            finding_threads: &[None],
+            grounded: &[drifted],
+            ..empty_round("round2sha")
+        });
+        assert_eq!(
+            merged.issues.len(),
+            1,
+            "a paraphrase at a nearby line matches its issue"
+        );
+        let issue = merged.issues.first().ok_or("issue")?;
+        assert_eq!(issue.status, IssueStatus::Open);
+        assert_eq!(issue.title, "The lock is dropped early");
+        assert_eq!(issue.line, Some(43));
+        assert_eq!(issue.misses, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn two_phrasings_at_the_same_line_are_one_issue() {
+        let registry = Registry {
+            round: 1,
+            issues: vec![open_issue("src/a.rs", 12, Severity::Warning, "T_A")],
+        };
+        let mut reworded = finding("src/a.rs", 12, Severity::Warning);
+        reworded.title = "The lock is dropped while a reader waits".to_owned();
+        let merged = registry.merge(&RoundFindings {
+            finding_threads: &[None],
+            grounded: &[reworded],
+            ..empty_round("round2sha")
+        });
+        assert_eq!(
+            merged.issues.len(),
+            1,
+            "the same line reporting the same subject twice is one issue"
+        );
+    }
+
+    #[test]
+    fn a_far_drifted_refind_with_a_reworded_title_is_new() {
+        let registry = Registry {
+            round: 1,
+            issues: vec![open_issue("src/a.rs", 40, Severity::Warning, "T_A")],
+        };
+        let mut far = finding("src/a.rs", 80, Severity::Warning);
+        far.title = "The lock is dropped early".to_owned();
+        let merged = registry.merge(&RoundFindings {
+            finding_threads: &[None],
+            grounded: &[far],
+            ..empty_round("round2sha")
+        });
+        assert_eq!(
+            merged.issues.len(),
+            2,
+            "forty lines away the identity does not stretch"
+        );
+    }
+
+    #[test]
+    fn a_fixed_issue_the_model_refinds_reopens_rather_than_duplicates()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let start = Registry {
+            round: 1,
+            issues: vec![open_issue("src/a.rs", 10, Severity::Warning, "T_A")],
+        };
+        let once = start.merge(&empty_round("round2sha"));
+        let twice = once.merge(&empty_round("round3sha"));
+        let fixed = twice.issues.first().ok_or("issue")?;
+        assert_eq!(fixed.status, IssueStatus::Fixed);
+        let mut back = finding("src/a.rs", 12, Severity::Warning);
+        back.title = "Lock dropped early again".to_owned();
+        let merged = twice.merge(&RoundFindings {
+            finding_threads: &[None],
+            grounded: &[back],
+            ..empty_round("round4sha")
+        });
+        assert_eq!(
+            merged.issues.len(),
+            1,
+            "the known issue reopens instead of duplicating"
+        );
+        let issue = merged.issues.first().ok_or("issue")?;
+        assert_eq!(issue.status, IssueStatus::Open);
+        assert_eq!(issue.resolved_round, None);
+        assert_eq!(issue.resolved_sha, None);
+        assert_eq!(issue.title, "Lock dropped early again");
+        assert_eq!(issue.misses, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_suppressed_rephrased_refind_resets_the_miss_count()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let once = Registry {
+            round: 1,
+            issues: vec![open_issue("src/a.rs", 10, Severity::Warning, "T_A")],
+        }
+        .merge(&empty_round("round2sha"));
+        assert_eq!(once.issues.first().ok_or("issue")?.misses, 1);
+        let mut moved = finding("src/a.rs", 400, Severity::Warning);
+        moved.title = "The lock is dropped early again".to_owned();
+        let merged = once.merge(&RoundFindings {
+            dropped: &[(moved, crate::tools::submit::OUT_OF_HUNK)],
+            ..empty_round("round3sha")
+        });
+        let issue = merged.issues.first().ok_or("issue")?;
+        assert_eq!(
+            (issue.status.clone(), issue.misses),
+            (IssueStatus::Open, 0),
+            "a suppressed re-report is presence, not absence"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_registry_parses_state_from_before_the_misses_field()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = Registry {
+            round: 2,
+            issues: vec![open_issue("src/alpha.rs", 2, Severity::Warning, "T_A")],
+        };
+        let legacy = serde_json::to_string(&registry)?.replace(",\"misses\":0", "");
+        assert!(
+            !legacy.contains("misses"),
+            "the legacy fixture must omit the field"
+        );
+        let parsed: Registry = serde_json::from_str(&legacy)?;
+        assert_eq!(
+            parsed.issues.first().ok_or("issue")?.misses,
+            0,
+            "absent misses reads as zero"
+        );
+        assert_eq!(parsed, registry);
         Ok(())
     }
 }

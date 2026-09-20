@@ -109,6 +109,13 @@ pub struct ReviewSettings {
     pub severity: crate::findings::Severity,
 }
 
+impl ReviewSettings {
+    #[must_use]
+    pub fn is_narrowed(&self) -> bool {
+        !self.focus.is_empty() || self.severity != crate::findings::Severity::Nitpick
+    }
+}
+
 impl Default for ReviewSettings {
     fn default() -> Self {
         Self {
@@ -392,6 +399,17 @@ pub fn parse_profile(raw: &str) -> Result<ProviderProfile, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_round_with_a_focus_or_a_severity_floor_is_narrowed() {
+        let mut settings = ReviewSettings::default();
+        assert!(!settings.is_narrowed(), "defaults review everything");
+        settings.focus = vec![IssueKind::Security];
+        assert!(settings.is_narrowed(), "a focus narrows the round");
+        settings.focus = Vec::new();
+        settings.severity = crate::findings::Severity::Warning;
+        assert!(settings.is_narrowed(), "a severity floor narrows the round");
+    }
 
     #[test]
     fn empty_input_yields_the_defaults() -> Result<(), Box<dyn std::error::Error>> {

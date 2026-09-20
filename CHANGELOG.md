@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An eval package at `eval/` with the `eval-golden` binary: a
+  golden-set extractor that reads the local review transcripts
+  (`~/.difftrace/reviews`) and labels every posted finding against git
+  history — `true-positive` when a descendant commit of the reviewed
+  sha touches the finding's file, `false-positive` when an entry in
+  `eval/seed-false-positives.md` matches (owner-verified refutations
+  override fix correlation), `unknown` otherwise. The labeled index is
+  written locally to `eval/golden/index.json` — gitignored, it embeds
+  private review history — with a per-repo distribution printed;
+  `make eval-golden` regenerates it, and `make ci` now formats, lints,
+  and tests the package (pinned by the transcript parsing, era,
+  prose-negative, seed-override, and synthetic git correlation tests). Grouped report rows rendering
+  `Title — also at `other:line`` no longer double-count their
+  finding: the title is cut at the `also-at` suffix before parsing,
+  and the grouped fixture row deduplicates against its plain verdict
+  twin (pinned by the finding-count assertion in the log-era fixture
+  test).
 - Three review scopes and a focus control on `difftrace review`:
   `--scope diff` (the new default) reviews only the changed lines of the
   changed files — evidence packs become hunk windows, and observations
@@ -40,9 +57,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "new" warnings on unchanged code. Local `--base` rounds now always
   take the second pass (`review.hunt_always` forces it; hosted rounds
   keep the skip), and the hunt rubric no longer claims the first pass
-  was clean when it was not (pinned by
-  `a_blocking_first_pass_still_hunts_when_hunt_always_is_set` and the
-  hunt-rubric wording assertions).
+  was clean when it was not — the hunt arm of the batch prompt makes
+  the same honest claim ("whether or not it recorded findings") that
+  the rubric does (pinned by
+  `a_blocking_first_pass_still_hunts_when_hunt_always_is_set`, the
+  hunt-rubric wording assertions, and
+  `the_hunt_prompt_makes_no_cleanliness_claim_about_the_first_pass`).
 - A local findings ledger makes repeated rounds converge (and suppressed
   re-reports count as presence): findings the model re-reported at lines
   the diff no longer marks as added — dropped by strict anchoring —
@@ -163,6 +183,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The local ledger honors the same narrowed-round and presence rules
+  the hosted registry does: a round with `--focus` or a `--severity`
+  floor cannot retire issues it was not looking for (absence is not
+  evidence of a fix), and every dropped re-report — grounding-cap
+  drops included, not just out-of-hunk and unchanged-line — resets the
+  miss counter as presence evidence, so an issue the model keeps
+  re-finding can no longer retire as "fixed" while ranked sixth for
+  its file. Both state keepers now share one predicate,
+  `ReviewSettings::is_narrowed`, and the local round's merge inputs
+  (all-drops presence, retirement gate) live in
+  `ledger::local_merge_inputs` instead of the binary (pinned by
+  `a_round_with_a_focus_or_a_severity_floor_is_narrowed` and
+  `the_local_merge_inputs_count_every_drop_as_presence_and_gate_retirement`).
 - A partial round no longer marks standing issues on unreviewed files
   as `Fixed` in the registry: `RoundFindings` now carries the round's
   unreviewed files and `retire_unseen` leaves their issues open —
@@ -237,6 +270,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   landing after the open cannot slip into the reviewed diff or shift
   the stamped head (pinned by
   `a_commit_after_open_does_not_change_the_reviewed_diff`).
+- The hosted registry now converges the way the local ledger does, instead
+  of fragmenting known issues into new threads: issue identity across
+  rounds is file + nearby line (±5) + shared wording — the same line with
+  any shared word, a line within five with half the wording in common —
+  so a re-finding after fixes shifted lines or rephrased the title
+  refreshes the standing issue instead of minting a duplicate (pinned by
+  `a_rephrased_refind_at_a_drifted_line_refreshes_the_standing_issue`,
+  `two_phrasings_at_the_same_line_are_one_issue`, and the negative
+  `a_far_drifted_refind_with_a_reworded_title_is_new`). A retired issue
+  the model re-finds reopens rather than duplicating (pinned by
+  `a_fixed_issue_the_model_refinds_reopens_rather_than_duplicates`). An
+  issue retires only after two consecutive full rounds stop re-raising
+  it — at measured per-pass recall, one absent round missed a real
+  issue two times in three, marking it falsely fixed and resolving its
+  thread; GitHub thread resolution follows the same rule, so a first
+  miss holds the thread open (pinned by
+  `retire_unseen_resolves_through_the_threads_resolution_state`,
+  `merge_marks_unregraunded_issues_fixed_with_the_round_sha`, and
+  `a_first_miss_keeps_the_thread_open_until_the_issue_retires`). A
+  thread displaced by a different issue at its anchor still retires
+  immediately — replacement is presence, not absence — and a suppressed
+  re-report (outside the hunks, or on an unchanged line) resets the miss
+  count as presence evidence (pinned by
+  `a_suppressed_rephrased_refind_resets_the_miss_count`). Registry state
+  written before the miss counter exists parses with misses at zero
+  (pinned by `the_registry_parses_state_from_before_the_misses_field`).
 
 ### Changed
 

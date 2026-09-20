@@ -9,6 +9,8 @@ use std::path::Path;
 
 use crate::findings::Finding;
 use crate::findings::Severity;
+use crate::review::identity::same_spot;
+use crate::review::identity::shares_any_token;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LedgerIssue {
@@ -21,6 +23,31 @@ pub struct LedgerIssue {
     #[serde(default)]
     pub misses: u32,
     pub fixed: Option<String>,
+}
+
+pub struct LocalMergeInputs {
+    pub rereported: Vec<Finding>,
+    pub may_retire: bool,
+}
+
+// The same narrowed-round rule the hosted registry applies: a round with
+// a focus or a severity floor cannot re-raise out-of-scope issues, and a
+// partial round cannot re-raise unreviewed ones, so absence is not
+// evidence of a fix; every dropped re-report — whatever its reason — is
+// presence evidence.
+#[must_use]
+pub fn local_merge_inputs(
+    outcome: &crate::review::ReviewOutcome,
+    narrowed_round: bool,
+) -> LocalMergeInputs {
+    LocalMergeInputs {
+        rereported: outcome
+            .dropped
+            .iter()
+            .map(|entry| entry.finding.clone())
+            .collect(),
+        may_retire: outcome.unreviewed_batches.is_empty() && !narrowed_round,
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -48,50 +75,14 @@ impl LedgerReport {
 
 const RETIRE_AFTER_CONSECUTIVE_MISSES: u32 = 2;
 
-fn lines_within(a: u64, b: u64, span: u64) -> bool {
-    a.max(b).saturating_sub(a.min(b)) <= span
-}
-
-fn shares_any_token(a: &str, b: &str) -> bool {
-    let tokens = |text: &str| {
-        text.to_lowercase()
-            .split_whitespace()
-            .filter(|word| word.chars().any(char::is_alphanumeric))
-            .map(str::to_owned)
-            .collect::<std::collections::BTreeSet<_>>()
-    };
-    let left = tokens(a);
-    let right = tokens(b);
-    left.intersection(&right).next().is_some()
-}
-
-fn titles_overlap_enough(a: &str, b: &str) -> bool {
-    let tokens = |text: &str| -> std::collections::BTreeSet<String> {
-        text.to_lowercase()
-            .split_whitespace()
-            .filter(|word| word.chars().any(char::is_alphanumeric))
-            .map(str::to_owned)
-            .collect()
-    };
-    let left = tokens(a);
-    let right = tokens(b);
-    if left.is_empty() || right.is_empty() {
-        return false;
-    }
-    let shared = left.intersection(&right).count();
-    let total = left.union(&right).count();
-    total > 0 && shared.saturating_mul(2) >= total
-}
-
 fn same_issue(issue: &LedgerIssue, finding: &Finding) -> bool {
-    if issue.file != finding.file {
-        return false;
-    }
-    if issue.line == finding.line as u64 {
-        return shares_any_token(&issue.title, &finding.title);
-    }
-    lines_within(issue.line, finding.line as u64, 5)
-        && titles_overlap_enough(&issue.title, &finding.title)
+    issue.file == finding.file
+        && same_spot(
+            issue.line,
+            &issue.title,
+            finding.line as u64,
+            &finding.title,
+        )
 }
 
 impl Ledger {
@@ -204,6 +195,35 @@ impl Ledger {
 mod tests {
     use super::*;
     use crate::config::IssueKind;
+    use crate::findings::ReviewSummary;
+    use crate::review::ReviewOutcome;
+    use crate::tools::submit::DroppedFinding;
+
+    fn bare_outcome(
+        dropped: Vec<DroppedFinding>,
+        unreviewed_batches: Vec<String>,
+    ) -> ReviewOutcome {
+        ReviewOutcome {
+            summary: ReviewSummary {
+                summary: String::new(),
+                risk_notes: Vec::new(),
+                tests: String::new(),
+            },
+            findings: Vec::new(),
+            comments: Vec::new(),
+            dropped,
+            below_floor: 0,
+            out_of_focus: 0,
+            verified_out: Vec::new(),
+            fixed_this_round: Vec::new(),
+            unreviewed_batches,
+            pr: 0,
+            head_sha: String::new(),
+            posted: false,
+            round_body: String::new(),
+            standing_body: String::new(),
+        }
+    }
 
     fn finding(file: &str, line: usize, title: &str) -> Finding {
         Finding {
@@ -215,6 +235,37 @@ mod tests {
             title: title.to_owned(),
             body: "Detail.".to_owned(),
         }
+    }
+
+    #[test]
+    fn the_local_merge_inputs_count_every_drop_as_presence_and_gate_retirement() {
+        let dropped = vec![
+            DroppedFinding {
+                finding: finding("src/a.rs", 10, "Cap-ranked re-report of a standing issue"),
+                reason: "per-file finding cap reached",
+            },
+            DroppedFinding {
+                finding: finding("src/b.rs", 3, "Out-of-hunk re-report of a standing issue"),
+                reason: crate::tools::submit::OUT_OF_HUNK,
+            },
+        ];
+        let full = bare_outcome(dropped, Vec::new());
+        let inputs = local_merge_inputs(&full, false);
+        assert!(inputs.may_retire, "a full round may retire");
+        assert_eq!(
+            inputs.rereported.len(),
+            2,
+            "cap-dropped re-reports count as presence like every other drop"
+        );
+        assert!(
+            !local_merge_inputs(&full, true).may_retire,
+            "a narrowed round never retires"
+        );
+        let partial = bare_outcome(Vec::new(), vec!["src/c.rs, src/d.rs".to_owned()]);
+        assert!(
+            !local_merge_inputs(&partial, false).may_retire,
+            "a partial round never retires"
+        );
     }
 
     #[test]

@@ -604,11 +604,23 @@ fn threads_to_resolve(
     threads: &[ReviewThread],
     matched: &[String],
     unreviewed_files: &[String],
+    retired: &[String],
+    registry: &Registry,
 ) -> Vec<String> {
     threads
         .iter()
         .filter(|thread| !matched.contains(&thread.id))
         .filter(|thread| !unreviewed_files.contains(&thread.path))
+        .filter(|thread| {
+            if retired.contains(&thread.id) {
+                return true;
+            }
+            let issue = registry
+                .issues
+                .iter()
+                .find(|issue| issue.thread_id.as_deref() == Some(thread.id.as_str()));
+            issue.is_none_or(|issue| issue.status != IssueStatus::Open)
+        })
         .map(|thread| thread.id.clone())
         .collect()
 }
@@ -990,8 +1002,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
             .iter()
             .map(|entry| (entry.finding.clone(), entry.reason))
             .collect();
-        let narrowed = !self.settings().focus.is_empty()
-            || self.settings().severity != crate::findings::Severity::Nitpick;
+        let narrowed = self.settings().is_narrowed();
         let merged = registry.merge(&RoundFindings {
             head_sha: self.head_sha(),
             grounded: &outcome.findings,
@@ -1024,16 +1035,21 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         };
         self.submit(submission).await?;
         self.post_re_raised_replies(split.replies).await;
-        let narrowed = !self.settings().focus.is_empty()
-            || self.settings().severity != crate::findings::Severity::Nitpick;
+        let narrowed = self.settings().is_narrowed();
         if narrowed {
             tracing::info!(
                 target: "difftrace::review",
                 "a narrowed round resolves only re-raised threads; absence is not a fix"
             );
         } else {
-            self.resolve_previous_threads(open_threads, &split.matched, unreviewed_files)
-                .await;
+            self.resolve_previous_threads(
+                open_threads,
+                &split.matched,
+                unreviewed_files,
+                &split.retired,
+                registry,
+            )
+            .await;
         }
         outcome.posted = true;
         Ok(())
@@ -1044,8 +1060,17 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         open_threads: &[ReviewThread],
         matched: &[String],
         unreviewed_files: &[String],
+        retired: &[String],
+        registry: &Registry,
     ) {
-        let resolved = threads_to_resolve(open_threads, matched, unreviewed_files);
+        let resolved =
+            threads_to_resolve(open_threads, matched, unreviewed_files, retired, registry);
+        let held_open = open_threads
+            .iter()
+            .filter(|thread| !matched.contains(&thread.id))
+            .filter(|thread| !unreviewed_files.contains(&thread.path))
+            .filter(|thread| !resolved.contains(&thread.id))
+            .count();
         for id in &resolved {
             if let Err(err) = self.resolve_thread(id.clone()).await {
                 tracing::warn!(
@@ -1058,7 +1083,8 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         tracing::info!(
             target: "difftrace::review",
             resolved = resolved.len(),
-            "resolved previous threads"
+            held_open = held_open,
+            "resolved previous threads; a first miss keeps its thread open"
         );
     }
 
@@ -1190,6 +1216,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
                 raised_round: 1,
                 raised_sha: String::new(),
                 last_round: 1,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             });
@@ -1507,6 +1534,7 @@ diff --git a/src/beta.rs b/src/beta.rs
             raised_round: 1,
             raised_sha: "round1sha".to_owned(),
             last_round: 2,
+            misses: 0,
             resolved_round: None,
             resolved_sha: None,
         }
@@ -1660,6 +1688,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 raised_round: 1,
                 raised_sha: String::new(),
                 last_round: 1,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             }],
@@ -1698,7 +1727,12 @@ diff --git a/src/beta.rs b/src/beta.rs
                 original_line: Some(40),
             },
         ];
-        let slated = threads_to_resolve(&threads, &["T_KEEP".to_owned()], &[]);
+        let empty_registry = Registry {
+            round: 2,
+            issues: Vec::new(),
+        };
+        let slated =
+            threads_to_resolve(&threads, &["T_KEEP".to_owned()], &[], &[], &empty_registry);
         assert_eq!(slated, vec!["T_FIXED".to_owned(), "T_MOVED".to_owned()]);
     }
 
@@ -1722,11 +1756,106 @@ diff --git a/src/beta.rs b/src/beta.rs
                 original_line: Some(5),
             },
         ];
-        let slated = threads_to_resolve(&threads, &[], &["src/skipped.rs".to_owned()]);
+        let empty_registry = Registry {
+            round: 2,
+            issues: Vec::new(),
+        };
+        let slated = threads_to_resolve(
+            &threads,
+            &[],
+            &["src/skipped.rs".to_owned()],
+            &[],
+            &empty_registry,
+        );
         assert_eq!(
             slated,
             vec!["T_REVIEWED".to_owned()],
             "a thread whose file went unreviewed stays open — not re-raised is not fixed"
+        );
+    }
+
+    #[test]
+    fn a_first_miss_keeps_the_thread_open_until_the_issue_retires() {
+        let threads = vec![
+            ReviewThread {
+                id: "T_MISSED_ONCE".to_owned(),
+                comment_id: 601,
+                resolved: false,
+                path: "src/alpha.rs".to_owned(),
+                line: Some(2),
+                original_line: Some(2),
+            },
+            ReviewThread {
+                id: "T_RETIRED".to_owned(),
+                comment_id: 602,
+                resolved: false,
+                path: "src/beta.rs".to_owned(),
+                line: Some(13),
+                original_line: Some(13),
+            },
+            ReviewThread {
+                id: "T_DISPLACED".to_owned(),
+                comment_id: 603,
+                resolved: false,
+                path: "src/gamma.rs".to_owned(),
+                line: Some(7),
+                original_line: Some(7),
+            },
+            ReviewThread {
+                id: "T_UNTRACKED".to_owned(),
+                comment_id: 604,
+                resolved: false,
+                path: "src/delta.rs".to_owned(),
+                line: Some(9),
+                original_line: Some(9),
+            },
+        ];
+        let registry = Registry {
+            round: 3,
+            issues: vec![
+                Issue {
+                    title: "Held open".to_owned(),
+                    file: "src/alpha.rs".to_owned(),
+                    line: Some(2),
+                    severity: Severity::Warning,
+                    complexity: 2,
+                    anchored: true,
+                    status: IssueStatus::Open,
+                    thread_id: Some("T_MISSED_ONCE".to_owned()),
+                    raised_round: 1,
+                    raised_sha: "s1".to_owned(),
+                    last_round: 1,
+                    misses: 1,
+                    resolved_round: None,
+                    resolved_sha: None,
+                },
+                Issue {
+                    title: "Concluded fixed".to_owned(),
+                    file: "src/beta.rs".to_owned(),
+                    line: Some(13),
+                    severity: Severity::Warning,
+                    complexity: 2,
+                    anchored: true,
+                    status: IssueStatus::Fixed,
+                    thread_id: Some("T_RETIRED".to_owned()),
+                    raised_round: 1,
+                    raised_sha: "s1".to_owned(),
+                    last_round: 1,
+                    misses: 2,
+                    resolved_round: Some(3),
+                    resolved_sha: Some("s3".to_owned()),
+                },
+            ],
+        };
+        let slated = threads_to_resolve(&threads, &[], &[], &["T_DISPLACED".to_owned()], &registry);
+        assert_eq!(
+            slated,
+            vec![
+                "T_RETIRED".to_owned(),
+                "T_DISPLACED".to_owned(),
+                "T_UNTRACKED".to_owned()
+            ],
+            "only retired, displaced, or untracked threads resolve — a first miss holds its thread open"
         );
     }
 
@@ -1833,6 +1962,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 raised_round: 1,
                 raised_sha: String::new(),
                 last_round: 1,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             }],
@@ -1890,6 +2020,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 raised_round: 1,
                 raised_sha: String::new(),
                 last_round: 1,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             }],
@@ -1946,6 +2077,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                     raised_round: 1,
                     raised_sha: String::new(),
                     last_round: 1,
+                    misses: 0,
                     resolved_round: None,
                     resolved_sha: None,
                 },
@@ -1961,6 +2093,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                     raised_round: 1,
                     raised_sha: String::new(),
                     last_round: 1,
+                    misses: 0,
                     resolved_round: None,
                     resolved_sha: None,
                 },
@@ -2026,6 +2159,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                     raised_round: 1,
                     raised_sha: String::new(),
                     last_round: 1,
+                    misses: 0,
                     resolved_round: None,
                     resolved_sha: None,
                 },
@@ -2041,6 +2175,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                     raised_round: 1,
                     raised_sha: String::new(),
                     last_round: 1,
+                    misses: 0,
                     resolved_round: None,
                     resolved_sha: None,
                 },
@@ -2085,6 +2220,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 raised_round: 1,
                 raised_sha: String::new(),
                 last_round: 1,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             }],
@@ -2160,6 +2296,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 raised_round: 1,
                 raised_sha: String::new(),
                 last_round: 1,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             });
@@ -2224,6 +2361,7 @@ diff --git a/src/beta.rs b/src/beta.rs
                 raised_round: 1,
                 raised_sha: "9f3b2c1".to_owned(),
                 last_round: 2,
+                misses: 0,
                 resolved_round: None,
                 resolved_sha: None,
             }],
@@ -3158,11 +3296,29 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
                 .starts_with("🤖 difftrace reviewed `headsha` — clean round"),
             "the fixing round's body is the clean stat line"
         );
-        let updated = gateway
+        let held = gateway
             .updated_comments()
             .first()
             .map(|(_, body)| body.clone())
             .ok_or("round two edits the standing comment")?;
+        assert!(
+            held.contains("1 blocking finding"),
+            "one clean round is a miss, not a fix — the issue still stands"
+        );
+        let round_three = runner(
+            Arc::new(MockApiClient::new("review-model").with_responses(vec![
+                tool_call("c1", json!({ "findings": [] })),
+                text_response("Done."),
+                text_response(&summary_json()),
+            ])),
+            Arc::clone(&gateway),
+        )?;
+        round_three.review_all(false).await?;
+        let updated = gateway
+            .updated_comments()
+            .last()
+            .map(|(_, body)| body.clone())
+            .ok_or("round three edits the standing comment")?;
         assert!(updated.contains("🎉 Good to go — no unresolved findings."));
         assert!(
             updated.contains("✅ Issue history"),
@@ -3178,7 +3334,7 @@ diff --git a/src/force_quit.rs b/src/force_quit.rs
         );
         assert!(
             updated.contains(
-                "- ✅ ~~Lock dropped early~~ `src/lib.rs:2` — fixed in round 2 (`headsha`)"
+                "- ✅ ~~Lock dropped early~~ `src/lib.rs:2` — fixed in round 3 (`headsha`)"
             )
         );
         Ok(())

@@ -77,22 +77,19 @@ fn finish(result: Result<ExitCode, DifftraceError>) -> ExitCode {
 
 fn update_local_ledger(
     outcome: &difftrace::review::ReviewOutcome,
+    narrowed_round: bool,
     head_sha: &str,
 ) -> Option<difftrace::review::ledger::LedgerReport> {
     let reviews = local_reviews_dir()?;
     let path = reviews.join(format!("{}.ledger.json", checkout_label()));
     let mut ledger = difftrace::review::ledger::Ledger::load(&path);
-    let may_retire = outcome.unreviewed_batches.is_empty();
-    let rereported: Vec<difftrace::findings::Finding> = outcome
-        .dropped
-        .iter()
-        .filter(|entry| {
-            entry.reason == difftrace::tools::submit::OUT_OF_HUNK
-                || entry.reason == difftrace::tools::submit::UNCHANGED_LINE
-        })
-        .map(|entry| entry.finding.clone())
-        .collect();
-    let report = ledger.merge(&outcome.findings, &rereported, head_sha, may_retire);
+    let inputs = difftrace::review::ledger::local_merge_inputs(outcome, narrowed_round);
+    let report = ledger.merge(
+        &outcome.findings,
+        &inputs.rereported,
+        head_sha,
+        inputs.may_retire,
+    );
     if let Err(err) = ledger.save(&path) {
         eprintln!("difftrace: cannot write {}: {err}", path.display());
         return None;
@@ -257,6 +254,7 @@ async fn run_local(
     );
     apply_review_overrides(args, &mut config.review);
     config.review.hunt_always = true;
+    let narrowed_round = config.review.is_narrowed();
     if let Some(path) = &args.memory {
         config.review.memory_content = difftrace::review::memory::load(path);
     }
@@ -294,7 +292,7 @@ async fn run_local(
             return Err(err);
         }
     };
-    let ledger_report = update_local_ledger(&outcome, &outcome.head_sha);
+    let ledger_report = update_local_ledger(&outcome, narrowed_round, &outcome.head_sha);
     if let Some(report) = ledger_report {
         println!("{}", report.line());
         append_run_log(log.as_deref(), &format!("\n{}\n", report.line()));
