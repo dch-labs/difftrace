@@ -1,4 +1,4 @@
-//! Errors for the golden-set extractor.
+//! Errors for the eval tooling.
 
 use std::path::PathBuf;
 
@@ -10,6 +10,8 @@ pub enum DtError {
     Git { repo: PathBuf, message: String },
     #[error("transcript {run}: {message}")]
     Parse { run: String, message: String },
+    #[error("mutation {case}: {message}")]
+    Mutation { case: String, message: String },
     #[error("cli: {0}")]
     Cli(String),
 }

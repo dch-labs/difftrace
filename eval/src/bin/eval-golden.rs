@@ -1,15 +1,12 @@
 //! CLI entry: transcripts in, labeled golden index out.
 
-mod correlate;
-mod error;
-mod extract;
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use correlate::{Correlator, Label, Repo};
-use error::DtError;
-use extract::{is_transcript_name, parse_transcript};
+use difftrace_eval::correlate;
+use difftrace_eval::correlate::{Correlator, Label, Repo};
+use difftrace_eval::error::DtError;
+use difftrace_eval::extract::{is_transcript_name, parse_transcript};
 
 #[derive(Debug, serde::Serialize)]
 struct RunSummary {

@@ -95,6 +95,7 @@ pub struct Correlator {
 }
 
 impl Correlator {
+    #[must_use]
     pub fn new(repos: Vec<Repo>, seeds: Vec<SeedEntry>) -> Self {
         Self {
             repos,
@@ -122,6 +123,7 @@ impl Correlator {
         Ok(hit)
     }
 
+    #[must_use]
     pub fn repo(&self, idx: usize) -> Option<&Repo> {
         self.repos.get(idx)
     }

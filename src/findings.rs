@@ -256,7 +256,15 @@ mod tests {
             .pointer("/properties/findings/items/required")
             .and_then(serde_json::Value::as_array)
             .ok_or("schema must carry the findings required list")?;
-        for field in ["file", "line", "severity", "complexity", "title", "body"] {
+        for field in [
+            "file",
+            "line",
+            "severity",
+            "complexity",
+            "title",
+            "body",
+            "kind",
+        ] {
             assert!(
                 required.iter().any(|v| v.as_str() == Some(field)),
                 "schema must require {field}"
@@ -283,6 +291,25 @@ mod tests {
         assert_eq!(finding.line, 12);
         assert_eq!(finding.severity, Severity::Warning);
         assert_eq!(finding.complexity, 3);
+        assert_eq!(
+            finding.kind,
+            crate::config::IssueKind::Correctness,
+            "an absent kind falls back to correctness"
+        );
+        let with_kind = serde_json::json!({
+            "findings": [{
+                "file": "src/net.rs",
+                "line": 3,
+                "severity": "warning",
+                "complexity": 2,
+                "kind": "security",
+                "title": "Unvalidated input",
+                "body": "Input reaches a sink unchecked."
+            }]
+        });
+        let findings: Findings = StructuredOutput::from_value(with_kind)?;
+        let finding = findings.findings.first().ok_or("expected a value")?;
+        assert_eq!(finding.kind, crate::config::IssueKind::Security);
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-.PHONY: check test clippy fmt docs ci lint e2e eval-fmt eval-clippy eval-test eval-golden
+.PHONY: check test clippy fmt docs ci lint e2e eval-fmt eval-clippy eval-test eval-golden eval-mutations eval-baseline eval-run-v1
 
 ci: fmt check clippy test docs eval-fmt eval-clippy eval-test
 
@@ -32,7 +32,16 @@ eval-test:
 	cargo test --manifest-path eval/Cargo.toml
 
 eval-golden:
-	cargo run --manifest-path eval/Cargo.toml -- --transcripts $(HOME)/.difftrace/reviews --repo difftrace=. --repo dch=../dch --repo loopctl=../loopctl --out eval/golden/index.json
+	cargo run -q --manifest-path eval/Cargo.toml --bin eval-golden -- --transcripts $(HOME)/.difftrace/reviews --repo difftrace=. --repo dch=../dch --repo loopctl=../loopctl --out eval/golden/index.json
+
+eval-mutations:
+	cargo run -q --manifest-path eval/Cargo.toml --bin eval-mutate -- --repo dch=../dch --repo loopctl=../loopctl
+
+eval-baseline:
+	cargo run -q --manifest-path eval/Cargo.toml --bin eval-run -- --golden
+
+eval-run-v1:
+	cargo run -q --manifest-path eval/Cargo.toml --bin eval-run -- --mutations --repo dch=../dch --repo loopctl=../loopctl
 
 e2e:
 	@test -n "$(GITHUB_TOKEN)" && test -n "$(DIFFTRACE_TEST_REPO)" && test -n "$(DIFFTRACE_TEST_PR)" || { echo "ERROR: set GITHUB_TOKEN, DIFFTRACE_TEST_REPO (owner/repo), DIFFTRACE_TEST_PR"; exit 1; }

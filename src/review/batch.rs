@@ -710,7 +710,7 @@ impl<C: ApiClient + 'static> ReviewRunner<C> {
         } else {
             "batch started"
         };
-        let lanes = self.settings().max_parallel_batches;
+        let lanes = self.settings().max_parallel_batches.max(1);
         let outcomes: Vec<(usize, Option<Findings>)> =
             futures::stream::iter(batches.iter().enumerate())
                 .map(|(index, batch)| async move {

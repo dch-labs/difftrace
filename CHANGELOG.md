@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A mutation-set generator beside it: `eval-mutate` validates a
+  local corpus manifest (`eval/mutations/manifest.toml` — gitignored
+  like the golden index, it pins the owner's private eval selection of
+  base commits, target lines, and recipes) against the sibling
+  checkouts read-only, and `--apply N` materializes one case in a
+  scratch clone (`~/.difftrace/eval-work/`) as a single commit on top
+  of its base sha — the review diff is exactly the seeded defect,
+  with `--check 1` adding a `cargo check` gate (pinned by the recipe
+  transform, anchor-uniqueness, manifest-rejection, and synthetic
+  apply-range tests; `make eval-mutations` validates every case in
+  the local manifest). The eval package's one new dependency is
+  `toml`, intrinsic to the manifest format; malformed entries —
+  including short shas — are typed errors, targets with CR bytes are
+  refused rather than renormalized, and files without a trailing
+  newline keep their termination so the review diff stays exactly the
+  seeded defect.
 - An eval package at `eval/` with the `eval-golden` binary: a
   golden-set extractor that reads the local review transcripts
   (`~/.difftrace/reviews`) and labels every posted finding against git
@@ -155,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   always names the difftrace that wrote it (pinned by
   `a_local_review_log_name_carries_checkout_time_and_head` and
   `the_tee_reaches_the_file`). The local progress lines moved from
-  bare stderr prints to the tracing subscriber so they land in both.
+  bare stderr prints to the tracing subscriber so they land in both. The branch's one new main-crate dependency is `chrono` (clock feature only): transcript and log file names carry local-time stamps, which std cannot format.
 - `~/.difftrace/env`: an optional `KEY=VALUE` secret file beside the
   config — the lowest-priority source for provider API keys,
   `GITHUB_TOKEN`, and every `DIFFTRACE_*` override, so local runs need

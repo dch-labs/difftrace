@@ -322,7 +322,29 @@ impl DifftraceConfig {
     }
 
     pub fn from_toml_str(contents: &str) -> Result<Self, DifftraceError> {
-        toml::from_str(contents).map_err(|source| DifftraceError::ConfigParse { source })
+        let config: Self =
+            toml::from_str(contents).map_err(|source| DifftraceError::ConfigParse { source })?;
+        config.validate_review_floors()?;
+        Ok(config)
+    }
+
+    fn validate_review_floors(&self) -> Result<(), DifftraceError> {
+        for (name, value) in [
+            ("max_parallel_batches", self.review.max_parallel_batches),
+            ("max_findings_per_file", self.review.max_findings_per_file),
+        ] {
+            if value == 0 {
+                return Err(DifftraceError::Cli(format!(
+                    "review.{name} must be at least 1"
+                )));
+            }
+        }
+        if self.review.stream_timeout_secs == 0 {
+            return Err(DifftraceError::Cli(
+                "review.stream_timeout_secs must be at least 1".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -399,6 +421,21 @@ pub fn parse_profile(raw: &str) -> Result<ProviderProfile, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_toml_config_with_a_zero_review_floor_is_rejected() {
+        for key in [
+            "max_parallel_batches",
+            "max_findings_per_file",
+            "stream_timeout_secs",
+        ] {
+            let toml_text = format!("[review]\n{key} = 0\n");
+            assert!(
+                DifftraceConfig::from_toml_str(&toml_text).is_err(),
+                "review.{key} has a floor of 1"
+            );
+        }
+    }
 
     #[test]
     fn a_round_with_a_focus_or_a_severity_floor_is_narrowed() {
