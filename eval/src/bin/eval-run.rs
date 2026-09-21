@@ -287,17 +287,7 @@ fn timestamp() -> String {
 }
 
 fn v1_binary(flag: Option<&String>) -> String {
-    flag.map_or_else(
-        || {
-            let local = PathBuf::from("target").join("release").join("difftrace");
-            if local.exists() {
-                local.to_string_lossy().into_owned()
-            } else {
-                "difftrace".to_owned()
-            }
-        },
-        Clone::clone,
-    )
+    flag.map_or_else(|| "difftrace".to_owned(), Clone::clone)
 }
 
 fn list_reviews(dir: &Path) -> Vec<String> {

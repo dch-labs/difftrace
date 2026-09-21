@@ -1,26 +1,22 @@
-//! An AI pull-request reviewer for `GitHub`, built on loopctl.
-//!
-//! Fetches a pull request's diff and changed files, drives an LLM agent
-//! loop over them, and posts a single review whose inline findings are
-//! validated against the diff before submission.
-//!
-//! Modules: `config` (configuration), `error` (the error enum),
-//! `provider` (loopctl client factory), `github` (the REST layer behind
-//! `PrGateway`), `local` (the offline git gateway behind `--base`),
-//! `diff` (the diff index and grounding authority),
-//! `findings` (the model-output contracts), `tools` (the agent's
-//! `loopctl` `Tool` surface), `review` (the runner that drives batches),
-//! `prompts` (the agent fix prompts embedded in the review).
+//! difftrace v2 — a diff-review agent with a contractual model of
+//! truth: the product of a run is a coverage matrix, findings are
+//! exceptions confirmed by a judge quorum or mechanical verification,
+//! and the verdict is assembled mechanically.
 
 pub mod cli;
 pub mod config;
-pub mod diff;
 pub mod error;
-pub mod findings;
-pub mod github;
-pub mod local;
-pub mod prompts;
-pub mod provider;
-pub mod review;
-pub mod session;
+pub mod identity;
+
+pub mod contracts;
+pub mod diff;
+pub mod gateway;
+pub mod judges;
+pub mod oracle;
+pub mod orchestrator;
+pub mod ratelimit;
+pub mod reconcile;
+pub mod render;
+pub mod reply;
+pub mod state;
 pub mod tools;

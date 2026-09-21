@@ -1,123 +1,69 @@
-//! The error enum for all difftrace operations.
+//! The v2 error model.
 
-use std::path::PathBuf;
+pub type JudgeId = String;
 
 #[derive(Debug, thiserror::Error)]
-pub enum DifftraceError {
-    #[error("cannot read config file {path}: {source}")]
-    ConfigRead {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    #[error("invalid config file: {source}")]
-    ConfigParse { source: toml::de::Error },
-    #[error("cannot determine the home directory for the config path")]
-    NoHomeDir,
-    #[error("no API key: set {env_var} in the environment or ~/.difftrace/env")]
-    MissingApiKey { env_var: &'static str },
-    #[error("ollama profile requires provider.model to be set in the config")]
-    OllamaModelMissing,
-    #[error(
-        "local profile requires provider.base_url (e.g. http://localhost:8080/v1 \
-        for llama.cpp, http://localhost:8000/v1 for vLLM, http://localhost:11434/v1 \
-        for Ollama)"
-    )]
-    LocalEndpointMissing,
-    #[error("local profile requires provider.model to be set in the config")]
-    LocalModelMissing,
-    #[error("provider client construction failed: {source}")]
-    ClientBuild {
-        source: loopctl::api::error::ApiError,
-    },
-    #[error("invalid GitHub API base URL {url}: {source}")]
-    InvalidBaseUrl {
-        url: String,
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("GitHub client construction failed: {source}")]
-    GitHubInit { source: octocrab::Error },
-    #[error("GitHub API call failed: {source}")]
-    GitHubApi { source: octocrab::Error },
-    #[error("the GitHub identity is unavailable: the viewer query returned no login")]
-    MissingViewerLogin,
-    #[error("reply failed: {message}")]
-    Reply { message: String },
-    #[error("the verification pass failed: {source}")]
-    Verify {
-        source: loopctl::structured::StructuredError,
-    },
-    #[error("{path} is a directory or empty entry, not a readable file")]
-    NotAFile { path: String },
-    #[error("cannot decode content of {path}: {source}")]
-    ContentDecode {
-        path: String,
-        source: base64::DecodeError,
-    },
-    #[error("{path} is binary content; only text files can be reviewed")]
-    BinaryContent { path: String },
-    #[error("{path} is {size} bytes; the contents endpoint returns no content above 1 MB")]
-    ContentTooLarge { path: String, size: i64 },
-    #[error("cannot parse diff at line {line}: {reason}")]
-    DiffParse { line: usize, reason: String },
-
-    #[error("review run failed: {source}")]
-    ReviewRun { source: loopctl::error::LoopError },
-
-    #[error(
-        "the batch's final turn was truncated at the {budget}-token output budget before producing a verdict"
-    )]
-    ReviewTruncated { budget: u32 },
-
-    #[error("the reviewer run ended without ever recording findings — no verdict was produced")]
-    ReviewNoVerdict,
-
-    #[error("summary generation failed: {source}")]
-    Summary {
-        source: loopctl::structured::StructuredError,
-    },
-
-    #[error("{0}")]
+pub enum DtError {
+    #[error("invalid configuration: {0}")]
+    Config(String),
+    #[error("git operation failed: {0}")]
+    Git(String),
+    #[error("gateway operation failed: {0}")]
+    Gateway(String),
+    #[error("provider call failed: {0}")]
+    Provider(String),
+    #[error("judge {judge} did not answer: {cause}")]
+    JudgeAbsent { judge: JudgeId, cause: String },
+    #[error("partial round — judges absent: {absent:?}")]
+    PartialRound { absent: Vec<JudgeId> },
+    #[error("the oracle exhausted its budget before resolving the claim")]
+    OracleBudget,
+    #[error("persisted state is corrupt: {0}")]
+    StateCorrupt(String),
+    #[error("command line error: {0}")]
     Cli(String),
 }
 
 #[must_use]
-pub fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(error) = source {
-        text.push_str(": ");
-        text.push_str(&error.to_string());
-        source = error.source();
+pub fn error_chain(error: &DtError) -> String {
+    let mut chain = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
     }
-    text
+    chain
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[derive(Debug)]
-    struct Inner(&'static str);
-
-    impl std::fmt::Display for Inner {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.0)
-        }
-    }
-
-    impl std::error::Error for Inner {}
-
     #[test]
-    fn the_chain_reaches_every_source_level() {
-        let leaf = DifftraceError::NotAFile {
-            path: "gone.txt".to_owned(),
-        };
-        assert_eq!(error_chain(&leaf), leaf.to_string());
-        let inner: Box<dyn std::error::Error + Send + Sync> = Box::new(Inner("root cause"));
-        let nested = DifftraceError::InvalidBaseUrl {
-            url: "not a url".to_owned(),
-            source: inner,
-        };
-        assert!(error_chain(&nested).contains("root cause"));
+    fn every_dt_error_has_a_professional_display() {
+        let samples = [
+            DtError::Config("judges profile list is empty".to_owned()),
+            DtError::Git("bad revision".to_owned()),
+            DtError::Gateway("thread post failed".to_owned()),
+            DtError::Provider("429 after every retry".to_owned()),
+            DtError::JudgeAbsent {
+                judge: "zai:glm-5.3".to_owned(),
+                cause: "stream timed out".to_owned(),
+            },
+            DtError::PartialRound {
+                absent: vec!["local".to_owned()],
+            },
+            DtError::OracleBudget,
+            DtError::StateCorrupt("marker JSON truncated".to_owned()),
+            DtError::Cli("unknown subcommand".to_owned()),
+        ];
+        for error in &samples {
+            let text = error_chain(error);
+            assert!(
+                text.len() > 12 && !text.contains("DtError") && !text.starts_with(' '),
+                "every variant renders as a professional sentence: {text}"
+            );
+        }
     }
 }

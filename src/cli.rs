@@ -1,144 +1,80 @@
-//! The command line: `difftrace review` posts a review, `difftrace
-//! reply` answers a question asked in a comment, and `difftrace plan`
-//! produces a fix plan for a finding.
+//! The v2 command surface: subcommand dispatch and exit codes.
 
-use clap::ArgGroup;
-use clap::Args;
-use clap::Parser;
-use clap::Subcommand;
+use crate::error::DtError;
 
-use crate::github::RepoRef;
+pub const SUBCOMMANDS: [&str; 6] = ["review", "reject", "suppress", "state", "reply", "eval"];
 
-#[derive(Debug, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Review(ReviewArgs),
-    Reply(ReplyArgs),
-    Plan(ReplyArgs),
+    Review,
+    Reject,
+    Suppress,
+    State,
+    Reply,
+    Eval,
 }
 
-#[derive(Debug, Parser)]
-#[command(
-    name = "difftrace",
-    version,
-    about = "LLM pull-request reviewer for GitHub"
-)]
-pub struct Cli {
-    #[command(subcommand)]
-    pub command: Command,
-}
-
-#[derive(Debug, Args)]
-#[command(group(ArgGroup::new("target").required(true).args(["repo", "base"])))]
-pub struct ReviewArgs {
-    #[arg(long, help = "Repository as owner/repo (not used with --base)")]
-    pub repo: Option<String>,
-
-    #[arg(long, help = "Pull request number (not used with --base)")]
-    pub pr: Option<u64>,
-
-    #[arg(long, help = "Render the review to stdout instead of posting it")]
-    pub dry_run: bool,
-
-    #[arg(
-        long,
-        help = "Review the local branch offline: reviews merge-base(<base>, HEAD)..HEAD \
-                in the current directory and prints without posting"
-    )]
-    pub base: Option<String>,
-
-    #[arg(
-        long,
-        help = "Path to a config file (default: ~/.difftrace/config.toml)"
-    )]
-    pub config: Option<std::path::PathBuf>,
-
-    #[arg(
-        long,
-        help = "Cross-review memory file: loaded into the review, appended after \
-                posting (posted rounds only)"
-    )]
-    pub memory: Option<std::path::PathBuf>,
-
-    #[arg(
-        long,
-        help = "Pin the run to this head commit: fail if the pull request head differs"
-    )]
-    pub sha: Option<String>,
-
-    #[arg(
-        long,
-        value_enum,
-        help = "Review scope: diff = changed lines only (default), deep = whole changed \
-                files with pre-existing issues listed separately, full = every file in \
-                the repository (local --base runs only)"
-    )]
-    pub scope: Option<crate::config::ReviewMode>,
-
-    #[arg(
-        long,
-        value_enum,
-        value_delimiter = ',',
-        help = "Kinds of issues to hunt: security, correctness, concurrency, performance, \
-                tests, docs (default: all)"
-    )]
-    pub focus: Option<Vec<crate::config::IssueKind>>,
-
-    #[arg(
-        long,
-        value_enum,
-        help = "Drop findings below this severity (default: nitpick keeps everything)"
-    )]
-    pub severity: Option<crate::findings::Severity>,
-}
-
-#[derive(Debug, Args)]
-#[command(group(ArgGroup::new("comment").required(true)))]
-pub struct ReplyArgs {
-    #[arg(long, help = "Repository as owner/repo")]
-    pub repo: String,
-
-    #[arg(long, help = "Pull request number")]
-    pub pr: u64,
-
-    #[arg(long, group = "comment", help = "The conversation comment by id")]
-    pub issue_comment: Option<u64>,
-
-    #[arg(long, group = "comment", help = "The review-thread comment by id")]
-    pub review_comment: Option<u64>,
-
-    #[arg(
-        long,
-        help = "Path to a config file (default: ~/.difftrace/config.toml)"
-    )]
-    pub config: Option<std::path::PathBuf>,
-
-    #[arg(
-        long,
-        help = "Pin the run to this head commit: fail if the pull request head differs"
-    )]
-    pub sha: Option<String>,
-}
-
-pub fn parse_repo(raw: &str) -> Result<RepoRef, String> {
-    let Some((owner, repo)) = raw.split_once('/') else {
-        return Err(format!("--repo must be owner/repo, got {raw:?}"));
-    };
-    if owner.is_empty() || repo.is_empty() || repo.contains('/') {
-        return Err(format!("--repo must be owner/repo, got {raw:?}"));
+impl Command {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Review => "review",
+            Self::Reject => "reject",
+            Self::Suppress => "suppress",
+            Self::State => "state",
+            Self::Reply => "reply",
+            Self::Eval => "eval",
+        }
     }
-    Ok(RepoRef {
-        owner: owner.to_owned(),
-        repo: repo.to_owned(),
-    })
 }
 
-pub fn check_sha(head_sha: &str, requested: Option<&str>) -> Result<(), String> {
-    match requested {
-        Some(requested) if head_sha != requested => Err(format!(
-            "--sha pins this run to {requested} but the pull request head is {head_sha}; \
-             nothing was run — re-resolve the head and dispatch again"
-        )),
-        _ => Ok(()),
+pub fn parse(args: &[String]) -> Result<Command, DtError> {
+    let Some(first) = args.first() else {
+        return Err(DtError::Cli(format!(
+            "a subcommand is required: {}",
+            SUBCOMMANDS.join(", ")
+        )));
+    };
+    match first.as_str() {
+        "review" => Ok(Command::Review),
+        "reject" => Ok(Command::Reject),
+        "suppress" => Ok(Command::Suppress),
+        "state" => Ok(Command::State),
+        "reply" => Ok(Command::Reply),
+        "eval" => Ok(Command::Eval),
+        other => Err(DtError::Cli(format!(
+            "unknown subcommand {other:?}; expected one of: {}",
+            SUBCOMMANDS.join(", ")
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunOutcome {
+    Clean,
+    BlockingFindings,
+    InfrastructureFailure,
+    PartialRound,
+}
+
+impl RunOutcome {
+    #[must_use]
+    pub fn exit_code(self) -> u8 {
+        match self {
+            Self::Clean => 0,
+            Self::BlockingFindings => 1,
+            Self::InfrastructureFailure => 2,
+            Self::PartialRound => 3,
+        }
+    }
+}
+
+impl From<DtError> for RunOutcome {
+    fn from(err: DtError) -> Self {
+        match err {
+            DtError::PartialRound { .. } => Self::PartialRound,
+            _ => Self::InfrastructureFailure,
+        }
     }
 }
 
@@ -146,230 +82,27 @@ pub fn check_sha(head_sha: &str, requested: Option<&str>) -> Result<(), String> 
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_review_command_parses_its_arguments() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "difftrace",
-            "review",
-            "--repo",
-            "dch-labs/difftrace",
-            "--pr",
-            "42",
-            "--dry-run",
-            "--sha",
-            "9f3b2c1",
-        ])
-        .map_err(|err| err.to_string())?;
-        let Command::Review(args) = cli.command else {
-            return Err("expected the review subcommand".into());
-        };
-        assert_eq!(args.repo.as_deref(), Some("dch-labs/difftrace"));
-        assert_eq!(args.pr, Some(42));
-        assert!(args.dry_run);
-        assert!(args.base.is_none());
-        assert_eq!(args.config, None);
-        assert_eq!(args.sha.as_deref(), Some("9f3b2c1"));
-        Ok(())
+    fn arg(word: &str) -> Vec<String> {
+        vec![word.to_owned()]
     }
 
     #[test]
-    fn a_local_review_parses_with_the_base_flag_alone() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from(["difftrace", "review", "--base", "master"])
-            .map_err(|err| err.to_string())?;
-        let Command::Review(args) = cli.command else {
-            return Err("expected the review subcommand".into());
-        };
-        assert_eq!(args.base.as_deref(), Some("master"));
-        assert_eq!(args.repo, None);
-        assert_eq!(args.pr, None);
-        assert!(
-            !args.dry_run,
-            "local mode always renders; the flag is implicit"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn the_reply_command_parses_exactly_one_comment_kind() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let cli = Cli::try_parse_from([
-            "difftrace",
-            "reply",
-            "--repo",
-            "dch-labs/difftrace",
-            "--pr",
-            "42",
-            "--review-comment",
-            "7",
-        ])
-        .map_err(|err| err.to_string())?;
-        let Command::Reply(args) = cli.command else {
-            return Err("expected the reply subcommand".into());
-        };
-        assert_eq!(args.review_comment, Some(7));
-        assert_eq!(args.issue_comment, None);
-        Ok(())
-    }
-
-    #[test]
-    fn the_reply_command_rejects_both_and_neither_comment_kind() {
-        assert!(
-            Cli::try_parse_from([
-                "difftrace",
-                "reply",
-                "--repo",
-                "a/b",
-                "--pr",
-                "1",
-                "--issue-comment",
-                "2",
-                "--review-comment",
-                "3"
-            ])
-            .is_err()
-        );
-        assert!(Cli::try_parse_from(["difftrace", "reply", "--repo", "a/b", "--pr", "1"]).is_err());
-    }
-
-    #[test]
-    fn the_plan_command_parses_like_the_reply_command() -> Result<(), Box<dyn std::error::Error>> {
-        let cli = Cli::try_parse_from([
-            "difftrace",
-            "plan",
-            "--repo",
-            "dch-labs/difftrace",
-            "--pr",
-            "42",
-            "--review-comment",
-            "7",
-        ])
-        .map_err(|err| err.to_string())?;
-        let Command::Plan(args) = cli.command else {
-            return Err("expected the plan subcommand".into());
-        };
-        assert_eq!(args.review_comment, Some(7));
-        Ok(())
-    }
-
-    #[test]
-    fn a_review_without_a_target_is_rejected() {
-        assert!(Cli::try_parse_from(["difftrace", "review"]).is_err());
-    }
-
-    #[test]
-    fn the_review_command_parses_scope_focus_and_severity() -> Result<(), Box<dyn std::error::Error>>
-    {
-        let cli = Cli::try_parse_from([
-            "difftrace",
-            "review",
-            "--repo",
-            "a/b",
-            "--pr",
-            "7",
-            "--scope",
-            "deep",
-            "--focus",
-            "security,tests",
-            "--severity",
-            "warning",
-        ])
-        .map_err(|err| err.to_string())?;
-        let Command::Review(args) = cli.command else {
-            return Err("expected the review subcommand".into());
-        };
-        assert_eq!(args.scope, Some(crate::config::ReviewMode::Deep));
-        assert_eq!(
-            args.focus,
-            Some(vec![
-                crate::config::IssueKind::Security,
-                crate::config::IssueKind::Tests
-            ])
-        );
-        assert_eq!(args.severity, Some(crate::findings::Severity::Warning));
-        Ok(())
-    }
-
-    #[test]
-    fn an_unknown_scope_is_rejected() {
-        assert!(
-            Cli::try_parse_from([
-                "difftrace",
-                "review",
-                "--repo",
-                "a/b",
-                "--pr",
-                "1",
-                "--scope",
-                "wide"
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn a_base_conflicts_with_the_github_target() {
-        assert!(
-            Cli::try_parse_from([
-                "difftrace",
-                "review",
-                "--repo",
-                "a/b",
-                "--pr",
-                "1",
-                "--base",
-                "master"
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn the_version_flag_reports_the_package_version() -> Result<(), Box<dyn std::error::Error>> {
-        let rendered = match Cli::try_parse_from(["difftrace", "--version"]) {
-            Err(err) => err.to_string(),
-            Ok(_) => return Err("--version must exit rather than parse".into()),
-        };
-        assert!(
-            rendered.contains(env!("CARGO_PKG_VERSION")),
-            "version output must carry the package version: {rendered}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn repo_strings_split_into_owner_and_repo() -> Result<(), Box<dyn std::error::Error>> {
-        let parsed = parse_repo("dch-labs/difftrace")?;
-        assert_eq!(parsed.owner, "dch-labs");
-        assert_eq!(parsed.repo, "difftrace");
-        Ok(())
-    }
-
-    #[test]
-    fn malformed_repo_strings_are_rejected() {
-        assert!(parse_repo("justaname").is_err());
-        assert!(parse_repo("/repo").is_err());
-        assert!(parse_repo("owner/").is_err());
-        assert!(parse_repo("a/b/c").is_err());
-        assert!(parse_repo("").is_err());
-    }
-
-    #[test]
-    fn a_sha_pin_matching_the_head_is_accepted() {
-        assert!(check_sha("9f3b2c1full", Some("9f3b2c1full")).is_ok());
-        assert!(check_sha("9f3b2c1full", None).is_ok());
-    }
-
-    #[test]
-    fn a_sha_pin_off_the_head_fails_and_names_both_commits()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let err = check_sha("def4567", Some("9f3b2c1"))
+    fn known_subcommands_parse_and_unknown_ones_list_the_valid_set() {
+        for word in SUBCOMMANDS {
+            assert!(parse(&arg(word)).is_ok_and(|parsed| parsed.as_str() == word));
+        }
+        let err = parse(&arg("teleport"))
             .err()
-            .ok_or("a pin that differs from the head must fail validation")?;
-        assert!(
-            err.contains("9f3b2c1"),
-            "the requested commit is named: {err}"
-        );
-        assert!(err.contains("def4567"), "the actual head is named: {err}");
-        Ok(())
+            .unwrap_or(DtError::Cli(String::new()));
+        assert!(err.to_string().contains("review"));
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn exit_codes_follow_the_contract() {
+        assert_eq!(RunOutcome::Clean.exit_code(), 0);
+        assert_eq!(RunOutcome::BlockingFindings.exit_code(), 1);
+        assert_eq!(RunOutcome::InfrastructureFailure.exit_code(), 2);
+        assert_eq!(RunOutcome::PartialRound.exit_code(), 3);
     }
 }

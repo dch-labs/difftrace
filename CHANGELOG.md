@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased — 0.12.0-alpha.1, the v2 rewrite branch]
+
+### Added
+
+- The v2 crate skeleton: the total rewrite begins. The v1 modules are
+  gone from this branch (v1 stays runnable from master and its
+  tags — the eval tooling targets the installed v1 binary); in their
+  place stand the v2 module tree (identity carried over and wired in
+  with ported pins), the design's error model
+  (`DtError` with judge-absence and partial-round variants), the full
+  configuration tables with the owner-answered judge panel
+  (`zai:glm-5.3` + `zai:glm-5.3-flash` + `local`, quorum of two;
+  oracle off by default) parsed strictly — unknown keys are rejected
+  where v1 ignored them — and a subcommand surface
+  (`review`/`reject`/`suppress`/`state`/`reply`/`eval`) that names
+  what is not yet implemented and maps run outcomes to the exit-code
+  contract 0–3 (pinned by the config-defaults, strict-parse,
+  subcommand, and exit-code tests). The judge quorum lands as a named
+  constant, argv tolerates non-UTF-8 bytes, `error_chain` walks real
+  sources, and the crate metadata drops the loopctl claim and the
+  unused `serde_json` dependency until they return with their tasks.
+
 ## [0.11.4] - 2026-09-08
 
 ### Added
