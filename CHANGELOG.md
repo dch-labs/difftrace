@@ -9,6 +9,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The aspect registry (`src/aspects.rs`): the design's check
+  vocabulary as code — eight aspects with judge-facing definitions
+  (verbatim from the design table) and mechanical severity ceilings
+  (docs caps at suggestion and physically cannot emit a warning;
+  tests/fixtures cap at warning; the rest allow critical), a
+  config-editable run set (`[aspects] default`, with per-path
+  `extra`/`replace` overrides resolved by the longest matching glob —
+  `**` spans path segments, `*` stays within one, and a hand-rolled
+  matcher keeps the dependency count unchanged), fail-closed
+  construction that rejects unknown aspect ids wherever they appear,
+  and `definitions_block` rendering the per-judge aspect list. The
+  minimal registry that mechanical validation shipped as a
+  placeholder is replaced wholesale: `validate_finding` now checks
+  severity against this registry, unknown aspects keep their nitpick
+  fail-closed ceiling, and both drop pins stay green (pinned by the
+  ceiling, set-resolution, override, longest-glob, unknown-id,
+  definition-block, and glob-semantics tests).
+- The full config and CLI surface (`src/cli.rs`, `src/config.rs`): the
+  complete command grammar — `review` with every design flag
+  (`--base`/`--repo`+`--pr` mutual exclusions, `--scope`, `--focus`,
+  `--severity`, `--judges`/repeatable `--judge`, `--passes`,
+  `--oracle`, `--budget-secs`, `--config`, `--dry-run`, `--json`,
+  `--fix-prompts`), plus `reject`, `suppress list|clear`, `state
+  show|reset`, `reply --mode answer|plan`, and `eval run` — parsed by
+  clap with typed vocabulary errors (unknown scope, severity, or
+  oracle values reject with the valid set; non-UTF-8 argv still errors
+  cleanly). Configuration loads layered — explicit `--config` path
+  (required to exist), else the first `.difftrace/config.toml` found
+  walking up from the working directory (whole-file precedence: a repo
+  file replaces the global file; pinned so global tables cannot leak
+  through), else `~/.difftrace/config.toml`, else defaults — and env
+  overrides apply over the flag-mirrored knobs
+  (`DIFFTRACE_SCOPE`/`_SEVERITY`/`_JUDGES`/`_JUDGE`/`_FOCUS`/`_PASSES`
+  /`_ORACLE`/`_BUDGET_SECS`), resolved flag > env > file > default and
+  pinned end to end. The v1 `~/.difftrace/env` file returns as the
+  lowest env layer (comments, blanks, and malformed lines skipped;
+  empty values count as unset on both layers), carried by an
+  `EnvSource` seam so tests never mutate process environment.
+  `[[tools.external]]` entries parse per the design (name, command,
+  `diag`|`cargo-json` format, `run_on` glob, per-entry `budget_secs`
+  defaulting 60; unknown formats and zero budgets reject). Every
+  subcommand still dispatches to a not-yet error at exit 2 — bodies
+  arrive with their owning tasks (pinned by the flag-surface,
+  mutual-exclusion, subcommand, dispatch, layering, repo-config,
+  env-override, env-file, and external-tool tests).
+- Mechanical finding validation (`src/contracts.rs`): the gate every
+  finding passes before it may vote — cites must resolve in the pinned
+  index, the mechanism must cite at least one line of its own region,
+  external assumptions above suggestion drop, severity must sit under
+  the aspect ceiling (a minimal registry over the default aspects:
+  docs cap suggestion, tests/fixtures cap warning, the rest critical;
+  unknown aspects fail closed), and titles must be non-empty within 80
+  characters; each rule drops with its own reason (pinned per rule
+  plus the all-five pass and the fail-closed unknown aspect).
+- The diff layer (`src/diff.rs` + `src/diff/regions.rs`): a pure
+  unified-diff parser (new-side line maps per file, `+++ b/` path
+  handling, `/dev/null` deletions anchor nothing, hunk-body shape
+  enforced with line-numbered errors), per-scope region building —
+  added-line clusters with gap-merge three for the diff scope,
+  hunk-spanning file regions for deep, repo regions from an injected
+  file list for full — and the cite-resolution authority: a citation
+  resolves only against lines the pinned diff actually shows, and
+  clamping admits only lines inside the cited region. Parse shape is
+  enforced both-sided: hunk headers only count outside bodies (an
+  added line whose content starts with pluses stays body — no phantom
+  files), old/new counts must both close (under- and over-declared
+  hunks and orphan hunks are line-numbered errors), `/dev/null`
+  deletion bodies consume without anchoring, empty body lines read as
+  context, and nested `b/` paths strip exactly one prefix (pinned by
+  the boundary, count, orphan, tolerance, and path tests).
+- The v2 data spine (`src/contracts.rs`): every pipeline stage
+  communicates only through these types — pinned ranges, regions and
+  coverage cells, judge reports with per-cell verdicts, findings with
+  stable composite ids (`region/aspect/normalized-title`, built by
+  the constructor so no caller forgets; case, spacing, and punctuation
+  fold away), claim types, the reconciled verdict with coverage
+  summary and cross-round state, and the structural-equivalence
+  helper behind the idempotency metric (judge order normalizes away;
+  everything else must match). `serde_json` returns to the main crate
+  here — the `--json` verdict output is this module's round-trip,
+  pinned byte-stably along with the id-stability, normalization,
+  wire-tag, and equivalence tests; a title with no alphanumeric
+  content keeps a distinct id through a stable digest of the raw
+  text.
 - The v2 crate skeleton: the total rewrite begins. The v1 modules are
   gone from this branch (v1 stays runnable from master and its
   tags — the eval tooling targets the installed v1 binary); in their
@@ -25,7 +109,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subcommand, and exit-code tests). The judge quorum lands as a named
   constant, argv tolerates non-UTF-8 bytes, `error_chain` walks real
   sources, and the crate metadata drops the loopctl claim and the
-  unused `serde_json` dependency until they return with their tasks.
+  unused `serde_json` dependency until they return.
 
 ## [0.11.4] - 2026-09-08
 

@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod identity;
 
+pub mod aspects;
 pub mod contracts;
 pub mod diff;
 pub mod gateway;

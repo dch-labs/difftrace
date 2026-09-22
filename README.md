@@ -17,10 +17,17 @@ findings, `2` infrastructure failure, `3` partial round.
   installed v1 binary keeps working.
 - **What changed here** — see `CHANGELOG.md` (`[Unreleased —
   0.12.0-alpha.1]`).
-- **Configuration** — `~/.difftrace/config.toml` with the v2 tables
-  (`[judges]`, `[aspects]`, `[tools]`, `[oracle]`, `[ratelimit]`,
-  `[review]`, `[hosted]`); unknown keys are rejected. Secrets never
-  live in the config file.
+- **Configuration** — layered: an explicit `--config` path (which must
+  exist), else the first `.difftrace/config.toml` found walking up
+  from the working directory (whole-file precedence over the global
+  file), else `~/.difftrace/config.toml`, else defaults. The v2 tables
+  (`[judges]`, `[aspects]`, `[tools]` incl. `[[tools.external]]`,
+  `[oracle]`, `[ratelimit]`, `[review]`, `[hosted]`); unknown keys are
+  rejected. Env overrides cover the flag-mirrored knobs
+  (`DIFFTRACE_SCOPE`, `DIFFTRACE_SEVERITY`, `DIFFTRACE_JUDGES`,
+  `DIFFTRACE_JUDGE`, `DIFFTRACE_FOCUS`, `DIFFTRACE_PASSES`,
+  `DIFFTRACE_ORACLE`, `DIFFTRACE_BUDGET_SECS`); secrets never live in
+  config files — env or `~/.difftrace/env` only.
 - **Eval** — the `eval/` package (golden set, mutation corpus, metrics
   runner) measures v1 now and v2 later; its runner drives whatever v1
   binary you point it at (`--binary`, defaulting to PATH).
