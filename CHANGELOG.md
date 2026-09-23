@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The tool adapter layer (`src/tools.rs` + `src/tools/diag.rs` +
+  `src/tools/cargo_json.rs`): the S0 extension contract —
+  `ToolAdapter` (name, `should_run` over changed regions, a data-only
+  `CommandSpec` with argv/cwd/timeout, and `parse` into
+  `ToolFinding`s) — implemented today by external tools configured
+  from `[[tools.external]]`: the command string splits quote-aware and
+  expands `{files}` (a whole token becomes one argv element per
+  target, an embedded occurrence joins them in place, and a target
+  named like a flag is dropped rather than injected into argv),
+  `run_on` matches changed files through the path glob with flat
+  brace expansion (`**/*.{js,ts,tsx}`; patterns with nested,
+  repeated, or unmatched braces reject at construction), and the
+  entry's budget is the
+  timeout. The `diag` parser reads the
+  `file:line[:col]: level: message` convention shared by eslint's
+  unix format, golangci-lint, clang-tidy, shellcheck, hadolint, and
+  ruff — the level is optional in practice (golangci emits none,
+  ruff emits a code); recognized levels map error/err/fatal →
+  critical, warning/warn → warning, and info/note/style/performance/
+  hint → suggestion, anything unrecognized keeps the whole message
+  at warning; line zero rejects (timestamps and clock-stamped
+  progress are not findings) and lines that do not match the shape
+  skip as tool noise. The `cargo-json` parser maps cargo's
+  `--message-format=json` compiler messages — errors and warnings
+  only, anchored at the first primary span, with a spanless summary
+  error surfacing at the `(workspace)` pseudo-target instead of
+  vanishing — skipping notes, non-messages, and non-JSON lines. The
+  registry sorts adapters by name, rejects unknown formats and
+  duplicate names, and every adapter's output is sorted by file,
+  line, message and capped at two hundred findings — deterministic
+  run-to-run (pinned by the dialect, cargo-json, glob, argv,
+  fail-closed, brace-rejection, flag-shaped-target, duplicate,
+  sort, and cap tests).
 - The round state core (`src/state.rs` + `src/state/file.rs` +
   `src/state/marker.rs`): the cross-round issue lifecycle — a re-find
   (anchored on the finding's first evidence cite and matched through
