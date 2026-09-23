@@ -1,7 +1,6 @@
 //! The v2 command surface: the full flag grammar, layered
-//! configuration resolution, and the exit-code contract. Subcommand
-//! bodies arrive with their owning tasks; dispatch validates inputs
-//! and reports what is not yet implemented.
+//! configuration resolution, and the exit-code contract; dispatch
+//! validates inputs and reports what is not yet implemented.
 
 use std::path::PathBuf;
 

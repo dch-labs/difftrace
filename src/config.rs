@@ -28,7 +28,6 @@ pub struct DifftraceConfig {
     pub oracle: OracleConfig,
     pub ratelimit: RatelimitConfig,
     pub review: ReviewConfig,
-    pub hosted: HostedConfig,
 }
 
 impl DifftraceConfig {
@@ -249,9 +248,6 @@ impl Default for RatelimitConfig {
 pub struct ReviewConfig {
     pub scope: String,
     pub severity: String,
-    pub retire_after_misses: u32,
-    pub line_drift_tolerance: u64,
-    pub token_overlap_pct: u64,
 }
 
 impl Default for ReviewConfig {
@@ -259,23 +255,6 @@ impl Default for ReviewConfig {
         Self {
             scope: "diff".to_owned(),
             severity: "nitpick".to_owned(),
-            retire_after_misses: 2,
-            line_drift_tolerance: 5,
-            token_overlap_pct: 50,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct HostedConfig {
-    pub state_marker: String,
-}
-
-impl Default for HostedConfig {
-    fn default() -> Self {
-        Self {
-            state_marker: "<!-- difftrace:state ".to_owned(),
         }
     }
 }
@@ -452,7 +431,6 @@ mod tests {
         assert!((config.ratelimit.jitter - 0.3).abs() < 1e-9);
         assert_eq!(config.review.scope, "diff");
         assert_eq!(config.review.severity, "nitpick");
-        assert_eq!(config.review.retire_after_misses, 2);
         assert_eq!(
             config.aspects.default,
             DEFAULT_ASPECTS
@@ -460,7 +438,26 @@ mod tests {
                 .map(|s| (*s).to_owned())
                 .collect::<Vec<_>>()
         );
-        assert_eq!(config.hosted.state_marker, "<!-- difftrace:state ");
+    }
+
+    #[test]
+    fn lifecycle_knobs_reject_as_unknown_fields_until_wired() {
+        for knob in [
+            "retire_after_misses",
+            "line_drift_tolerance",
+            "token_overlap_pct",
+        ] {
+            let config = DifftraceConfig::from_toml_str(&format!("[review]\n{knob} = 5\n"));
+            assert!(
+                config.is_err_and(|err| err.to_string().contains(knob)),
+                "{knob} has no shipped behavior and must not parse"
+            );
+        }
+        let hosted = DifftraceConfig::from_toml_str("[hosted]\nstate_marker = \"x\"\n");
+        assert!(
+            hosted.is_err_and(|err| err.to_string().contains("hosted")),
+            "the hosted table returns with the hosted gateway"
+        );
     }
 
     #[test]

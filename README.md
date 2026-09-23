@@ -22,7 +22,7 @@ findings, `2` infrastructure failure, `3` partial round.
   from the working directory (whole-file precedence over the global
   file), else `~/.difftrace/config.toml`, else defaults. The v2 tables
   (`[judges]`, `[aspects]`, `[tools]` incl. `[[tools.external]]`,
-  `[oracle]`, `[ratelimit]`, `[review]`, `[hosted]`); unknown keys are
+  `[oracle]`, `[ratelimit]`, `[review]`); unknown keys are
   rejected. Env overrides cover the flag-mirrored knobs
   (`DIFFTRACE_SCOPE`, `DIFFTRACE_SEVERITY`, `DIFFTRACE_JUDGES`,
   `DIFFTRACE_JUDGE`, `DIFFTRACE_FOCUS`, `DIFFTRACE_PASSES`,

@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The round state core (`src/state.rs` + `src/state/file.rs` +
+  `src/state/marker.rs`): the cross-round issue lifecycle — a re-find
+  (anchored on the finding's first evidence cite and matched through
+  the proven `same_spot` identity) resets misses and reopens retired
+  or owner-rejected issues, a full covered round without a re-find
+  grows misses and retires at two consecutive, partial or narrowed
+  rounds freeze misses (absence is not evidence), and per-round vote
+  history is kept capped at the recent twenty; two same-round findings
+  at one spot record into one issue under the stronger vote count, and
+  a same-round confirmed twin cannot undo a suppression's rejection —
+  the owner's word holds for the round it fired in. Suppressions match on
+  ≥50% title-token overlap plus the path glob over any evidence file,
+  count a hit on every suppressed re-raise, and pin their issue as
+  rejected; oracle-refuted claims and deterministic tool findings
+  never enter the lifecycle. One struct, two serializers: the file
+  backend (a sanitized `<checkout>.state.json` name so a hostile
+  checkout label cannot escape the state directory, an atomic
+  temp-then-rename write, a missing file loading a default, a corrupt
+  one erroring, and a file saved for another checkout rejecting
+  instead of loading) and the marker backend (a
+  `<!-- difftrace:state … -->` block embedded in a verdict body with
+  every `>` escaped as `\u003e`, so state can never close the host
+  comment early; re-embedding replaces the block). `Issue.misses` and
+  `votes_seen` now default when absent, so earlier files keep parsing
+  (pinned by the lifecycle, suppression, sanitization, escape,
+  round-trip, and legacy-parse tests).
 - The aspect registry (`src/aspects.rs`): the design's check
   vocabulary as code — eight aspects with judge-facing definitions
   (verbatim from the design table) and mechanical severity ceilings
@@ -53,7 +79,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subcommand still dispatches to a not-yet error at exit 2 — bodies
   arrive with their owning tasks (pinned by the flag-surface,
   mutual-exclusion, subcommand, dispatch, layering, repo-config,
-  env-override, env-file, and external-tool tests).
+  env-override, env-file, external-tool, and knob-rejection tests). The
+  `[review]` lifecycle knobs (`retire_after_misses`,
+  `line_drift_tolerance`, `token_overlap_pct`) and the `[hosted]`
+  table are absent until their owning stages wire them — setting one
+  rejects as an unknown field.
 - Mechanical finding validation (`src/contracts.rs`): the gate every
   finding passes before it may vote — cites must resolve in the pinned
   index, the mechanism must cite at least one line of its own region,
@@ -77,8 +107,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files), old/new counts must both close (under- and over-declared
   hunks and orphan hunks are line-numbered errors), `/dev/null`
   deletion bodies consume without anchoring, empty body lines read as
-  context, and nested `b/` paths strip exactly one prefix (pinned by
-  the boundary, count, orphan, tolerance, and path tests).
+  context, and nested `b/` paths strip exactly one prefix. `\ No
+  newline at end of file` markers are metadata in both scopes and
+  anchor nothing, a malformed `@@` header errors naming its own line,
+  an over-declared hunk names the final line, input that is not a diff
+  at all rejects instead of parsing as an empty index, and deletion-,
+  rename-, mode-, and binary-only commits parse as an empty index with
+  nothing to review (pinned by the boundary, count, orphan, tolerance,
+  path, no-newline, malformed-header, non-diff, and empty-index
+  tests).
 - The v2 data spine (`src/contracts.rs`): every pipeline stage
   communicates only through these types — pinned ranges, regions and
   coverage cells, judge reports with per-cell verdicts, findings with

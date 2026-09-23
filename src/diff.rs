@@ -60,10 +60,12 @@ impl DiffIndex {
         let mut new_line: u32 = 0;
         let mut old_remaining: u32 = 0;
         let mut new_remaining: u32 = 0;
+        let mut recognized = false;
         for (number, raw) in diff.lines().enumerate() {
             let line_number = u32::try_from(number.saturating_add(1)).unwrap_or(0);
             if old_remaining == 0 && new_remaining == 0 {
                 if let Some(header) = raw.strip_prefix("+++ ") {
+                    recognized = true;
                     flush(&mut current, &mut files);
                     if let Some(path) = new_path(header) {
                         current = Some((
@@ -84,15 +86,20 @@ impl DiffIndex {
                 if raw.starts_with("--- ")
                     || raw.starts_with("diff --git")
                     || raw.starts_with("index ")
+                    || raw.starts_with("old mode")
+                    || raw.starts_with("new mode")
                     || raw.starts_with("new file mode")
                     || raw.starts_with("deleted file mode")
                     || raw.starts_with("similarity index")
                     || raw.starts_with("rename from")
                     || raw.starts_with("rename to")
+                    || raw.starts_with("Binary files")
                 {
+                    recognized = true;
                     continue;
                 }
                 if let Some((start, counts, end)) = hunk_header(raw) {
+                    recognized = true;
                     if skipping_deletion {
                         old_remaining = counts.0;
                         new_remaining = counts.1;
@@ -114,11 +121,13 @@ impl DiffIndex {
                     }
                     continue;
                 }
+                if raw.starts_with("@@") {
+                    return Err(format!("line {line_number}: a malformed hunk header"));
+                }
                 if raw.is_empty()
                     || raw.starts_with('+')
                     || raw.starts_with('-')
                     || raw.starts_with(' ')
-                    || raw.starts_with('\\')
                 {
                     return Err(format!(
                         "line {line_number}: a diff body line outside a hunk"
@@ -138,8 +147,6 @@ impl DiffIndex {
             } else if raw.starts_with('-') {
                 LineKind::Removed
             } else if raw.starts_with('\\') {
-                old_remaining = old_remaining.saturating_sub(1);
-                new_remaining = new_remaining.saturating_sub(1);
                 continue;
             } else {
                 return Err(format!(
@@ -164,9 +171,15 @@ impl DiffIndex {
             }
         }
         if old_remaining > 0 || new_remaining > 0 {
-            return Err("the diff ends before the last hunk closes".to_owned());
+            let last = diff.lines().count();
+            return Err(format!(
+                "line {last}: the diff ends before the last hunk closes"
+            ));
         }
         flush(&mut current, &mut files);
+        if !recognized && !diff.trim().is_empty() {
+            return Err("line 1: no file header or hunk recognized; not a unified diff".to_owned());
+        }
         Ok(Self { files })
     }
 

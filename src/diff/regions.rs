@@ -328,4 +328,81 @@ diff --git a/gone.rs b/gone.rs
         ));
         Ok(())
     }
+
+    #[test]
+    fn a_no_newline_marker_on_the_old_side_is_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n";
+        let index = DiffIndex::parse(diff)?;
+        assert_eq!(index.added_lines("f"), vec![1]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_no_newline_marker_on_the_new_side_is_ignored() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n+new\n\\ No newline at end of file\n";
+        let index = DiffIndex::parse(diff)?;
+        assert_eq!(index.added_lines("f"), vec![1]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_malformed_hunk_header_names_its_own_line() {
+        let outcome = DiffIndex::parse("--- a/f\n+++ b/f\n@@ broken @@\n+body\n");
+        assert!(
+            matches!(&outcome, Err(err) if err.contains("line 3")),
+            "the malformed header itself is named, not the body line after it: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn non_diff_text_rejects_instead_of_parsing_clean() {
+        assert!(
+            DiffIndex::parse("fatal: not a git repository\n").is_err(),
+            "tool-failure text on the diff channel must not read as a clean review"
+        );
+    }
+
+    #[test]
+    fn an_unclosed_hunk_error_names_the_final_line() {
+        let outcome = DiffIndex::parse("--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n+one\n");
+        assert!(
+            matches!(&outcome, Err(err) if err.contains("line 4")),
+            "over-declared hunks carry a line number like every other shape error: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_deletion_only_diff_parses_as_an_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-here\n-too\n";
+        let index = DiffIndex::parse(diff)?;
+        assert!(
+            index.files().is_empty(),
+            "nothing survived on the new side, so there is nothing to review"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_rename_only_diff_parses_as_an_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "diff --git a/old.rs b/new.rs\nsimilarity index 100%\nrename from old.rs\nrename to new.rs\n";
+        let index = DiffIndex::parse(diff)?;
+        assert!(index.files().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_mode_only_diff_parses_as_an_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "diff --git a/script.sh b/script.sh\nold mode 100644\nnew mode 100755\n";
+        let index = DiffIndex::parse(diff)?;
+        assert!(index.files().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn a_binary_only_diff_parses_as_an_empty_index() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "diff --git a/logo.png b/logo.png\nindex 1234567..89abcde 100644\nBinary files a/logo.png and b/logo.png differ\n";
+        let index = DiffIndex::parse(diff)?;
+        assert!(index.files().is_empty());
+        Ok(())
+    }
 }

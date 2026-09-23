@@ -232,7 +232,9 @@ pub struct Issue {
     pub first_seen: String,
     pub last_seen: String,
     pub status: IssueStatus,
+    #[serde(default)]
     pub misses: u32,
+    #[serde(default)]
     pub votes_seen: Vec<(u32, usize)>,
 }
 
