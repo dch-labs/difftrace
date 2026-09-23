@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The repository gateway seam (`src/gateway.rs` +
+  `src/gateway/local.rs`): the `PrGateway` trait — `pinned_range`,
+  `diff`, `read_file_at_head`, `list_files_at_head`,
+  `search_at_head` — and the local hermetic-git implementation:
+  every invocation carries `-c color.ui=never
+  core.quotePath=false diff.noprefix=false`, the repo root comes
+  from `rev-parse --show-toplevel` (reads from any subdirectory
+  stay repo-relative), and the pin is made once at open — base =
+  `merge-base <base> HEAD`, head = `rev-parse HEAD`, diff =
+  `git diff --no-renames base head` — so a commit after open
+  cannot change the reviewed diff. File reads run `git cat-file blob
+  head:path` (a missing, empty, or directory path errors naming the
+  path — a tree listing never reads as file content), listing is
+  `ls-tree -r --name-only` at head (sorted, tracked only; a failed
+  listing errors instead of reading as an empty repository), and
+  search is `git grep -n -I` POSIX ERE at the pinned sha — hits
+  sorted by file then line and capped, colons in file names survive
+  parsing, no matches reading as empty while a broken pattern
+  errors. New contracts: `DiffSource
+  { Unified }`, `FileSnapshot`, `SearchHit` (pinned by the
+  pin-freeze, merge-base, subdir, sort-and-cap, colon-name, listing,
+  failed-listing, tree-path, missing-file, no-repo, and empty-read
+  tests).
 - The Rust built-in adapters (`src/tools/rust.rs` +
   `src/tools/crates.rs`): fmt / clippy / check / audit as
   first-class `ToolAdapter`s over the workspace map — member
