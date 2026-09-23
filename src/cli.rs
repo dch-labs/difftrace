@@ -206,7 +206,18 @@ pub fn resolve_run(args: &ReviewArgs, env: &EnvSource) -> Result<ResolvedRun, Dt
         config.judges.count = count;
     }
     if !args.judge.is_empty() {
-        config.judges.profiles.clone_from(&args.judge);
+        let names: Vec<String> = args
+            .judge
+            .iter()
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .collect();
+        if names.is_empty() {
+            return Err(DtError::Config(
+                "judges.profiles must name at least one profile".to_owned(),
+            ));
+        }
+        config.judges.profiles = names;
     }
     if config.judges.count == 0 {
         return Err(DtError::Config(
@@ -670,6 +681,40 @@ mod tests {
         assert_eq!(empty_env.passes, 1);
         let bad_env = resolve_run(&file_scope, &env_of(&[("DIFFTRACE_PASSES", "zero")]));
         assert!(bad_env.is_err_and(|err| err.to_string().contains("DIFFTRACE_PASSES")));
+        std::fs::remove_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_judge_name_rejects_at_the_boundary() -> Result<(), DtError> {
+        let dir = temp_dir("judge-empty")?;
+        let config = dir.join("empty.toml");
+        std::fs::write(&config, "").map_err(|source| DtError::Config(source.to_string()))?;
+        let empty = resolve_run(
+            &ReviewArgs {
+                judge: vec![String::new()],
+                config: Some(config.clone()),
+                ..ReviewArgs::default()
+            },
+            &env_of(&[]),
+        );
+        assert!(
+            empty.is_err_and(|err| err.to_string().contains("judges.profiles")),
+            "an empty --judge value must reject like the env path, not resolve an empty profile name"
+        );
+        let mixed = resolve_run(
+            &ReviewArgs {
+                judge: vec![String::new(), "zai:glm-5.3".to_owned()],
+                config: Some(config),
+                ..ReviewArgs::default()
+            },
+            &env_of(&[]),
+        )?;
+        assert_eq!(
+            mixed.config.judges.profiles,
+            vec!["zai:glm-5.3".to_owned()],
+            "an empty entry among real names drops rather than poisoning the list"
+        );
         std::fs::remove_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
         Ok(())
     }

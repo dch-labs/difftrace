@@ -9,11 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Rust built-in adapters (`src/tools/rust.rs` +
+  `src/tools/crates.rs`): fmt / clippy / check / audit as
+  first-class `ToolAdapter`s over the workspace map — member
+  directories (trailing-`*` globs expand by listing manifest-bearing
+  subdirectories; other glob shapes reject) map changed paths to
+  sorted, deduped crate names with unknown paths falling back to the
+  root package; clippy/check build `cargo … -p <crates>
+  --message-format=json` argv (`-D warnings` after `--` for clippy),
+  fmt runs `cargo fmt --check` and reads its
+  `Diff in <path>:<line>:` headers — one suggestion-grade finding
+  per unformatted file at its first reported line, the path verbatim
+  as the tool prints it — and audit reads `cargo audit --json`
+  advisories as suggestion-grade findings at the `(workspace)`
+  pseudo-target with the affected package and advisory id leading
+  the message (state
+  dedups by id later). Repeated enabled names reject (one tool
+  label means one tool), and a zero `[tools] budget_secs` rejects
+  at load. Built-in output passes through the same sort-and-cap
+  normalization as external tools, so an interleaved clippy/check
+  flood or a many-file fmt run still yields the same sorted, capped
+  findings. `should_run` gates fmt/clippy/check on Rust
+  paths and affected crates; the advisory scan always runs — the one
+  non-diff-scoped exception. The run seam: an injectable `Executor`
+  (`ProcessExecutor` drains stdout on a reader thread — output
+  beyond pipe capacity cannot deadlock — and kills the child at the
+  budget), and `run_cached` keyed by `(tool, sha, Cargo.lock hash)`
+  — a cache hit returns without invoking the tool, a corrupt cache
+  re-runs, a timeout or launch failure marks the tool unavailable
+  without failing the round and caches nothing, and cache writes are
+  best-effort (pinned by the mapping, glob-rejection, virtual-
+  workspace, argv, gating, enabled-list, fmt, audit, sort-and-cap,
+  timeout, launch, cache, and echo tests).
 - The tool adapter layer (`src/tools.rs` + `src/tools/diag.rs` +
   `src/tools/cargo_json.rs`): the S0 extension contract —
   `ToolAdapter` (name, `should_run` over changed regions, a data-only
   `CommandSpec` with argv/cwd/timeout, and `parse` into
-  `ToolFinding`s) — implemented today by external tools configured
+  `ToolFinding`s) — implemented by external tools configured
   from `[[tools.external]]`: the command string splits quote-aware and
   expands `{files}` (a whole token becomes one argv element per
   target, an embedded occurrence joins them in place, and a target
@@ -21,8 +53,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `run_on` matches changed files through the path glob with flat
   brace expansion (`**/*.{js,ts,tsx}`; patterns with nested,
   repeated, or unmatched braces reject at construction), and the
-  entry's budget is the
-  timeout. The `diag` parser reads the
+  entry's budget is the timeout. The `diag` parser reads the
   `file:line[:col]: level: message` convention shared by eslint's
   unix format, golangci-lint, clang-tidy, shellcheck, hadolint, and
   ruff — the level is optional in practice (golangci emits none,
@@ -64,10 +95,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of loading) and the marker backend (a
   `<!-- difftrace:state … -->` block embedded in a verdict body with
   every `>` escaped as `\u003e`, so state can never close the host
-  comment early; re-embedding replaces the block). `Issue.misses` and
+  comment early; the block is the body's final line — extraction
+  anchors to the tail, so a verdict body that quotes the marker
+  prefix survives embedding and round-trips byte-for-byte, and a
+  tail-shaped block that does not parse errors as corrupt rather
+  than reading as stateless; re-embedding replaces the block).
+  `Issue.misses` and
   `votes_seen` now default when absent, so earlier files keep parsing
   (pinned by the lifecycle, suppression, sanitization, escape,
-  round-trip, and legacy-parse tests).
+  round-trip, body-quote, corrupt-tail, and legacy-parse tests).
 - The aspect registry (`src/aspects.rs`): the design's check
   vocabulary as code — eight aspects with judge-facing definitions
   (verbatim from the design table) and mechanical severity ceilings
@@ -94,7 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show|reset`, `reply --mode answer|plan`, and `eval run` — parsed by
   clap with typed vocabulary errors (unknown scope, severity, or
   oracle values reject with the valid set; non-UTF-8 argv still errors
-  cleanly). Configuration loads layered — explicit `--config` path
+  cleanly; an empty `--judge` value rejects at the boundary and an
+  empty name among real names drops, mirroring `--focus` and the env
+  split). Configuration loads layered — explicit `--config` path
   (required to exist), else the first `.difftrace/config.toml` found
   walking up from the working directory (whole-file precedence: a repo
   file replaces the global file; pinned so global tables cannot leak

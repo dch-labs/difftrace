@@ -8,7 +8,8 @@ const MARKER_END: &str = " -->";
 
 pub fn embed(body: &str, state: &RoundState) -> Result<String, DtError> {
     let block = marker_block(state)?;
-    if let Some((start, end)) = block_range(body) {
+    if let Ok(Some((start, _))) = tail_state(body) {
+        let end = body.trim_end().len();
         let mut out = String::with_capacity(body.len().saturating_add(block.len()));
         if let Some(kept) = body.get(..start) {
             out.push_str(kept);
@@ -27,19 +28,10 @@ pub fn embed(body: &str, state: &RoundState) -> Result<String, DtError> {
 }
 
 pub fn extract(body: &str) -> Result<Option<RoundState>, DtError> {
-    let Some((start, end)) = block_range(body) else {
-        return Ok(None);
-    };
-    let json_start = start.saturating_add(MARKER_START.len());
-    let json_end = end.saturating_sub(MARKER_END.len());
-    let Some(json) = body.get(json_start..json_end) else {
-        return Err(DtError::StateCorrupt(
-            "marker state is corrupt: truncated block".to_owned(),
-        ));
-    };
-    serde_json::from_str(json)
-        .map(Some)
-        .map_err(|err| DtError::StateCorrupt(format!("marker state is corrupt: {err}")))
+    match tail_state(body)? {
+        Some((_start, state)) => Ok(Some(state)),
+        None => Ok(None),
+    }
 }
 
 fn marker_block(state: &RoundState) -> Result<String, DtError> {
@@ -51,16 +43,34 @@ fn marker_block(state: &RoundState) -> Result<String, DtError> {
     ))
 }
 
-fn block_range(body: &str) -> Option<(usize, usize)> {
-    let start = body.find(MARKER_START)?;
-    let json_start = start.saturating_add(MARKER_START.len());
-    let relative_end = body.get(json_start..)?.find(MARKER_END)?;
-    Some((
-        start,
-        json_start
-            .saturating_add(relative_end)
-            .saturating_add(MARKER_END.len()),
-    ))
+fn tail_state(body: &str) -> Result<Option<(usize, RoundState)>, DtError> {
+    let trimmed = body.trim_end();
+    let end = trimmed.len();
+    if !trimmed.ends_with(MARKER_END) {
+        return Ok(None);
+    }
+    let mut shaped = false;
+    for (start, _) in trimmed.rmatch_indices(MARKER_START) {
+        let json_start = start.saturating_add(MARKER_START.len());
+        let json_end = end.saturating_sub(MARKER_END.len());
+        if json_start >= json_end {
+            continue;
+        }
+        let Some(json) = trimmed.get(json_start..json_end) else {
+            continue;
+        };
+        shaped = true;
+        if let Ok(state) = serde_json::from_str::<RoundState>(json) {
+            return Ok(Some((start, state)));
+        }
+    }
+    if shaped {
+        Err(DtError::StateCorrupt(
+            "marker state is corrupt: the tail block does not parse".to_owned(),
+        ))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +153,42 @@ mod tests {
         );
         assert_eq!(extract(&second)?, Some(sample("second issue")));
         assert!(second.starts_with("## Verdict"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_body_quoting_the_marker_prefix_survives_embedding() -> Result<(), DtError> {
+        let body =
+            "## Verdict\n\nthe format `<!-- difftrace:state {json} -->` is quoted for reference";
+        let embedded = embed(body, &sample("off by one"))?;
+        assert!(
+            embedded.contains(body),
+            "body text is preserved byte-for-byte"
+        );
+        assert_eq!(extract(&embedded)?, Some(sample("off by one")));
+        let reembedded = embed(&embedded, &sample("second issue"))?;
+        assert_eq!(
+            reembedded.matches(MARKER_START).count(),
+            2,
+            "re-embedding swaps the tail block; the quoted prefix stays body text"
+        );
+        assert!(reembedded.contains(body));
+        assert_eq!(extract(&reembedded)?, Some(sample("second issue")));
+        Ok(())
+    }
+
+    #[test]
+    fn an_unparseable_tail_block_is_corrupt_not_absent() -> Result<(), DtError> {
+        let outcome = extract("<!-- difftrace:state not json -->");
+        assert!(
+            outcome.is_err_and(|err| matches!(err, DtError::StateCorrupt(_))),
+            "a tail-shaped block that does not parse is corruption, not a clean absence"
+        );
+        assert_eq!(
+            extract("<!-- difftrace:state -->")?,
+            None,
+            "a literal empty-payload quote is body text, not a state block"
+        );
         Ok(())
     }
 }

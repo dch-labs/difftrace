@@ -1,7 +1,9 @@
 //! The deterministic tool layer beneath the judges.
 
 pub mod cargo_json;
+pub mod crates;
 pub mod diag;
+pub mod rust;
 
 use std::path::PathBuf;
 

@@ -287,6 +287,12 @@ impl DifftraceConfig {
                 )));
             }
         }
+        if self.tools.budget_secs == 0 {
+            return Err(DtError::Config(
+                "tools.budget_secs must be positive: a zero budget marks every tool unavailable"
+                    .to_owned(),
+            ));
+        }
         Ok(())
     }
 }
@@ -438,6 +444,16 @@ mod tests {
                 .map(|s| (*s).to_owned())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_zero_tool_budget_rejects() {
+        let outcome = DifftraceConfig::from_toml_str("[tools]\nbudget_secs = 0\n");
+        assert!(
+            outcome.is_err_and(|err| err.to_string().contains("budget_secs")),
+            "a zero whole-layer budget silently degrades every tool to unavailable"
+        );
+        assert!(DifftraceConfig::from_toml_str("[tools]\nbudget_secs = 30\n").is_ok());
     }
 
     #[test]
