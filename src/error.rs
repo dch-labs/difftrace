@@ -22,6 +22,8 @@ pub enum DtError {
     StateCorrupt(String),
     #[error("command line error: {0}")]
     Cli(String),
+    #[error("failed to write the report: {0}")]
+    Output(String),
 }
 
 #[must_use]
@@ -57,6 +59,7 @@ mod tests {
             DtError::OracleBudget,
             DtError::StateCorrupt("marker JSON truncated".to_owned()),
             DtError::Cli("unknown subcommand".to_owned()),
+            DtError::Output("stdout closed early".to_owned()),
         ];
         for error in &samples {
             let text = error_chain(error);

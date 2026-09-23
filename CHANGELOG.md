@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The coverage planner (`src/judges.rs`, wiring in `src/cli.rs`):
+  `plan(range, regions, aspects, focus, severity)` builds the work
+  order — cells = each region's `aspects_for` set (per-path
+  overrides respected), sorted by aspect id within region-index
+  order, deduplicated, deterministic for identical inputs. A
+  focus list cuts cells outside it and a severity floor cuts
+  cells whose aspect ceiling cannot clear it; either cut marks
+  the plan `narrowed` (the new `CoveragePlan.narrowed` flag — an
+  empty plan from no regions is not narrowed, nothing was cut),
+  and the planner is pure: the flag is the only channel to the
+  cross-round state. An unknown focus id errors naming it rather
+  than silently emptying the plan. `summarize` estimates the
+  round — judge calls = regions × judges, tokens ≈ region spans
+  capped at 2000 lines × 12 tokens × judges (repo-spanning
+  regions hit the cap, never an absurd estimate) — and
+  `render_dry_run` prints the plan, estimate, pinned range, and
+  per-region aspect outline. `difftrace review --dry-run` is now
+  live end to end: it resolves config, opens the local gateway at
+  the base, builds regions per scope (Full from the tracked file
+  list), plans, and writes the report through a writer seam on a
+  locked stdout — a closed pipe (`| head`) exits 0 silently, any
+  other write failure fails as infrastructure (exit 2) via the new
+  `DtError::Output`, never std's `print!` panic (exit 101); a real
+  review still reports not-yet (pinned by the partition, narrowed,
+  focus, severity, estimate, dry-run, dispatch-exits-clean,
+  full-scope, and write-seam tests).
 - The repository gateway seam (`src/gateway.rs` +
   `src/gateway/local.rs`): the `PrGateway` trait — `pinned_range`,
   `diff`, `read_file_at_head`, `list_files_at_head`,

@@ -2,16 +2,21 @@
 //! configuration resolution, and the exit-code contract; dispatch
 //! validates inputs and reports what is not yet implemented.
 
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::aspects::AspectRegistry;
 use crate::config::{
     self, DifftraceConfig, EnvSource, OraclePolicy, apply_env_overrides_with, load_layered_config,
 };
-use crate::contracts::Severity;
-use crate::diff::Scope;
+use crate::contracts::{AspectId, DiffSource, Severity};
+use crate::diff::{self, Scope};
 use crate::error::DtError;
+use crate::gateway::PrGateway;
+use crate::gateway::local::LocalGateway;
+use crate::judges;
 
 pub const SUBCOMMANDS: [&str; 6] = ["review", "reject", "suppress", "state", "reply", "eval"];
 
@@ -315,10 +320,58 @@ pub fn dispatch(command: &Command) -> Result<RunOutcome, DtError> {
 }
 
 pub fn dispatch_with(command: &Command, env: &EnvSource) -> Result<RunOutcome, DtError> {
+    let start = std::env::current_dir()
+        .map_err(|err| DtError::Git(format!("cannot read the working directory: {err}")))?;
+    let mut stdout = io::stdout().lock();
+    dispatch_at(command, env, &start, &mut stdout)
+}
+
+fn dispatch_at(
+    command: &Command,
+    env: &EnvSource,
+    start: &Path,
+    out: &mut dyn Write,
+) -> Result<RunOutcome, DtError> {
     if let Command::Review(args) = command {
-        resolve_run(args, env)?;
+        let resolved = resolve_run(args, env)?;
+        if resolved.dry_run {
+            let text = run_dry_run_at(start, &resolved)?;
+            write_report(out, &text)?;
+            return Ok(RunOutcome::Clean);
+        }
     }
     Err(not_yet(command.as_str()))
+}
+
+fn write_report(out: &mut dyn Write, text: &str) -> Result<(), DtError> {
+    let outcome = out.write_all(text.as_bytes()).and_then(|()| out.flush());
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(DtError::Output(err.to_string())),
+    }
+}
+
+pub fn run_dry_run_at(start: &Path, resolved: &ResolvedRun) -> Result<String, DtError> {
+    let gateway = LocalGateway::open_at(start, &resolved.base)?;
+    let range = gateway.pinned_range();
+    let regions = match resolved.scope {
+        Scope::Full => diff::repo_regions(&gateway.list_files_at_head()?),
+        Scope::Diff | Scope::Deep => {
+            let DiffSource::Unified(text) = gateway.diff();
+            diff::build_regions(&text, resolved.scope)
+                .map_err(|err| DtError::Git(format!("the pinned diff does not parse: {err}")))?
+        }
+    };
+    let registry = AspectRegistry::from_config(&resolved.config.aspects)?;
+    let focus = resolved
+        .focus
+        .iter()
+        .map(|id| AspectId(id.clone()))
+        .collect::<Vec<_>>();
+    let coverage = judges::plan(range, &regions, &registry, &focus, resolved.severity)?;
+    let summary = judges::summarize(&coverage, resolved.config.judges.count);
+    Ok(judges::render_dry_run(&summary, &coverage))
 }
 
 fn not_yet(subcommand: &str) -> DtError {
@@ -716,6 +769,189 @@ mod tests {
             "an empty entry among real names drops rather than poisoning the list"
         );
         std::fs::remove_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
+        Ok(())
+    }
+
+    fn git(dir: &Path, args: &[&str]) -> Result<(), DtError> {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .map_err(|source| DtError::Config(source.to_string()))?;
+        if !output.status.success() {
+            return Err(DtError::Config(
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn commit(dir: &Path, file: &str, body: &str, message: &str) -> Result<(), DtError> {
+        let path = dir.join(file);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|source| DtError::Config(source.to_string()))?;
+        }
+        std::fs::write(&path, body).map_err(|source| DtError::Config(source.to_string()))?;
+        git(dir, &["add", "-A"])?;
+        git(
+            dir,
+            &[
+                "-c",
+                "user.email=difftrace@example.invalid",
+                "-c",
+                "user.name=difftrace",
+                "commit",
+                "-m",
+                message,
+            ],
+        )
+    }
+
+    #[test]
+    fn dry_run_prints_the_plan_and_estimate() -> Result<(), DtError> {
+        let dir = std::env::temp_dir().join(format!("difftrace-cli-dryrun-{}", std::process::id()));
+        let _unused = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
+        git(&dir, &["init", "-b", "main"])?;
+        commit(&dir, "src/lib.rs", "fn one() {}\n", "base")?;
+        git(&dir, &["checkout", "-b", "topic"])?;
+        commit(&dir, "src/lib.rs", "fn one() {}\nfn two() {}\n", "head")?;
+        let config = dir.join("empty.toml");
+        std::fs::write(&config, "").map_err(|source| DtError::Config(source.to_string()))?;
+        let resolved = resolve_run(
+            &ReviewArgs {
+                base: Some("main".to_owned()),
+                config: Some(config),
+                dry_run: true,
+                ..ReviewArgs::default()
+            },
+            &env_of(&[]),
+        )?;
+        let text = run_dry_run_at(&dir, &resolved)?;
+        assert!(text.contains("plan:"), "the summary line leads: {text}");
+        assert!(
+            text.contains("judge calls") && text.contains("tokens"),
+            "the estimate prints: {text}"
+        );
+        assert!(
+            text.contains("src/lib.rs") && text.contains("range:"),
+            "the region outline and pinned range print: {text}"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_dry_run_dispatch_writes_the_report_and_exits_clean() -> Result<(), DtError> {
+        let dir = std::env::temp_dir().join(format!("difftrace-cli-at-{}", std::process::id()));
+        let _unused = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
+        git(&dir, &["init", "-b", "main"])?;
+        commit(&dir, "src/lib.rs", "fn one() {}\n", "base")?;
+        git(&dir, &["checkout", "-b", "topic"])?;
+        commit(&dir, "src/lib.rs", "fn one() {}\nfn two() {}\n", "head")?;
+        let config = dir.join("empty.toml");
+        std::fs::write(&config, "").map_err(|source| DtError::Config(source.to_string()))?;
+        let command = Command::Review(ReviewArgs {
+            base: Some("main".to_owned()),
+            config: Some(config),
+            dry_run: true,
+            ..ReviewArgs::default()
+        });
+        let mut sink = Vec::new();
+        let outcome = dispatch_at(&command, &env_of(&[]), &dir, &mut sink)?;
+        assert_eq!(
+            outcome,
+            RunOutcome::Clean,
+            "the dry-run review exits clean through dispatch"
+        );
+        let text = String::from_utf8_lossy(&sink).into_owned();
+        assert!(
+            text.contains("plan:"),
+            "the report reaches the injected writer: {text}"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_full_scope_dry_run_covers_every_tracked_file() -> Result<(), DtError> {
+        let dir = std::env::temp_dir().join(format!("difftrace-cli-full-{}", std::process::id()));
+        let _unused = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
+        git(&dir, &["init", "-b", "main"])?;
+        commit(&dir, "src/lib.rs", "fn one() {}\n", "base")?;
+        commit(&dir, "docs/guide.md", "# Guide\n", "docs")?;
+        git(&dir, &["checkout", "-b", "topic"])?;
+        commit(&dir, "src/lib.rs", "fn one() {}\nfn two() {}\n", "head")?;
+        let config = dir.join("empty.toml");
+        std::fs::write(&config, "").map_err(|source| DtError::Config(source.to_string()))?;
+        let resolved = resolve_run(
+            &ReviewArgs {
+                base: Some("main".to_owned()),
+                scope: Some(Scope::Full),
+                config: Some(config),
+                dry_run: true,
+                ..ReviewArgs::default()
+            },
+            &env_of(&[]),
+        )?;
+        let text = run_dry_run_at(&dir, &resolved)?;
+        assert!(
+            text.contains("src/lib.rs")
+                && text.contains("docs/guide.md")
+                && text.contains("[repo]"),
+            "every tracked file becomes a repo region: {text}"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    struct ClosedPipe;
+
+    impl io::Write for ClosedPipe {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    struct FullDisk;
+
+    impl io::Write for FullDisk {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("no space left on device"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("no space left on device"))
+        }
+    }
+
+    #[test]
+    fn a_closed_stdout_pipe_exits_clean_instead_of_panicking() {
+        assert!(
+            write_report(&mut ClosedPipe, "plan: 1 regions").is_ok(),
+            "a closed pipe is the consumer's choice, not a failure"
+        );
+    }
+
+    #[test]
+    fn a_failed_stdout_write_fails_as_infrastructure() -> Result<(), DtError> {
+        let Err(error) = write_report(&mut FullDisk, "plan: 1 regions") else {
+            return Err(DtError::Cli("a dead stdout must fail the run".to_owned()));
+        };
+        assert!(
+            matches!(error, DtError::Output(_)),
+            "report writes carry their own variant: {error}"
+        );
+        assert_eq!(
+            RunOutcome::from(error),
+            RunOutcome::InfrastructureFailure,
+            "a real write failure maps to exit code 2"
+        );
         Ok(())
     }
 }

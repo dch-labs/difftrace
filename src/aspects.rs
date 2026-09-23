@@ -68,6 +68,11 @@ impl AspectRegistry {
     }
 
     #[must_use]
+    pub fn contains(&self, aspect: &AspectId) -> bool {
+        self.vocabulary.iter().any(|entry| &entry.id == aspect)
+    }
+
+    #[must_use]
     pub fn ceiling(&self, aspect: &AspectId) -> Severity {
         self.vocabulary
             .iter()

@@ -64,6 +64,7 @@ pub struct CoveragePlan {
     pub range: PinnedRange,
     pub regions: Vec<Region>,
     pub cells: Vec<Cell>,
+    pub narrowed: bool,
 }
 
 #[derive(
