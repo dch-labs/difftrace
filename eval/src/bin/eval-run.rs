@@ -445,3 +445,17 @@ fn write_mutation_report(out_dir: &Path, report: &MutationReport) -> Result<(), 
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_binary_default_resolves_from_path() {
+        assert_eq!(v1_binary(None), "difftrace".to_owned());
+        assert_eq!(
+            v1_binary(Some(&"~/tools/difftrace-v1".to_owned())),
+            "~/tools/difftrace-v1".to_owned()
+        );
+    }
+}

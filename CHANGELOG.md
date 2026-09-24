@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The flow-map builder (`src/judges/flow.rs`, type in
+  `src/contracts.rs`): `flow::build(region, region_text, gateway,
+  max_callers)` derives a region's behavioral surface from the
+  pinned head — defines (the `fn` token in any modifier shape,
+  including impl/trait methods), callers (`search_at_head` hits
+  minus the region's own definition lines), callees (call tokens
+  minus keywords and own defines), and trigger sites (caller hits
+  carrying `.spawn(`/`::spawn(`/`.await`/register-style markers,
+  plus `fn <name>(` sites outside the region — trait impls). A
+  same-name re-definition lists one define while every definition
+  line is excluded from its callers; line comments, nesting-aware
+  block comments, and string, char, and `#`-counted raw-string
+  literals are stripped before any tokenizing (a small state
+  machine), so commented-out or quoted code never defines or
+  calls — an unterminated string literal carries across the line
+  break with the escape cleared, since Rust strings span lines —
+  and `in` sits in the keyword denylist. Every arm sorts
+  by (file, line),
+  dedups, and caps at `max_callers`; a region with no defines
+  builds an empty map without touching the gateway; a failed
+  search fails the run (`FlowMap` carries serde derives for the
+  S2 trajectory). Pinned by the determinism, cap/sort/exclusion,
+  trigger-trio, scan, fast-path, serde round-trip,
+  re-definition, comment/string-stripping, comment-nesting,
+  char-literal/lifetime, raw-string, and string-carry tests.
 - The coverage planner (`src/judges.rs`, wiring in `src/cli.rs`):
   `plan(range, regions, aspects, focus, severity)` builds the work
   order — cells = each region's `aspects_for` set (per-path
@@ -25,16 +50,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capped at 2000 lines × 12 tokens × judges (repo-spanning
   regions hit the cap, never an absurd estimate) — and
   `render_dry_run` prints the plan, estimate, pinned range, and
-  per-region aspect outline. `difftrace review --dry-run` is now
-  live end to end: it resolves config, opens the local gateway at
-  the base, builds regions per scope (Full from the tracked file
+  per-region aspect outline. A local `difftrace review --dry-run` is
+  now live end to end: it resolves config, opens the local gateway
+  at the base (hosted `--repo/--pr` arguments stay not-yet — a
+  hosted dry run errors instead of silently planning the local
+  checkout), builds regions per scope (Full from the tracked file
   list), plans, and writes the report through a writer seam on a
   locked stdout — a closed pipe (`| head`) exits 0 silently, any
   other write failure fails as infrastructure (exit 2) via the new
   `DtError::Output`, never std's `print!` panic (exit 101); a real
   review still reports not-yet (pinned by the partition, narrowed,
   focus, severity, estimate, dry-run, dispatch-exits-clean,
-  full-scope, and write-seam tests).
+  hosted-dry-run, full-scope, and write-seam tests).
 - The repository gateway seam (`src/gateway.rs` +
   `src/gateway/local.rs`): the `PrGateway` trait — `pinned_range`,
   `diff`, `read_file_at_head`, `list_files_at_head`,
@@ -43,19 +70,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   core.quotePath=false diff.noprefix=false`, the repo root comes
   from `rev-parse --show-toplevel` (reads from any subdirectory
   stay repo-relative), and the pin is made once at open — base =
-  `merge-base <base> HEAD`, head = `rev-parse HEAD`, diff =
+  `merge-base -- <base> HEAD` (the `--` keeps a flag-shaped `--base`
+  value a revision, so it fails naming itself instead of silently
+  selecting a git mode), head = `rev-parse HEAD`, diff =
   `git diff --no-renames base head` — so a commit after open
   cannot change the reviewed diff. File reads run `git cat-file blob
   head:path` (a missing, empty, or directory path errors naming the
   path — a tree listing never reads as file content), listing is
   `ls-tree -r --name-only` at head (sorted, tracked only; a failed
   listing errors instead of reading as an empty repository), and
-  search is `git grep -n -I` POSIX ERE at the pinned sha — hits
-  sorted by file then line and capped, colons in file names survive
-  parsing, no matches reading as empty while a broken pattern
+  search is `git grep -n -I -e` POSIX ERE at the pinned sha (the
+  `-e` keeps a dash-leading pattern a pattern) — hits
+  sorted by file then line and capped; colons in file names survive
+  parsing, anchored on the first digit-only segment whose file part
+  names a tracked file from the listing cached at open (leftmost as
+  the fallback), so a digit-only name chunk never reads as the line
+  number and digit-colon match text (`10:30`) never steals the
+  anchor; no matches read as empty while a broken pattern
   errors. New contracts: `DiffSource
   { Unified }`, `FileSnapshot`, `SearchHit` (pinned by the
-  pin-freeze, merge-base, subdir, sort-and-cap, colon-name, listing,
+  pin-freeze, merge-base, subdir, sort-and-cap, colon-name,
+  digit-name, digit-text, digit-colon-text, flag-shaped-base,
+  dash-pattern, listing,
   failed-listing, tree-path, missing-file, no-repo, and empty-read
   tests).
 - The Rust built-in adapters (`src/tools/rust.rs` +
@@ -85,11 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   beyond pipe capacity cannot deadlock — and kills the child at the
   budget), and `run_cached` keyed by `(tool, sha, Cargo.lock hash)`
   — a cache hit returns without invoking the tool, a corrupt cache
-  re-runs, a timeout or launch failure marks the tool unavailable
-  without failing the round and caches nothing, and cache writes are
+  re-runs, a timeout, launch failure, or unreadable output marks
+  the tool unavailable without failing the round and caches nothing
+  (a failed read surfaces its error instead of returning partial
+  text, so truncated findings are never cached for the sha), and
+  cache writes are
   best-effort (pinned by the mapping, glob-rejection, virtual-
   workspace, argv, gating, enabled-list, fmt, audit, sort-and-cap,
-  timeout, launch, cache, and echo tests).
+  timeout, launch, read-failure, cache, and echo tests).
 - The tool adapter layer (`src/tools.rs` + `src/tools/diag.rs` +
   `src/tools/cargo_json.rs`): the S0 extension contract —
   `ToolAdapter` (name, `should_run` over changed regions, a data-only
@@ -179,9 +218,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   show|reset`, `reply --mode answer|plan`, and `eval run` — parsed by
   clap with typed vocabulary errors (unknown scope, severity, or
   oracle values reject with the valid set; non-UTF-8 argv still errors
-  cleanly; an empty `--judge` value rejects at the boundary and an
-  empty name among real names drops, mirroring `--focus` and the env
-  split). Configuration loads layered — explicit `--config` path
+  cleanly; an empty `--judge` or `--focus` value rejects at the
+  boundary — an all-empty list must not silently widen to a full
+  review — and an empty name among real names drops, with the env
+  split mirroring both). Configuration loads layered — explicit `--config` path
   (required to exist), else the first `.difftrace/config.toml` found
   walking up from the working directory (whole-file precedence: a repo
   file replaces the global file; pinned so global tables cannot leak
@@ -192,14 +232,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned end to end. The v1 `~/.difftrace/env` file returns as the
   lowest env layer (comments, blanks, and malformed lines skipped;
   empty values count as unset on both layers), carried by an
-  `EnvSource` seam so tests never mutate process environment.
+  `EnvSource` seam so tests never mutate process environment; the
+  live seam reads `vars_os` and skips non-UTF-8 variables rather
+  than panicking, so a hostile environment cannot exit 101 before
+  dispatch.
   `[[tools.external]]` entries parse per the design (name, command,
   `diag`|`cargo-json` format, `run_on` glob, per-entry `budget_secs`
   defaulting 60; unknown formats and zero budgets reject). Every
-  subcommand still dispatches to a not-yet error at exit 2 — bodies
-  arrive with their owning tasks (pinned by the flag-surface,
-  mutual-exclusion, subcommand, dispatch, layering, repo-config,
-  env-override, env-file, external-tool, and knob-rejection tests). The
+  subcommand except a local `review --dry-run` still dispatches to a
+  not-yet error at exit 2 — a hosted `--repo/--pr` review, `--dry-run`
+  included, stays not-yet with the hosted gateway — and bodies arrive
+  with their owning tasks (pinned by the flag-surface,
+  mutual-exclusion, subcommand, dispatch, hosted-dry-run, layering,
+  repo-config, env-override, env-file, non-UTF-8-env, focus-empty,
+  external-tool, and knob-rejection tests). The
   `[review]` lifecycle knobs (`retire_after_misses`,
   `line_drift_tolerance`, `token_overlap_pct`) and the `[hosted]`
   table are absent until their owning stages wire them — setting one
@@ -224,7 +270,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clamping admits only lines inside the cited region. Parse shape is
   enforced both-sided: hunk headers only count outside bodies (an
   added line whose content starts with pluses stays body — no phantom
-  files), old/new counts must both close (under- and over-declared
+  files), old/new counts must both close on their own sides —
+  added lines count against the new count, removed against the
+  old, context against both, a body line past either declared
+  count errors mid-hunk naming its line, and a zero old count
+  parses new-file hunks — (under- and over-declared
   hunks and orphan hunks are line-numbered errors), `/dev/null`
   deletion bodies consume without anchoring, empty body lines read as
   context, and nested `b/` paths strip exactly one prefix. `\ No
@@ -233,7 +283,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an over-declared hunk names the final line, input that is not a diff
   at all rejects instead of parsing as an empty index, and deletion-,
   rename-, mode-, and binary-only commits parse as an empty index with
-  nothing to review (pinned by the boundary, count, orphan, tolerance,
+  nothing to review (pinned by the boundary, count, under-count,
+  zero-old-count, orphan, tolerance,
   path, no-newline, malformed-header, non-diff, and empty-index
   tests).
 - The v2 data spine (`src/contracts.rs`): every pipeline stage
@@ -267,6 +318,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constant, argv tolerates non-UTF-8 bytes, `error_chain` walks real
   sources, and the crate metadata drops the loopctl claim and the
   unused `serde_json` dependency until they return.
+
+### Changed
+
+- The eval runner's `--binary` default now resolves `difftrace`
+  from `PATH` instead of preferring `target/release/difftrace` in
+  the working tree, so a stale release build no longer shadows the
+  installed v1 binary the metrics target (pinned by the
+  `v1_binary` default test in `eval/src/bin/eval-run.rs`).
 
 ## [0.11.4] - 2026-09-08
 

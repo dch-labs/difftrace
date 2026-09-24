@@ -1,5 +1,7 @@
 //! The judge panel: every region judged per aspect, findings confirmed by quorum.
 
+pub mod flow;
+
 use crate::aspects::AspectRegistry;
 use crate::contracts::{
     AspectId, Cell, CoveragePlan, PinnedRange, Region, RegionId, RegionKind, Severity,

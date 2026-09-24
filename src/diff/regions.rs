@@ -115,7 +115,7 @@ diff --git a/gone.rs b/gone.rs
     #[test]
     fn an_added_line_starting_with_pluses_stays_hunk_body() -> Result<(), Box<dyn std::error::Error>>
     {
-        let diff = "--- a/f.rs\n+++ b/f.rs\n@@ -1,3 +1,4 @@\n ctx\n+good\n+++ oops\n+after\n";
+        let diff = "--- a/f.rs\n+++ b/f.rs\n@@ -1 +1,4 @@\n ctx\n+good\n+++ oops\n+after\n";
         let index = DiffIndex::parse(diff)?;
         assert_eq!(
             index.files(),
@@ -157,6 +157,40 @@ diff --git a/gone.rs b/gone.rs
             DiffIndex::parse(diff).is_err(),
             "body lines outside the declared hunk"
         );
+    }
+
+    #[test]
+    fn an_under_declared_new_count_errors_mid_hunk() {
+        let diff = "--- a/f.rs\n+++ b/f.rs\n@@ -1,3 +1,1 @@\n ctx\n ctx\n ctx\n";
+        let outcome = DiffIndex::parse(diff);
+        assert!(
+            matches!(&outcome, Err(err)
+                if err.contains("line 5") && err.contains("beyond the declared counts")),
+            "context beyond the declared new count pins nothing: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn an_under_declared_old_count_errors_mid_hunk() {
+        let diff = "--- a/f.rs\n+++ b/f.rs\n@@ -1,1 +1,3 @@\n ctx\n ctx\n ctx\n";
+        let outcome = DiffIndex::parse(diff);
+        assert!(
+            matches!(&outcome, Err(err)
+                if err.contains("line 5") && err.contains("beyond the declared counts")),
+            "context beyond the declared old count is as malformed as the new side: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_zero_old_count_hunk_parses_added_lines() -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1,2 @@\n+one\n+two\n";
+        let index = DiffIndex::parse(diff)?;
+        assert_eq!(
+            index.added_lines("new.rs"),
+            vec![1, 2],
+            "added lines count against the new side only, so a zero old count parses"
+        );
+        Ok(())
     }
 
     #[test]
@@ -272,16 +306,20 @@ diff --git a/gone.rs b/gone.rs
         );
         Ok(())
     }
-
     #[test]
     fn the_index_is_a_pure_function_of_the_pinned_text() -> Result<(), Box<dyn std::error::Error>> {
         let first = DiffIndex::parse(DIFF)?;
         let second = DiffIndex::parse(DIFF)?;
         assert_eq!(first, second);
-        let other = DiffIndex::parse(DIFF.replace("+fourth", " fourth").as_str())?;
+        let same_topology = DiffIndex::parse(DIFF.replace("+first", "+renamed entirely").as_str())?;
+        assert_eq!(
+            first, same_topology,
+            "added text content is not part of the index"
+        );
+        let reordered = DiffIndex::parse(DIFF.replace("+third\n ctx", " ctx\n+third").as_str())?;
         assert_ne!(
-            first, other,
-            "a different line topology is a different index; added text content is not part of it"
+            first, reordered,
+            "a different line topology is a different index"
         );
         assert_eq!(first.files().len(), 1);
         Ok(())

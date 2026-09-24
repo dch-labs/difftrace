@@ -1,5 +1,6 @@
 //! Local gateway: hermetic git with every read pinned to one range.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -21,6 +22,7 @@ pub struct LocalGateway {
     root: PathBuf,
     range: PinnedRange,
     diff: DiffSource,
+    tracked: BTreeSet<String>,
 }
 
 impl LocalGateway {
@@ -38,7 +40,7 @@ impl LocalGateway {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let merge_base = run_git(&root, &["merge-base", base, "HEAD"])?
+        let merge_base = run_git(&root, &["merge-base", "--", base, "HEAD"])?
             .lines()
             .next()
             .unwrap_or_default()
@@ -50,6 +52,10 @@ impl LocalGateway {
             ));
         }
         let diff = run_git(&root, &["diff", "--no-renames", &merge_base, &head])?;
+        let tracked = run_git(&root, &["ls-tree", "-r", "--name-only", &head])?
+            .lines()
+            .map(str::to_owned)
+            .collect();
         Ok(Self {
             root,
             range: PinnedRange {
@@ -57,6 +63,7 @@ impl LocalGateway {
                 head_sha: head,
             },
             diff: DiffSource::Unified(diff),
+            tracked,
         })
     }
 }
@@ -103,7 +110,7 @@ impl PrGateway for LocalGateway {
     fn search_at_head(&self, pattern: &str, cap: usize) -> Result<Vec<SearchHit>, DtError> {
         let output = Command::new("git")
             .args(HERMETIC)
-            .args(["grep", "-n", "-I", pattern, &self.range.head_sha])
+            .args(["grep", "-n", "-I", "-e", pattern, &self.range.head_sha])
             .current_dir(&self.root)
             .output()
             .map_err(|err| DtError::Git(format!("could not run git: {err}")))?;
@@ -118,7 +125,7 @@ impl PrGateway for LocalGateway {
         let sha = self.range.head_sha.as_str();
         let mut hits: Vec<SearchHit> = stdout
             .lines()
-            .filter_map(|line| parse_hit(line, sha))
+            .filter_map(|line| parse_hit(line, sha, &self.tracked))
             .collect();
         hits.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
         hits.truncate(cap);
@@ -152,25 +159,42 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DtError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-fn parse_hit(line: &str, sha: &str) -> Option<SearchHit> {
+fn parse_hit(line: &str, sha: &str, tracked: &BTreeSet<String>) -> Option<SearchHit> {
     let rest = line.strip_prefix(sha)?.strip_prefix(':')?;
     let parts: Vec<&str> = rest.split(':').collect();
-    let split = parts.iter().position(|segment| {
-        !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit())
-    })?;
-    if split == 0 {
-        return None;
+    let is_number =
+        |segment: &str| !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit());
+    let anchor_at = |index: usize| -> Option<SearchHit> {
+        Some(SearchHit {
+            file: parts.get(..index).map(|head| head.join(":"))?,
+            line: parts
+                .get(index)
+                .and_then(|segment| segment.parse::<u32>().ok())?,
+            text: parts
+                .get(index.saturating_add(1)..)
+                .map(|tail| tail.join(":"))?,
+        })
+    };
+    let mut unverified: Option<SearchHit> = None;
+    for index in 1..parts.len() {
+        let digits = is_number(parts.get(index).copied().unwrap_or_default());
+        if !digits || parts.get(index.saturating_add(1)).is_none() {
+            continue;
+        }
+        let Some(hit) = anchor_at(index) else {
+            continue;
+        };
+        if hit.file.is_empty() {
+            continue;
+        }
+        if tracked.contains(&hit.file) {
+            return Some(hit);
+        }
+        if unverified.is_none() {
+            unverified = Some(hit);
+        }
     }
-    let number = parts
-        .get(split)
-        .and_then(|segment| segment.parse::<u32>().ok())?;
-    Some(SearchHit {
-        file: parts.get(..split).map(|head| head.join(":"))?,
-        line: number,
-        text: parts
-            .get(split.saturating_add(1)..)
-            .map(|tail| tail.join(":"))?,
-    })
+    unverified
 }
 
 #[cfg(test)]
@@ -456,6 +480,90 @@ mod tests {
             summary,
             vec!["we:ird.rs:1".to_owned()],
             "a colon in the file name does not silently drop the hit"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_digit_only_name_chunk_is_not_the_line_number() -> Result<(), DtError> {
+        let dir = scratch("digit-name")?;
+        commit(&dir, &[("x:007:y.rs", "needle digits\n")], "seed")?;
+        let gateway = LocalGateway::open_at(&dir, "main")?;
+        let hits = gateway.search_at_head("needle", 10)?;
+        let hit = hits
+            .first()
+            .ok_or_else(|| DtError::Git("the hit must survive parsing".to_owned()))?;
+        assert_eq!(
+            (hit.file.as_str(), hit.line, hit.text.as_str()),
+            ("x:007:y.rs", 1, "needle digits"),
+            "the anchor is the last number with content after it, never a name chunk"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn numeric_match_text_does_not_steal_the_anchor() -> Result<(), DtError> {
+        let dir = scratch("digit-text")?;
+        commit(&dir, &[("a.rs", "count\n42\n")], "seed")?;
+        let gateway = LocalGateway::open_at(&dir, "main")?;
+        let hits = gateway.search_at_head("42", 10)?;
+        let hit = hits
+            .first()
+            .ok_or_else(|| DtError::Git("the hit must parse".to_owned()))?;
+        assert_eq!(
+            (hit.file.as_str(), hit.line, hit.text.as_str()),
+            ("a.rs", 2, "42"),
+            "a digit-only match line is content, not the line number"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn digit_colon_match_text_keeps_the_real_line_anchor() -> Result<(), DtError> {
+        let dir = scratch("digit-pair-text")?;
+        commit(&dir, &[("clock.rs", "start\n10:30\n")], "seed")?;
+        let gateway = LocalGateway::open_at(&dir, "main")?;
+        let hits = gateway.search_at_head("10:30", 10)?;
+        let hit = hits
+            .first()
+            .ok_or_else(|| DtError::Git("the hit must parse".to_owned()))?;
+        assert_eq!(
+            (hit.file.as_str(), hit.line, hit.text.as_str()),
+            ("clock.rs", 2, "10:30"),
+            "a time-shaped match line is content: the anchor stays on the tracked file's real line"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_flag_shaped_base_fails_as_a_revision_not_as_a_git_mode() -> Result<(), DtError> {
+        let dir = scratch("dash-base")?;
+        commit(&dir, &[("a.rs", "one\n")], "seed")?;
+        let outcome = LocalGateway::open_at(&dir, "--all");
+        assert!(
+            outcome
+                .is_err_and(|err| err.to_string().contains("merge-base")
+                    && err.to_string().contains("--all")),
+            "a leading-dash base reaches git as a value and errors naming it"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_dash_leading_pattern_searches_instead_of_parsing_as_flags() -> Result<(), DtError> {
+        let dir = scratch("dash-pattern")?;
+        commit(&dir, &[("f.txt", "marker\n-needle here\n")], "seed")?;
+        let gateway = LocalGateway::open_at(&dir, "main")?;
+        let hits = gateway.search_at_head("-needle", 10)?;
+        assert_eq!(
+            hits.first().map(|hit| (hit.file.as_str(), hit.line)),
+            Some(("f.txt", 2)),
+            "the pattern is passed as a value, so a dash-leading expression still matches"
         );
         let _unused = std::fs::remove_dir_all(&dir);
         Ok(())

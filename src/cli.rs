@@ -271,11 +271,28 @@ pub fn resolve_run(args: &ReviewArgs, env: &EnvSource) -> Result<ResolvedRun, Dt
         "DIFFTRACE_BUDGET_SECS",
     )?;
     let focus = match args.focus.clone() {
-        Some(list) => list.into_iter().filter(|item| !item.is_empty()).collect(),
-        None => env
-            .lookup("DIFFTRACE_FOCUS")
-            .map(|raw| config::split_list(&raw))
-            .unwrap_or_default(),
+        Some(list) => {
+            let kept: Vec<String> = list.into_iter().filter(|item| !item.is_empty()).collect();
+            if kept.is_empty() {
+                return Err(DtError::Cli(
+                    "--focus must name at least one aspect id: an all-empty list would silently review everything"
+                        .to_owned(),
+                ));
+            }
+            kept
+        }
+        None => match env.lookup("DIFFTRACE_FOCUS") {
+            Some(raw) => {
+                let list = config::split_list(&raw);
+                if list.is_empty() {
+                    return Err(DtError::Config(
+                        "DIFFTRACE_FOCUS: expected at least one aspect id".to_owned(),
+                    ));
+                }
+                list
+            }
+            None => Vec::new(),
+        },
     };
     Ok(ResolvedRun {
         config,
@@ -334,6 +351,12 @@ fn dispatch_at(
 ) -> Result<RunOutcome, DtError> {
     if let Command::Review(args) = command {
         let resolved = resolve_run(args, env)?;
+        if resolved.repo.is_some() {
+            return Err(DtError::Cli(
+                "review with --repo/--pr is not yet implemented on the v2 skeleton — the hosted gateway arrives with its stage; a dry run without --repo reviews the local checkout"
+                    .to_owned(),
+            ));
+        }
         if resolved.dry_run {
             let text = run_dry_run_at(start, &resolved)?;
             write_report(out, &text)?;
@@ -767,6 +790,73 @@ mod tests {
             mixed.config.judges.profiles,
             vec!["zai:glm-5.3".to_owned()],
             "an empty entry among real names drops rather than poisoning the list"
+        );
+        std::fs::remove_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_hosted_dry_run_stays_not_yet_instead_of_reviewing_locally() -> Result<(), DtError> {
+        let dir = temp_dir("hosted-dry-run")?;
+        let config = dir.join("empty.toml");
+        std::fs::write(&config, "").map_err(|source| DtError::Config(source.to_string()))?;
+        let command = Command::Review(ReviewArgs {
+            repo: Some("owner/name".to_owned()),
+            pr: Some(7),
+            config: Some(config),
+            dry_run: true,
+            ..ReviewArgs::default()
+        });
+        let mut sink = Vec::new();
+        let err = dispatch_at(&command, &env_of(&[]), &dir, &mut sink)
+            .err()
+            .unwrap_or(DtError::Cli(String::new()));
+        assert!(
+            err.to_string().contains("not yet implemented") && err.to_string().contains("--repo"),
+            "the hosted gateway is absent, so the hosted review must not run or plan locally: {err}"
+        );
+        assert!(
+            sink.is_empty(),
+            "no local plan may print for hosted arguments"
+        );
+        std::fs::remove_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_all_empty_focus_list_rejects_instead_of_widening() -> Result<(), DtError> {
+        let dir = temp_dir("focus-empty")?;
+        let config = dir.join("empty.toml");
+        std::fs::write(&config, "").map_err(|source| DtError::Config(source.to_string()))?;
+        let args = |focus: Option<Vec<String>>| ReviewArgs {
+            focus,
+            config: Some(config.clone()),
+            ..ReviewArgs::default()
+        };
+        for focus in [vec![String::new()], vec![String::new(), String::new()]] {
+            let err = resolve_run(&args(Some(focus)), &env_of(&[]))
+                .err()
+                .unwrap_or(DtError::Cli(String::new()));
+            assert!(
+                err.to_string().contains("--focus"),
+                "an all-empty --focus must reject, not review everything: {err}"
+            );
+        }
+        let env_err = resolve_run(&args(None), &env_of(&[("DIFFTRACE_FOCUS", ",")]))
+            .err()
+            .unwrap_or(DtError::Cli(String::new()));
+        assert!(
+            env_err.to_string().contains("DIFFTRACE_FOCUS"),
+            "an all-empty env list must reject the same way: {env_err}"
+        );
+        let mixed = resolve_run(
+            &args(Some(vec![String::new(), "security".to_owned()])),
+            &env_of(&[]),
+        )?;
+        assert_eq!(
+            mixed.focus,
+            vec!["security".to_owned()],
+            "an empty entry among real ids drops rather than widening"
         );
         std::fs::remove_dir_all(&dir).map_err(|source| DtError::Config(source.to_string()))?;
         Ok(())

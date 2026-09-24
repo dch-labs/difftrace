@@ -312,7 +312,11 @@ impl EnvSource {
     #[must_use]
     pub fn live() -> Self {
         Self {
-            vars: std::env::vars().collect(),
+            vars: std::env::vars_os()
+                .filter_map(|(name, value)| {
+                    Some((name.into_string().ok()?, value.into_string().ok()?))
+                })
+                .collect(),
             file: load_env_file(),
         }
     }
@@ -722,5 +726,40 @@ mod tests {
                 .collect(),
         );
         assert_eq!(both_empty.lookup("DIFFTRACE_JUDGE"), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_non_utf8_environment_variable_skips_instead_of_panicking() -> Result<(), DtError> {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        if std::env::var_os("DIFFTRACE_NON_UTF8_PROBE").is_some() {
+            let env = EnvSource::live();
+            assert_eq!(
+                env.lookup("DIFFTRACE_HOSTILE_VAR"),
+                None,
+                "the byte-valued variable never reads as a knob"
+            );
+            return Ok(());
+        }
+        let exe = std::env::current_exe().map_err(|source| DtError::Config(source.to_string()))?;
+        let child = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "config::tests::a_non_utf8_environment_variable_skips_instead_of_panicking",
+            ])
+            .env("DIFFTRACE_NON_UTF8_PROBE", "1")
+            .env(
+                "DIFFTRACE_HOSTILE_VAR",
+                OsStr::from_bytes(b"\xff\xfe not unicode"),
+            )
+            .output()
+            .map_err(|source| DtError::Config(source.to_string()))?;
+        assert!(
+            child.status.success(),
+            "a non-UTF-8 variable must not panic the process: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
+        Ok(())
     }
 }

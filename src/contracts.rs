@@ -30,6 +30,14 @@ pub struct SearchHit {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FlowMap {
+    pub defines: Vec<String>,
+    pub callers: Vec<SearchHit>,
+    pub callees: Vec<String>,
+    pub triggers: Vec<SearchHit>,
+}
+
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -562,7 +570,7 @@ mod validation_tests {
     use crate::diff::DiffIndex;
 
     const DIFF: &str =
-        "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,5 +1,5 @@\n ctx\n+new\n ctx\n ctx\n ctx\n";
+        "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,4 +1,5 @@\n ctx\n+new\n ctx\n ctx\n ctx\n";
 
     fn setup() -> (DiffIndex, Region, AspectRegistry) {
         let index = DiffIndex::parse(DIFF).unwrap_or_default();

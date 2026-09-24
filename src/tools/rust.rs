@@ -214,6 +214,7 @@ fn audit_findings(output: &str, tool: &str) -> Vec<ToolFinding> {
 pub enum ToolRunError {
     Timeout,
     Launch(String),
+    Read(String),
 }
 
 pub trait Executor {
@@ -239,16 +240,26 @@ impl Executor for ProcessExecutor {
             .map_err(|err| ToolRunError::Launch(err.to_string()))?;
         let stdout = child.stdout.take();
         let reader = std::thread::spawn(move || {
+            let Some(mut stream) = stdout else {
+                return Ok(String::new());
+            };
             let mut text = String::new();
-            if let Some(mut stream) = stdout {
-                let _unused = std::io::Read::read_to_string(&mut stream, &mut text);
-            }
-            text
+            std::io::Read::read_to_string(&mut stream, &mut text)
+                .map(|_bytes| text)
+                .map_err(|err| err.to_string())
         });
         let deadline = Instant::now().checked_add(Duration::from_secs(spec.timeout_secs));
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return Ok(reader.join().unwrap_or_default()),
+                Ok(Some(_)) => {
+                    return match reader.join() {
+                        Ok(Ok(text)) => Ok(text),
+                        Ok(Err(cause)) => Err(ToolRunError::Read(cause)),
+                        Err(_) => Err(ToolRunError::Read(
+                            "the output reader did not finish".to_owned(),
+                        )),
+                    };
+                }
                 Ok(None) => {
                     let expired = deadline.is_none_or(|end| Instant::now() >= end);
                     if expired {
@@ -306,6 +317,12 @@ pub fn run_cached(
         }
         Err(ToolRunError::Launch(cause)) => {
             return ToolOutcome::Unavailable(format!("{} could not run: {cause}", adapter.name()));
+        }
+        Err(ToolRunError::Read(cause)) => {
+            return ToolOutcome::Unavailable(format!(
+                "{} output could not be read: {cause}",
+                adapter.name()
+            ));
         }
     };
     let findings = adapter.parse(&output);
@@ -686,6 +703,37 @@ mod tests {
     }
 
     #[test]
+    fn a_read_failure_marks_the_tool_unavailable_and_caches_nothing() -> Result<(), DtError> {
+        let tool = external_diag_tool()?;
+        let executor = FakeExecutor {
+            calls: Cell::new(0),
+            result: Err(ToolRunError::Read("stream error".to_owned())),
+        };
+        let dir = scratch("read-failure");
+        let outcome = run_cached(
+            &tool,
+            &tool.command(&[PathBuf::from("src/a.js")]),
+            &CacheKey {
+                sha: "abc123".to_owned(),
+                lock_hash: "feed".to_owned(),
+            },
+            &dir,
+            &executor,
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(&outcome, ToolOutcome::Unavailable(reason)
+                if reason.contains("could not be read")),
+            "partial output is not findings: {outcome:?}"
+        );
+        assert!(
+            std::fs::read_dir(&dir).map_or(true, |entries| entries.count() == 0),
+            "a failed read caches nothing — truncated findings must not poison later runs"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn the_process_executor_collects_stdout() -> Result<(), ToolRunError> {
         let spec = CommandSpec {
             argv: vec!["/bin/echo".to_owned(), "hello".to_owned()],
@@ -694,5 +742,19 @@ mod tests {
         };
         assert_eq!(ProcessExecutor.run(&spec)?, "hello\n");
         Ok(())
+    }
+
+    #[test]
+    fn unreadable_child_output_fails_the_read_instead_of_returning_partial_text() {
+        let spec = CommandSpec {
+            argv: vec!["/usr/bin/printf".to_owned(), "\\375\\376\\n".to_owned()],
+            cwd: None,
+            timeout_secs: 5,
+        };
+        let outcome = ProcessExecutor.run(&spec);
+        assert!(
+            matches!(&outcome, Err(ToolRunError::Read(cause)) if cause.contains("valid UTF-8")),
+            "a read that errors mid-drain surfaces the failure, never the partial text: {outcome:?}"
+        );
     }
 }

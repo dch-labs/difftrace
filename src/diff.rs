@@ -155,6 +155,11 @@ impl DiffIndex {
             };
             match kind {
                 LineKind::Removed => {
+                    if old_remaining == 0 {
+                        return Err(format!(
+                            "line {line_number}: a hunk body line beyond the declared counts"
+                        ));
+                    }
                     old_remaining = old_remaining.saturating_sub(1);
                 }
                 LineKind::Context | LineKind::Added => {
@@ -163,9 +168,16 @@ impl DiffIndex {
                             "line {line_number}: a hunk body outside any file header"
                         ));
                     };
+                    if new_remaining == 0 || (kind == LineKind::Context && old_remaining == 0) {
+                        return Err(format!(
+                            "line {line_number}: a hunk body line beyond the declared counts"
+                        ));
+                    }
                     file.lines.insert(new_line, kind);
                     new_line = new_line.saturating_add(1);
-                    old_remaining = old_remaining.saturating_sub(1);
+                    if kind == LineKind::Context {
+                        old_remaining = old_remaining.saturating_sub(1);
+                    }
                     new_remaining = new_remaining.saturating_sub(1);
                 }
             }
