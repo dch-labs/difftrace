@@ -217,14 +217,27 @@ pub enum ToolRunError {
     Read(String),
 }
 
+#[derive(Debug, Clone)]
+pub struct ExecOutput {
+    pub text: String,
+    pub code: Option<i32>,
+}
+
+impl ExecOutput {
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.code == Some(0)
+    }
+}
+
 pub trait Executor {
-    fn run(&self, spec: &CommandSpec) -> Result<String, ToolRunError>;
+    fn run(&self, spec: &CommandSpec) -> Result<ExecOutput, ToolRunError>;
 }
 
 pub struct ProcessExecutor;
 
 impl Executor for ProcessExecutor {
-    fn run(&self, spec: &CommandSpec) -> Result<String, ToolRunError> {
+    fn run(&self, spec: &CommandSpec) -> Result<ExecOutput, ToolRunError> {
         let Some(program) = spec.argv.first() else {
             return Err(ToolRunError::Launch("empty command".to_owned()));
         };
@@ -239,25 +252,38 @@ impl Executor for ProcessExecutor {
             .spawn()
             .map_err(|err| ToolRunError::Launch(err.to_string()))?;
         let stdout = child.stdout.take();
-        let reader = std::thread::spawn(move || {
-            let Some(mut stream) = stdout else {
-                return Ok(String::new());
+        let (sender, receiver) = std::sync::mpsc::channel::<Result<String, String>>();
+        std::thread::spawn(move || {
+            let outcome = match stdout {
+                Some(mut stream) => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut stream, &mut text)
+                        .map(|_bytes| text)
+                        .map_err(|err| err.to_string())
+                }
+                None => Ok(String::new()),
             };
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut stream, &mut text)
-                .map(|_bytes| text)
-                .map_err(|err| err.to_string())
+            let _unused = sender.send(outcome);
         });
         let deadline = Instant::now().checked_add(Duration::from_secs(spec.timeout_secs));
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => {
-                    return match reader.join() {
-                        Ok(Ok(text)) => Ok(text),
+                Ok(Some(status)) => {
+                    let budget = deadline.map_or(Duration::ZERO, |end| {
+                        end.saturating_duration_since(Instant::now())
+                    });
+                    return match receiver.recv_timeout(budget) {
+                        Ok(Ok(text)) => Ok(ExecOutput {
+                            text,
+                            code: status.code(),
+                        }),
                         Ok(Err(cause)) => Err(ToolRunError::Read(cause)),
-                        Err(_) => Err(ToolRunError::Read(
-                            "the output reader did not finish".to_owned(),
-                        )),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            Err(ToolRunError::Timeout)
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(
+                            ToolRunError::Read("the output reader did not finish".to_owned()),
+                        ),
                     };
                 }
                 Ok(None) => {
@@ -325,7 +351,16 @@ pub fn run_cached(
             ));
         }
     };
-    let findings = adapter.parse(&output);
+    let findings = adapter.parse(&output.text);
+    if !output.succeeded() && findings.is_empty() {
+        let exit = output
+            .code
+            .map_or_else(|| "a signal".to_owned(), |code| code.to_string());
+        return ToolOutcome::Unavailable(format!(
+            "{} exited with {exit} and no findings on stdout",
+            adapter.name()
+        ));
+    }
     write_best_effort(&path, &findings);
     ToolOutcome::Ran(findings)
 }
@@ -549,11 +584,11 @@ mod tests {
 
     struct FakeExecutor {
         calls: Cell<usize>,
-        result: Result<String, ToolRunError>,
+        result: Result<ExecOutput, ToolRunError>,
     }
 
     impl Executor for FakeExecutor {
-        fn run(&self, _spec: &CommandSpec) -> Result<String, ToolRunError> {
+        fn run(&self, _spec: &CommandSpec) -> Result<ExecOutput, ToolRunError> {
             self.calls.set(self.calls.get().saturating_add(1));
             self.result.clone()
         }
@@ -636,7 +671,10 @@ mod tests {
         let tool = external_diag_tool()?;
         let executor = FakeExecutor {
             calls: Cell::new(0),
-            result: Ok("src/a.js:2: error: real\n".to_owned()),
+            result: Ok(ExecOutput {
+                text: "src/a.js:2: error: real\n".to_owned(),
+                code: Some(0),
+            }),
         };
         let dir = scratch("cache");
         let spec = tool.command(&[PathBuf::from("src/a.js")]);
@@ -668,7 +706,10 @@ mod tests {
         let tool = external_diag_tool()?;
         let executor = FakeExecutor {
             calls: Cell::new(0),
-            result: Ok("src/a.js:3: error: fresh\n".to_owned()),
+            result: Ok(ExecOutput {
+                text: "src/a.js:3: error: fresh\n".to_owned(),
+                code: Some(0),
+            }),
         };
         let dir = scratch("corrupt");
         std::fs::create_dir_all(&dir)?;
@@ -740,8 +781,99 @@ mod tests {
             cwd: None,
             timeout_secs: 5,
         };
-        assert_eq!(ProcessExecutor.run(&spec)?, "hello\n");
+        let output = ProcessExecutor.run(&spec)?;
+        assert_eq!(output.text, "hello\n");
+        assert_eq!(
+            output.code,
+            Some(0),
+            "the exit status travels with the drained output"
+        );
         Ok(())
+    }
+
+    #[test]
+    fn a_crashed_tool_with_no_findings_is_unavailable_and_never_cached() -> Result<(), DtError> {
+        let tool = ExternalToolAdapter::from_config(&ExternalTool {
+            name: "false-tool".to_owned(),
+            command: "/usr/bin/false".to_owned(),
+            format: "diag".to_owned(),
+            run_on: "**".to_owned(),
+            budget_secs: 5,
+        })?;
+        let dir = scratch("crash");
+        let outcome = run_cached(
+            &tool,
+            &tool.command(&[PathBuf::from("src/a.js")]),
+            &CacheKey {
+                sha: "abc123".to_owned(),
+                lock_hash: "feed".to_owned(),
+            },
+            &dir,
+            &ProcessExecutor,
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(&outcome, ToolOutcome::Unavailable(reason) if reason.contains("exited with 1")),
+            "a crashing tool with empty stdout is unavailable, never a clean run: {outcome:?}"
+        );
+        assert!(
+            std::fs::read_dir(&dir).map_or(true, |entries| entries.count() == 0),
+            "a crashed run caches nothing — a false clean must not outlive the invocation"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_failing_exit_with_findings_on_stdout_still_rans() -> Result<(), DtError> {
+        let tool = external_diag_tool()?;
+        let executor = FakeExecutor {
+            calls: Cell::new(0),
+            result: Ok(ExecOutput {
+                text: "src/a.js:2: error: found\n".to_owned(),
+                code: Some(1),
+            }),
+        };
+        let dir = scratch("exit-with-findings");
+        let outcome = run_cached(
+            &tool,
+            &tool.command(&[PathBuf::from("src/a.js")]),
+            &CacheKey {
+                sha: "abc123".to_owned(),
+                lock_hash: "feed".to_owned(),
+            },
+            &dir,
+            &executor,
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        assert!(
+            matches!(&outcome, ToolOutcome::Ran(findings) if findings.len() == 1),
+            "diag tools exit non-zero while reporting findings; the findings win over the status: {outcome:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_grandchild_holding_the_pipe_cannot_hang_the_run_past_its_budget() {
+        let spec = CommandSpec {
+            argv: vec![
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                "sleep 5 & exit 0".to_owned(),
+            ],
+            cwd: None,
+            timeout_secs: 1,
+        };
+        let started = Instant::now();
+        let outcome = ProcessExecutor.run(&spec);
+        assert!(
+            matches!(outcome, Err(ToolRunError::Timeout)),
+            "the output drain is bounded by the same budget that bounds the child"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "a background holder of stdout cannot out-wait the budget: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

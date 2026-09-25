@@ -3,6 +3,7 @@
 pub mod cargo_json;
 pub mod crates;
 pub mod diag;
+pub mod differential;
 pub mod rust;
 
 use std::path::PathBuf;

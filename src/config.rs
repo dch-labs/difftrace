@@ -52,6 +52,7 @@ impl DifftraceConfig {
         let config: Self =
             toml::from_str(contents).map_err(|source| DtError::Config(source.to_string()))?;
         config.validate_external_tools()?;
+        config.validate_ratelimit()?;
         Ok(config)
     }
 }
@@ -295,6 +296,27 @@ impl DifftraceConfig {
         }
         Ok(())
     }
+
+    fn validate_ratelimit(&self) -> Result<(), DtError> {
+        if self.ratelimit.per_provider_lanes == 0 {
+            return Err(DtError::Config(
+                "ratelimit.per_provider_lanes must be positive: zero lanes admit no request"
+                    .to_owned(),
+            ));
+        }
+        if self.ratelimit.backoff_base_secs == 0 {
+            return Err(DtError::Config(
+                "ratelimit.backoff_base_secs must be positive: a zero backoff recreates the lockstep storm"
+                    .to_owned(),
+            ));
+        }
+        if !self.ratelimit.jitter.is_finite() || self.ratelimit.jitter < 0.0 {
+            return Err(DtError::Config(
+                "ratelimit.jitter must be a finite number of at least zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -458,6 +480,27 @@ mod tests {
             "a zero whole-layer budget silently degrades every tool to unavailable"
         );
         assert!(DifftraceConfig::from_toml_str("[tools]\nbudget_secs = 30\n").is_ok());
+    }
+
+    #[test]
+    fn degenerate_ratelimit_knobs_reject() {
+        for (body, knob) in [
+            (
+                "[ratelimit]\nper_provider_lanes = 0\n",
+                "per_provider_lanes",
+            ),
+            ("[ratelimit]\nbackoff_base_secs = 0\n", "backoff_base_secs"),
+            ("[ratelimit]\njitter = -0.1\n", "jitter"),
+            ("[ratelimit]\njitter = inf\n", "jitter"),
+            ("[ratelimit]\njitter = nan\n", "jitter"),
+        ] {
+            let outcome = DifftraceConfig::from_toml_str(body);
+            assert!(
+                outcome.is_err_and(|err| err.to_string().contains(knob)),
+                "{knob} degenerates the rate limiter and must reject"
+            );
+        }
+        assert!(DifftraceConfig::from_toml_str("[ratelimit]\njitter = 0.0\n").is_ok());
     }
 
     #[test]

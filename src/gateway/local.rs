@@ -9,14 +9,33 @@ use crate::error::DtError;
 
 use super::PrGateway;
 
-const HERMETIC: [&str; 6] = [
+pub(crate) const HERMETIC: [&str; 14] = [
     "-c",
     "color.ui=never",
     "-c",
     "core.quotePath=false",
     "-c",
     "diff.noprefix=false",
+    "-c",
+    "grep.patternType=basic",
+    "-c",
+    "grep.ignoreCase=false",
+    "-c",
+    "grep.column=false",
+    "-c",
+    "grep.fullName=false",
 ];
+
+pub(crate) fn hermetic_git(cwd: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.args(HERMETIC).current_dir(cwd);
+    for (key, _value) in std::env::vars_os() {
+        if key.as_encoded_bytes().starts_with(b"GIT_") {
+            command.env_remove(&key);
+        }
+    }
+    command
+}
 
 pub struct LocalGateway {
     root: PathBuf,
@@ -79,10 +98,8 @@ impl PrGateway for LocalGateway {
 
     fn read_file_at_head(&self, path: &str) -> Result<FileSnapshot, DtError> {
         let at = format!("{}:{path}", self.range.head_sha);
-        let output = Command::new("git")
-            .args(HERMETIC)
+        let output = hermetic_git(&self.root)
             .args(["cat-file", "blob", &at])
-            .current_dir(&self.root)
             .output()
             .map_err(|err| DtError::Git(format!("could not run git: {err}")))?;
         if !output.status.success() {
@@ -108,10 +125,8 @@ impl PrGateway for LocalGateway {
     }
 
     fn search_at_head(&self, pattern: &str, cap: usize) -> Result<Vec<SearchHit>, DtError> {
-        let output = Command::new("git")
-            .args(HERMETIC)
+        let output = hermetic_git(&self.root)
             .args(["grep", "-n", "-I", "-e", pattern, &self.range.head_sha])
-            .current_dir(&self.root)
             .output()
             .map_err(|err| DtError::Git(format!("could not run git: {err}")))?;
         let status = output.status.code().unwrap_or(2);
@@ -143,10 +158,8 @@ fn toplevel(start: &Path) -> Result<PathBuf, DtError> {
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String, DtError> {
-    let output = Command::new("git")
-        .args(HERMETIC)
+    let output = hermetic_git(cwd)
         .args(args)
-        .current_dir(cwd)
         .output()
         .map_err(|err| DtError::Git(format!("could not run git: {err}")))?;
     if !output.status.success() {
@@ -405,6 +418,28 @@ mod tests {
         assert!(
             bad.is_err_and(|err| err.to_string().contains("search pattern")),
             "a broken pattern is an error, never a silent clean search"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn hostile_git_config_cannot_flip_search_semantics() -> Result<(), DtError> {
+        let dir = scratch("hostile-config")?;
+        commit(&dir, &[("lib.rs", "fn target() {}\n")], "seed")?;
+        run_git(&dir, &["config", "grep.patternType", "fixed"])?;
+        let gateway = LocalGateway::open_at(&dir, "main")?;
+        let broken = gateway.search_at_head("[unclosed", 10);
+        assert!(
+            broken.is_err_and(|err| err.to_string().contains("search pattern")),
+            "under a hostile fixed patternType a broken pattern still errors, never a literal no-match"
+        );
+        run_git(&dir, &["config", "grep.patternType", "extended"])?;
+        let hits = gateway.search_at_head("fn target(", 10)?;
+        assert!(
+            hits.first()
+                .is_some_and(|hit| hit.file == "lib.rs" && hit.line == 1),
+            "a literal-paren pattern still matches with grep.patternType=extended set repo-locally"
         );
         let _unused = std::fs::remove_dir_all(&dir);
         Ok(())

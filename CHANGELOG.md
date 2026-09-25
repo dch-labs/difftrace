@@ -9,6 +9,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Differential tool attribution (`src/tools/differential.rs`): repo
+  debt never blocks a branch — S0 findings are measured at both ends
+  of the pinned range and only what the branch changed may enter the
+  verdict. `attribute` is pure, keying a finding by its exact
+  `(tool, file, line, message)` tuple: head-only (or changed) is new,
+  present at both shas is context — severity does not re-block, the
+  context list is sorted and capped at twenty, and a finding that
+  moved lines re-reports as new (the recorded cost of the exact-line
+  key; geometric filtering was rejected by design). `run_differential`
+  runs one adapter at head and at a materialized base tree through
+  the existing run/cache seam (`CacheKey` sha per side, lock digest
+  per tree, `CommandSpec.cwd` steering each run); either side
+  failing fails the tool closed into the unavailable list — an
+  unrunnable base, or one that crashed with no findings on stdout,
+  must never launder head findings as new. The head side runs in
+  the live checkout, so `run_all` first guards the tree with a
+  hermetic `git status --porcelain`: a working tree that differs
+  from the head sha fails every adapter closed into the unavailable
+  list naming the state — nothing runs and nothing is cached under
+  a sha the tree cannot vouch for. A clean tree exports the base
+  once (`git archive --format=tar` piped into `tar -x`, the
+  repository untouched — no worktree metadata), loops the adapters,
+  aggregates new/context/unavailable, and cleans up best-effort.
+  `PrGateway::check_runs(sha)` joins the trait default-unsupported
+  with a `CheckRun { name, conclusion, summary }` contract for the
+  hosted mapping (pinned by the context, new, changed, cap, export,
+  fail-closed, crash-base, dirty-head, cross-side, aggregate, and
+  hosted-only tests).
+- Rate limiting (`src/ratelimit.rs`): the v1 lockstep-storm lesson as
+  machinery — `backoff_wait(attempt, base, rng)` is full jitter
+  (`rand(0, min(90 s, base·2^attempt))` via a hand-rolled seedable
+  `SplitMix64` behind an injectable `Rng` trait, no new RNG
+  dependency); `CooldownGate` holds one cooldown per provider host
+  (`trip` scales `Retry-After` by `1 + rand·jitter` and clamps the
+  result at one hour — an extreme header cannot panic the
+  conversion, and a deadline arithmetic that could overflow fails
+  closed to a capped deadline instead of dropping the cooldown; a
+  header-less trip falls back to one full-jitter first-attempt
+  backoff, a re-trip mid-wait only extends, and every waiter on the
+  host pauses while other hosts pass untouched); `Lanes` bounds
+  concurrency per host (`[ratelimit] per_provider_lanes`) with a
+  global `GLOBAL_LANES = 8` cap — permits are acquired host-then-
+  global and released on drop: each host's lanes bound it alone,
+  and the global cap bounds all providers together. Deadlines live
+  on the tokio clock, so paused-time tests pin the timing
+  deterministically. The `[ratelimit]` table gains load-time
+  validation: zero lanes, a zero backoff base (the storm the jitter
+  exists to prevent), and a negative or non-finite jitter (`inf`,
+  `NaN`) reject (pinned by the bounded-jitter, host-isolation,
+  retry-after-scaling, header-less-trip, clamped-cooldown, per-host
+  lane, global-cap, and degenerate-knob tests). The judge pass is
+  the consumer; nothing wires the gate into a call site yet.
 - The flow-map builder (`src/judges/flow.rs`, type in
   `src/contracts.rs`): `flow::build(region, region_text, gateway,
   max_callers)` derives a region's behavioral surface from the
@@ -79,8 +131,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path — a tree listing never reads as file content), listing is
   `ls-tree -r --name-only` at head (sorted, tracked only; a failed
   listing errors instead of reading as an empty repository), and
-  search is `git grep -n -I -e` POSIX ERE at the pinned sha (the
-  `-e` keeps a dash-leading pattern a pattern) — hits
+  search is `git grep -n -I -e` POSIX BRE at the pinned sha —
+  `grep.patternType`, `ignoreCase`, `column`, and `fullName` are
+  pinned in the hermetic prefix so no repository or global config
+  can flip the dialect or the hit format, and every git child
+  strips inherited `GIT_*` environment variables so a stray
+  `GIT_DIR` cannot redirect a read (the `-e` keeps a dash-leading
+  pattern a pattern) — hits
   sorted by file then line and capped; colons in file names survive
   parsing, anchored on the first digit-only segment whose file part
   names a tracked file from the listing cached at open (leftmost as
@@ -92,8 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pin-freeze, merge-base, subdir, sort-and-cap, colon-name,
   digit-name, digit-text, digit-colon-text, flag-shaped-base,
   dash-pattern, listing,
-  failed-listing, tree-path, missing-file, no-repo, and empty-read
-  tests).
+  failed-listing, tree-path, missing-file, no-repo, empty-read,
+  hostile-git-config, and hostile-git-env tests).
 - The Rust built-in adapters (`src/tools/rust.rs` +
   `src/tools/crates.rs`): fmt / clippy / check / audit as
   first-class `ToolAdapter`s over the workspace map — member
@@ -117,18 +174,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   findings. `should_run` gates fmt/clippy/check on Rust
   paths and affected crates; the advisory scan always runs — the one
   non-diff-scoped exception. The run seam: an injectable `Executor`
-  (`ProcessExecutor` drains stdout on a reader thread — output
-  beyond pipe capacity cannot deadlock — and kills the child at the
-  budget), and `run_cached` keyed by `(tool, sha, Cargo.lock hash)`
-  — a cache hit returns without invoking the tool, a corrupt cache
-  re-runs, a timeout, launch failure, or unreadable output marks
-  the tool unavailable without failing the round and caches nothing
-  (a failed read surfaces its error instead of returning partial
-  text, so truncated findings are never cached for the sha), and
-  cache writes are
-  best-effort (pinned by the mapping, glob-rejection, virtual-
-  workspace, argv, gating, enabled-list, fmt, audit, sort-and-cap,
-  timeout, launch, read-failure, cache, and echo tests).
+  returning the drained stdout together with the exit status
+  (`ProcessExecutor` reads stdout on a reader thread — output
+  beyond pipe capacity cannot deadlock, the child is killed at the
+  budget, and the post-exit drain is bounded by the same deadline
+  through a channel, so a grandchild holding the pipe cannot hang
+  the run past its budget), and `run_cached` keyed by
+  `(tool, sha, Cargo.lock hash)` — a cache hit returns without
+  invoking the tool, a corrupt cache re-runs, and a timeout, launch
+  failure, unreadable output, or a failing exit that produced no
+  findings marks the tool unavailable without failing the round and
+  caches nothing, the reason naming the exit: a crashing run is
+  never a clean run, while a failing exit with findings on stdout
+  still runs — the normal diagnostic-tool shape (a failed read
+  surfaces its error instead of returning partial text, so
+  truncated findings are never cached for the sha), and cache
+  writes are best-effort (pinned by the mapping, glob-rejection,
+  virtual-workspace, argv, gating, enabled-list, fmt, audit,
+  sort-and-cap, timeout, launch, read-failure, cache, echo,
+  crash-exit, exit-with-findings, and bounded-drain tests).
 - The tool adapter layer (`src/tools.rs` + `src/tools/diag.rs` +
   `src/tools/cargo_json.rs`): the S0 extension contract —
   `ToolAdapter` (name, `should_run` over changed regions, a data-only

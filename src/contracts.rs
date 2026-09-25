@@ -31,6 +31,13 @@ pub struct SearchHit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CheckRun {
+    pub name: String,
+    pub conclusion: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FlowMap {
     pub defines: Vec<String>,
     pub callers: Vec<SearchHit>,
