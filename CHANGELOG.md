@@ -9,6 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The judge pass, S2 (`src/judges/pass.rs` + `prompt.rs` + `tools.rs` +
+  `provider.rs`): one judge's full sweep over the coverage plan.
+  `run_judge(spec, cfg, plan, gateway, state, aspects)` builds the
+  client from `spec.profile` through the profile factory (zai and
+  anthropic via builders with the configured `max_tokens`; local via
+  `DIFFTRACE_LOCAL_BASE_URL` + `DIFFTRACE_LOCAL_MODEL`; anything else
+  errors naming the profile — credentials resolve through the layered
+  env source, process environment first with empty values ignored and
+  `~/.difftrace/env` under it, attaching explicitly via the builders'
+  `with_api_key` so `ZAI_API_KEY`/`ZHIPUAI_API_KEY`,
+  `ANTHROPIC_API_KEY`, and the local knobs honor the env file as the
+  README states, a set-but-empty or blank local base URL or model
+  errors at start naming the variable, and with no key anywhere the
+  builders' own missing-key error survives) and hands it to the generic
+  `run_judge_with<C: ApiClient>`, the seam every mock pin rides. Per
+  region: the §11 system prompt verbatim with the judge name, the
+  region's open issues, and its theme suppressions interpolated in a
+  single pass (state text containing a placeholder literal cannot
+  inject one block into another), the aspect definitions appended;
+  region materials — the region diff with ±10 new-side context lines
+  (the diff module's free `region_diff` extractor: the window is
+  inclusive at both ends and numbers restart from each hunk header,
+  and a window spanning hunks opens each further hunk under its own
+  `@@ … lines a-b @@` subheader instead of reading as contiguous —
+  pinned by the region-window suite in `src/diff.rs`), the file
+  snapshot truncated head-and-tail to 400 lines
+  (200 + marker + 200), and the flow map for whole-file and repository
+  regions; a fresh `BareLoop` per region carrying `read_file_at_head`
+  and (when `judges.search_tool` is on) `search_at_head` behind one
+  shared per-region call budget — beyond `tool_calls_per_region` the
+  tool answers with a refusal naming the budget and the model finishes.
+  Regions whose asked aspects were all cut (a `replace = []` path
+  override, `--focus`, or a severity floor) are skipped without a
+  provider call, and the plan estimate counts `judge_calls` and tokens
+  over the regions the pass will call only.
+  The report schema rides the prompt (a `response_format` turn
+  suppresses tools, and one call per region is the budgeted shape), the
+  final turn parses leniently with one corrective turn, and a report is
+  well-formed only when it judges exactly the asked aspects —
+  anything else, a provider failure, a malformed parse, or the
+  `stream_timeout_secs` budget makes the whole judge
+  `JudgeAbsent` with the cause: no partial reports ever. Defects map
+  through `FindingDraft`, so ids normalize and evidence cites are
+  `file:line`. `JudgeSpec` carries `temperature` and `seed` per the
+  spec, carried-until-upstream: loopctl `RequestOptions` exposes no
+  sampling control yet (the recorded gap), so neither reaches the wire;
+  temperature validates finite-and-non-negative at load with count
+  (pinned by `degenerate_judges_knobs_reject` in the config suite and
+  the provider suite's layering and empty-knob pins; the pass-level
+  pins are the prompt-verbatim, materials-truncation, state-blocks,
+  budget-refusal, search-gating, placeholder-injection,
+  well-formed-report, no-partial, zero-cell-skip, and malformed-report
+  tests). loopctl joins as the git
+  dependency (rev-pinned by `Cargo.lock`, features `zai` + `openai`,
+  dev `testing`); `PrGateway` gains `Send + Sync` supertraits for the
+  tool boundary. The orchestrator is the consumer; nothing wires the
+  pass into a command yet.
+
 - Differential tool attribution (`src/tools/differential.rs`): repo
   debt never blocks a branch — S0 findings are measured at both ends
   of the pinned range and only what the branch changed may enter the

@@ -5,7 +5,7 @@ pub mod local;
 use crate::contracts::{CheckRun, DiffSource, FileSnapshot, PinnedRange, SearchHit};
 use crate::error::DtError;
 
-pub trait PrGateway {
+pub trait PrGateway: Send + Sync {
     fn pinned_range(&self) -> PinnedRange;
     fn diff(&self) -> DiffSource;
     fn read_file_at_head(&self, path: &str) -> Result<FileSnapshot, DtError>;

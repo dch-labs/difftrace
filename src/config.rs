@@ -51,6 +51,7 @@ impl DifftraceConfig {
     pub fn from_toml_str(contents: &str) -> Result<Self, DtError> {
         let config: Self =
             toml::from_str(contents).map_err(|source| DtError::Config(source.to_string()))?;
+        config.validate_judges()?;
         config.validate_external_tools()?;
         config.validate_ratelimit()?;
         Ok(config)
@@ -297,6 +298,20 @@ impl DifftraceConfig {
         Ok(())
     }
 
+    fn validate_judges(&self) -> Result<(), DtError> {
+        if self.judges.count == 0 {
+            return Err(DtError::Config(
+                "judges.count must be positive: zero judges review nothing".to_owned(),
+            ));
+        }
+        if !self.judges.temperature.is_finite() || self.judges.temperature < 0.0 {
+            return Err(DtError::Config(
+                "judges.temperature must be a finite number of at least zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_ratelimit(&self) -> Result<(), DtError> {
         if self.ratelimit.per_provider_lanes == 0 {
             return Err(DtError::Config(
@@ -480,6 +495,24 @@ mod tests {
             "a zero whole-layer budget silently degrades every tool to unavailable"
         );
         assert!(DifftraceConfig::from_toml_str("[tools]\nbudget_secs = 30\n").is_ok());
+    }
+
+    #[test]
+    fn degenerate_judges_knobs_reject() {
+        for (body, knob) in [
+            ("[judges]\ncount = 0\n", "count"),
+            ("[judges]\ntemperature = -0.1\n", "temperature"),
+            ("[judges]\ntemperature = inf\n", "temperature"),
+            ("[judges]\ntemperature = nan\n", "temperature"),
+        ] {
+            let outcome = DifftraceConfig::from_toml_str(body);
+            assert!(
+                outcome
+                    .as_ref()
+                    .is_err_and(|err| err.to_string().contains(knob)),
+                "{body} rejects naming {knob}"
+            );
+        }
     }
 
     #[test]

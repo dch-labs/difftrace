@@ -427,7 +427,6 @@ fn cap_sorted(mut hits: Vec<SearchHit>, cap: usize) -> Vec<SearchHit> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
     use std::path::{Path, PathBuf};
 
     use crate::contracts::{DiffSource, FileSnapshot, PinnedRange, RegionKind};
@@ -612,7 +611,7 @@ mod tests {
     }
 
     struct CountingGateway {
-        searches: Cell<usize>,
+        searches: std::sync::atomic::AtomicUsize,
     }
 
     impl PrGateway for CountingGateway {
@@ -632,7 +631,9 @@ mod tests {
             Ok(Vec::new())
         }
         fn search_at_head(&self, _pattern: &str, _cap: usize) -> Result<Vec<SearchHit>, DtError> {
-            self.searches.set(self.searches.get().saturating_add(1));
+            let _bumped = self
+                .searches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(Vec::new())
         }
     }
@@ -640,7 +641,7 @@ mod tests {
     #[test]
     fn a_region_without_defines_builds_an_empty_map_without_searching() -> Result<(), DtError> {
         let gateway = CountingGateway {
-            searches: Cell::new(0),
+            searches: std::sync::atomic::AtomicUsize::new(0),
         };
         let target = region("src/notes.md", 1, 1);
         let map = build(&target, "# notes\n", &gateway, 20)?;
@@ -652,7 +653,7 @@ mod tests {
             "no defines means an empty map: {map:?}"
         );
         assert_eq!(
-            gateway.searches.get(),
+            gateway.searches.load(std::sync::atomic::Ordering::Relaxed),
             0,
             "the fast path never touches the gateway"
         );

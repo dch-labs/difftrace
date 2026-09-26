@@ -47,6 +47,108 @@ struct FileDiff {
     hunk_end: u32,
 }
 
+struct HunkWindow<'a> {
+    first: Option<u32>,
+    last: u32,
+    lines: Vec<&'a str>,
+}
+
+#[must_use]
+pub fn region_diff(diff: &str, file: &str, start: u32, end: u32, context: u32) -> String {
+    let lo = start.saturating_sub(context).max(1);
+    let hi = end.saturating_add(context);
+    let mut windows: Vec<HunkWindow> = Vec::new();
+    let mut current: Option<String> = None;
+    let mut new_line: u32 = 0;
+    let mut in_hunk = false;
+    for line in diff.lines() {
+        if line.starts_with("@@ ") {
+            new_line = hunk_new_start(line).saturating_sub(1);
+            in_hunk = true;
+            windows.push(HunkWindow {
+                first: None,
+                last: 0,
+                lines: Vec::new(),
+            });
+            continue;
+        }
+        if in_hunk {
+            let number = new_line.saturating_add(1);
+            let inside = current.as_deref() == Some(file) && lo <= number && number <= hi;
+            if line.starts_with('+') || line.starts_with(' ') {
+                new_line = number;
+                if inside {
+                    push_kept(&mut windows, line, number);
+                }
+            } else if line.starts_with('-') {
+                if inside {
+                    push_kept(&mut windows, line, number);
+                }
+            } else if !line.starts_with('\\') {
+                in_hunk = false;
+                current = None;
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let path = path.split('\t').next().unwrap_or(path);
+            current = if path == "/dev/null" {
+                None
+            } else {
+                Some(
+                    path.strip_prefix("b/")
+                        .map_or(path.to_owned(), str::to_owned),
+                )
+            };
+        }
+    }
+    render_window(file, lo, hi, &windows)
+}
+
+fn push_kept<'a>(windows: &mut [HunkWindow<'a>], line: &'a str, number: u32) {
+    if let Some(window) = windows.last_mut() {
+        if window.first.is_none() {
+            window.first = Some(number);
+        }
+        window.last = number;
+        window.lines.push(line);
+    }
+}
+
+fn render_window(file: &str, lo: u32, hi: u32, windows: &[HunkWindow]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut opened = false;
+    for window in windows {
+        if window.lines.is_empty() {
+            continue;
+        }
+        if opened {
+            parts.push(format!(
+                "@@ {file} lines {}-{} @@",
+                window.first.unwrap_or(window.last),
+                window.last
+            ));
+        }
+        opened = true;
+        parts.push(window.lines.join("\n"));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(
+        "@@ {file} new-side lines {lo}-{hi} @@\n{}",
+        parts.join("\n")
+    )
+}
+
+fn hunk_new_start(line: &str) -> u32 {
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix('+'))
+        .and_then(|numbers| numbers.split(',').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or(1)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffIndex {
     files: BTreeMap<String, FileDiff>,
@@ -294,4 +396,81 @@ pub fn repo_regions(files: &[String]) -> Vec<Region> {
             kind: RegionKind::Repo,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_is_inclusive_at_both_ends() {
+        let diff =
+            "--- a/f\n+++ b/f\n@@ -1,9 +1,9 @@\n c1\n c2\n c3\n c4\n c5\n c6\n c7\n c8\n c9\n";
+        let window = region_diff(diff, "f", 5, 5, 2);
+        assert_eq!(
+            window, "@@ f new-side lines 3-7 @@\n c3\n c4\n c5\n c6\n c7",
+            "lo and hi are kept, one past each edge is not"
+        );
+    }
+
+    #[test]
+    fn a_single_line_region_with_no_context_keeps_its_own_line() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1 +1 @@\n+hello\n";
+        assert_eq!(
+            region_diff(diff, "f", 1, 1, 0),
+            "@@ f new-side lines 1-1 @@\n+hello"
+        );
+    }
+
+    #[test]
+    fn removed_lines_borrow_the_upcoming_new_side_number() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n keep\n-gone\n+fresh\n tail\n";
+        assert_eq!(
+            region_diff(diff, "f", 2, 2, 1),
+            "@@ f new-side lines 1-3 @@\n keep\n-gone\n+fresh\n tail"
+        );
+    }
+
+    #[test]
+    fn numbering_resets_at_each_hunk_header() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a1\n a2\n@@ -10,2 +10,2 @@\n b1\n b2\n";
+        assert_eq!(
+            region_diff(diff, "f", 10, 10, 0),
+            "@@ f new-side lines 10-10 @@\n b1",
+            "the second hunk of the same file re-enters with its own numbering"
+        );
+    }
+
+    #[test]
+    fn an_added_line_starting_with_pluses_stays_body() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n base\n+++ oops\n";
+        assert_eq!(
+            region_diff(diff, "f", 2, 2, 0),
+            "@@ f new-side lines 2-2 @@\n+++ oops",
+            "a + body line never reads as a file header"
+        );
+    }
+
+    #[test]
+    fn a_window_spanning_hunks_marks_each_boundary() {
+        let diff =
+            "--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n c1\n c2\n c3\n@@ -20,2 +20,2 @@\n b1\n b2\n";
+        assert_eq!(
+            region_diff(diff, "f", 2, 21, 1),
+            "@@ f new-side lines 1-22 @@\n c1\n c2\n c3\n@@ f lines 20-21 @@\n b1\n b2",
+            "a second hunk opens under its own subheader, never as a contiguous join"
+        );
+    }
+
+    #[test]
+    fn a_dev_null_target_yields_no_material() {
+        let diff = "--- a/gone\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-here\n-too\n";
+        assert_eq!(region_diff(diff, "gone", 1, 2, 10), "");
+    }
+
+    #[test]
+    fn a_window_with_no_kept_lines_yields_no_material() {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n a1\n a2\n";
+        assert_eq!(region_diff(diff, "f", 50, 60, 0), "");
+    }
 }

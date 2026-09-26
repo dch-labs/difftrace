@@ -1,6 +1,12 @@
 //! The judge panel: every region judged per aspect, findings confirmed by quorum.
 
 pub mod flow;
+pub mod pass;
+pub mod prompt;
+pub mod provider;
+pub mod tools;
+
+use std::collections::BTreeSet;
 
 use crate::aspects::AspectRegistry;
 use crate::contracts::{
@@ -68,9 +74,10 @@ pub fn plan(
 
 #[must_use]
 pub fn summarize(coverage: &CoveragePlan, judges: usize) -> PlanSummary {
-    let tokens = coverage
-        .regions
+    let called: BTreeSet<usize> = coverage.cells.iter().map(|(region, _)| region.0).collect();
+    let tokens = called
         .iter()
+        .filter_map(|idx| coverage.regions.get(*idx))
         .map(|region| {
             let lines = region
                 .end
@@ -84,7 +91,7 @@ pub fn summarize(coverage: &CoveragePlan, judges: usize) -> PlanSummary {
     PlanSummary {
         regions: coverage.regions.len(),
         cells: coverage.cells.len(),
-        judge_calls: coverage.regions.len().saturating_mul(judges),
+        judge_calls: called.len().saturating_mul(judges),
         est_tokens: tokens.saturating_mul(judge_count),
         narrowed: coverage.narrowed,
     }
@@ -268,6 +275,31 @@ mod tests {
         assert_eq!(
             first.est_tokens, 48_000,
             "a repo-spanning region hits the line cap: 2000 x 12 tokens x 2 judges"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn the_estimate_counts_only_regions_the_pass_will_call() -> Result<(), DtError> {
+        let registry = registry_from(
+            "[aspects]\ndefault = [\"error-paths\"]\n[aspects.paths.\"**/*.md\"]\nreplace = []\n",
+        )?;
+        let regions = vec![region("src/a.rs", 1, 10), region("README.md", 1, 10)];
+        let coverage = plan(range(), &regions, &registry, &[], Severity::Nitpick)?;
+        assert_eq!(
+            coverage.cells.len(),
+            1,
+            "the replace-none override leaves the markdown region with no cells"
+        );
+        let summary = summarize(&coverage, 3);
+        assert_eq!(summary.regions, 2, "the plan still reports both regions");
+        assert_eq!(
+            summary.judge_calls, 3,
+            "the zero-cell region spends no call"
+        );
+        assert_eq!(
+            summary.est_tokens, 360,
+            "tokens count the called region only: 10 lines x 12 tokens x 3 judges"
         );
         Ok(())
     }
