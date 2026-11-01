@@ -351,9 +351,14 @@ fn the_moving_tag_push_authenticates_with_a_token_the_step_actually_sets()
         .and_then(|remote| remote.split("x-access-token:${").nth(1))
         .and_then(|rest| rest.split('}').next())
         .ok_or("the REMOTE url names its token variable")?;
+    let env = step
+        .split_once("\n        env:\n")
+        .and_then(|(_, rest)| rest.split_once("\n        run:").map(|(env, _)| env))
+        .ok_or("the moving-tag push must define an env block")?;
     assert!(
-        step.contains(&format!("{name}: ${{{{ secrets.GITHUB_TOKEN }}}}")),
-        "the {name} variable used in REMOTE must be set in this step's env block"
+        env.lines()
+            .any(|line| line.trim() == format!("{name}: ${{{{ secrets.GITHUB_TOKEN }}}}")),
+        "the {name} variable used in REMOTE must be set as an exact env entry"
     );
     assert!(
         !step.contains("x-access-token:${GITHUB_TOKEN}"),

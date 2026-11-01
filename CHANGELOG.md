@@ -179,9 +179,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the workflow pin searched the whole file, so another step setting
   the variable could mask the push step losing it; the step containing
   the authenticated `REMOTE` is now the assertion scope
-  (`the_moving_tag_push_authenticates_with_a_token_the_step_actually_sets`).
-  Trailing-space code spans across the changelog were reworded to keep
-  markdownlint's MD038 quiet (docs only).
+  (`the_moving_tag_push_authenticates_with_a_token_the_step_actually_sets`),
+  matching the exact `env` entry so a similarly named variable (a
+  `BACKUP_GH_TOKEN`-style decoy) cannot satisfy it while the real one
+  is missing. Trailing-space code spans across the changelog were
+  reworded to keep markdownlint's MD038 quiet (docs only).
 
 - **The moving-tag push carries real credentials** — the release step
   built its authenticated `REMOTE` from `${GITHUB_TOKEN}`, a variable no
