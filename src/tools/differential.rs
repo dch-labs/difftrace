@@ -8,13 +8,13 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::contracts::{PinnedRange, ToolFinding};
+use crate::contracts::{PinnedRange, Region, ToolFinding};
 use crate::error::DtError;
 use crate::gateway::local::hermetic_git;
 use crate::identity::LINE_DRIFT_TOLERANCE;
 
-use super::ToolAdapter;
 use super::rust::{CacheKey, Executor, ToolOutcome, run_cached};
+use super::{CommandSpec, ToolAdapter};
 
 pub const CONTEXT_CAP: usize = 20;
 
@@ -279,9 +279,33 @@ fn run_side(
     };
     spec.timeout_secs = share;
     let key = CacheKey::new(sha, &lock_digest(root), &spec);
-    match run_cached(adapter, &spec, &key, cache_dir, executor) {
-        ToolOutcome::Ran(findings) => ToolOutcome::Ran(relativize_findings(findings, root)),
-        outcome @ ToolOutcome::Unavailable(_) => outcome,
+    let scoped = RelativizingAdapter {
+        inner: adapter,
+        root,
+    };
+    run_cached(&scoped, &spec, &key, cache_dir, executor)
+}
+
+struct RelativizingAdapter<'a> {
+    inner: &'a dyn ToolAdapter,
+    root: &'a Path,
+}
+
+impl ToolAdapter for RelativizingAdapter<'_> {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn should_run(&self, changed: &[Region]) -> bool {
+        self.inner.should_run(changed)
+    }
+
+    fn command(&self, targets: &[PathBuf]) -> CommandSpec {
+        self.inner.command(targets)
+    }
+
+    fn parse(&self, output: &str) -> Vec<ToolFinding> {
+        relativize_findings(self.inner.parse(output), self.root)
     }
 }
 
@@ -779,6 +803,89 @@ mod tests {
             "findings render repo-relative instead of absolute temp paths: {:?}",
             outcome.context
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cached_base_findings_relativize_across_export_directories() -> Result<(), DtError> {
+        let tool = diag_tool("rustfmt").map_err(|err| DtError::Git(err.to_string()))?;
+        let dir = scratch("cache-reuse")?;
+        std::fs::write(dir.join("Cargo.lock"), "lock\n")
+            .map_err(|err| DtError::Git(err.to_string()))?;
+        let base = commit(&dir, &[("src/a.rs", "one\n")], "base")?;
+        let head = commit(&dir, &[("src/a.rs", "one\ntwo\n")], "head")?;
+        let range = PinnedRange {
+            base_sha: base,
+            head_sha: head,
+        };
+        let head_export = dir.join("head-side");
+        let first_export = dir.join("base-side-a");
+        let second_export = dir.join("base-side-b");
+        for export in [&head_export, &first_export, &second_export] {
+            std::fs::create_dir_all(export).map_err(|err| DtError::Git(err.to_string()))?;
+            std::fs::write(export.join("Cargo.lock"), "lock\n")
+                .map_err(|err| DtError::Git(err.to_string()))?;
+        }
+        let cache_dir = dir.join("cache");
+        std::fs::create_dir_all(&cache_dir).map_err(|err| DtError::Git(err.to_string()))?;
+        let executor = SequenceExecutor::new(vec![
+            Ok(ExecOutput {
+                text: format!(
+                    "{}:1: error: debt\n",
+                    head_export.join("src/a.rs").display()
+                ),
+                code: Some(0),
+            }),
+            Ok(ExecOutput {
+                text: format!(
+                    "{}:1: error: debt\n",
+                    first_export.join("src/a.rs").display()
+                ),
+                code: Some(0),
+            }),
+        ]);
+        let first = run_differential(
+            &tool,
+            &[PathBuf::from("src/a.rs")],
+            &range,
+            &head_export,
+            &first_export,
+            &dir,
+            &executor,
+        );
+        assert!(
+            first.new.is_empty(),
+            "the fresh run dedupes the shared debt: {:?}",
+            first.new
+        );
+        let second = run_differential(
+            &tool,
+            &[PathBuf::from("src/a.rs")],
+            &range,
+            &head_export,
+            &second_export,
+            &dir,
+            &executor,
+        );
+        assert_eq!(
+            executor.calls.get(),
+            2,
+            "the second run is a pure cache hit — no side re-executes"
+        );
+        assert!(
+            second.new.is_empty(),
+            "a cache hit from another export root still dedupes as shared debt: {:?}",
+            second.new
+        );
+        assert!(
+            second
+                .context
+                .iter()
+                .all(|finding| !finding.file.starts_with(dir.display().to_string().as_str())),
+            "no cached finding leaks an absolute export path: {:?}",
+            second.context
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

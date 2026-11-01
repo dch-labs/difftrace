@@ -336,3 +336,27 @@ fn release_check_fails_without_the_changelog_section() -> Result<(), Box<dyn std
     let _unused = std::fs::remove_dir_all(&root);
     Ok(())
 }
+
+#[test]
+fn the_moving_tag_push_authenticates_with_a_token_the_step_actually_sets()
+-> Result<(), Box<dyn std::error::Error>> {
+    let text = read(".github/workflows/release.yml")?;
+    let remote = text
+        .lines()
+        .find(|line| line.contains("x-access-token:"))
+        .ok_or("the moving-tag push must build an authenticated REMOTE url")?;
+    let name = remote
+        .split("x-access-token:${")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .ok_or("the REMOTE url names its token variable")?;
+    assert!(
+        text.contains(&format!("{name}: ${{{{ secrets.GITHUB_TOKEN }}}}")),
+        "the {name} variable used in REMOTE must be set in a step env block"
+    );
+    assert!(
+        !text.contains("x-access-token:${GITHUB_TOKEN}"),
+        "GITHUB_TOKEN is never exported to the shell — the push would send an empty token"
+    );
+    Ok(())
+}

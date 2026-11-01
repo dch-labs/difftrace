@@ -95,6 +95,7 @@ fn link_targets(line: &str) -> Vec<String> {
 }
 
 fn resolve_against(file: &str, candidate: &str) -> String {
+    let candidate = candidate.trim_start_matches("./");
     match std::path::Path::new(file).parent() {
         Some(dir) if !dir.as_os_str().is_empty() => {
             format!("{}/{}", dir.display(), candidate)
@@ -295,6 +296,26 @@ mod tests {
         assert!(
             check(&[nested], &gateway).is_empty(),
             "docs/setup.md is the target of docs/guide.md's relative link, not a root-level dangle"
+        );
+    }
+
+    #[test]
+    fn a_dot_slash_link_in_a_nested_file_resolves_to_the_same_target() {
+        let mut gateway = DocsGateway::readme("See [the setup](./setup.md) here.\n");
+        gateway.files.push("docs/setup.md".to_owned());
+        gateway.contents.push((
+            "docs/guide.md".to_owned(),
+            "See [the setup](./setup.md) here.\n".to_owned(),
+        ));
+        let nested = Region {
+            file: "docs/guide.md".to_owned(),
+            start: 1,
+            end: u32::MAX,
+            kind: RegionKind::Added,
+        };
+        assert!(
+            check(&[nested], &gateway).is_empty(),
+            "docs/./setup.md normalizes to the tracked docs/setup.md, never a dangle"
         );
     }
 

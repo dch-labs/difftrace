@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report ingestion). The measured runs themselves stay owner-gated
   spend (model-spend corpus runs are deliberately behind explicit
   targets, never a default), as do the suppression seeds, the
-  CodeRabbit planka, and the sign-off.
+  comparison-tool parity notes, and the sign-off.
 
 - **Current runner in the eval harness** — `eval-run --mutations --runner
   current --binary <difftrace>` drives the rewrite binary over the mutation
@@ -155,6 +155,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The moving-tag push carries real credentials** — the release step
+  built its authenticated `REMOTE` from `${GITHUB_TOKEN}`, a variable no
+  step ever sets (`GH_TOKEN` is the env name), so the push sent an empty
+  token and failed after the exact-tag release was already published —
+  freezing `@v0.12` consumers off patch releases. The URL now uses
+  `${GH_TOKEN}`, and the workflow suite asserts the variable named in
+  `REMOTE` is set in a step env block
+  (`the_moving_tag_push_authenticates_with_a_token_the_step_actually_sets`).
+- **Cached tool findings stay repo-relative** — findings were
+  relativized after `run_cached` returned, so the cache stored absolute
+  export paths and a later round's cache hit carried paths from a stale
+  export root; every piece of base debt then read as branch-new and
+  blocked. A `RelativizingAdapter` now strips the run root inside
+  `parse`, before the cache write, and the reuse case is pinned across
+  two different export directories
+  (`cached_base_findings_relativize_across_export_directories`).
+- **`./`-prefixed links in nested Markdown resolve** — a leading `./`
+  joined to `docs/./setup.md`, which the tracked lookup never matched,
+  so a correct link became a blocking Warning;
+  `resolve_against` strips leading `./` segments before the join
+  (`a_dot_slash_link_in_a_nested_file_resolves_to_the_same_target`).
+- **The SQL last-line-deletion parse pin is real** — its fixture was one
+  dash short of the header shape (`-- done`, not `--- done`), so it
+  exercised nothing the deleted `--- ` check would have rejected; the
+  fixture is now `--- done`
+  (`a_final_removed_line_shaped_like_a_header_parses`).
 - **The release train pins what it ships** — the moving tag was derived
   as `vv0.12` (a second `v` in front of the ref), an older patch could
   move it backward, and consumer installs found no release object at
@@ -200,12 +226,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   with a `--- `-shaped body line and failed the whole review with no
   workaround. The `--- ` closure rejection is gone (a swallowed `--- `
   header is still caught by the unpaired-`+++ ` rule), and a
-  `+++ `-shaped added line closing the counts rejects only when the
-  next line proves a swallowed file header (EOF, `diff `/`index `, or a
-  hunk header) — a legitimate closer before the next file's header
-  pair parses. Pinned by
+  `+++ `-shaped added line closing the counts rejects only when it
+  immediately follows a `--- `-shaped removed line — the swallowed
+  header pair is always adjacent — and the next line proves a
+  swallowed file header (EOF, `diff `/`index `, or a hunk header);
+  legitimate closers before the next file's header pair or the same
+  file's next hunk parse. The remaining ambiguity is the genuinely
+  byte-identical pair (`- -- x` then `+ ++ y` before EOF or `@@`),
+  which still rejects. Pinned by
   `a_final_removed_line_shaped_like_a_header_parses`,
   `a_final_added_line_shaped_like_a_header_parses_before_the_next_file`,
+  `a_final_added_line_before_a_same_file_hunk_parses`,
+  `a_pair_shaped_closer_after_a_dashes_line_still_rejects`,
   and the standing `an_under_declared_hunk_cannot_swallow_the_next_file_header`.
 
 - **The check policy no longer refutes runtime claims** — a clean
@@ -250,9 +282,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **Mention-shaped model text cannot notify** — `escape_inline` left
   `@` live, so a prompt-injected `@org/security-team` in judge text
-  mentioned real accounts from the hosted comment. Every `@` gains a
-  zero-width joiner. Pinned by
-  `model_controlled_text_renders_inert_everywhere`.
+  mentioned real accounts from the hosted comment. Every `@` in
+  GitHub-bound text — the hosted comment, inline and reply bodies, chat
+  answers — gains a zero-width joiner (`neutralize_mentions` at those
+  sinks); the console render stays byte-stable with the bare `@`.
+  Pinned by `model_controlled_text_renders_inert_everywhere` and
+  `mention_shaped_titles_neutralize_in_posted_bodies`.
 
 - **Concurrent cooldowns never stack past the directive** — N regions
   hitting the same 429 together extended the deadline additively

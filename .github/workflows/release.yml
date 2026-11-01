@@ -57,7 +57,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           MOVING="$(echo "$GITHUB_REF_NAME" | cut -d. -f1,2)"
-          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           NEWEST=$(git ls-remote --refs --tags "$REMOTE" "refs/tags/${MOVING}.*" | sed 's|.*refs/tags/||' | sort -V | tail -1)
           if [ "$NEWEST" != "$GITHUB_REF_NAME" ]; then
             echo "skipping the move: $NEWEST is the newest ${MOVING}.* tag and owns the moving tag — an older release never rewinds the train"

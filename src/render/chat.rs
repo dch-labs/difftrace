@@ -2,7 +2,7 @@
 //! the answer as one inert block — model-controlled text never renders
 //! live markdown.
 
-use super::escape_inline;
+use super::{escape_inline, neutralize_mentions};
 
 #[must_use]
 pub fn render_answer(question: &str, answer: &str, confirmation: Option<&str>) -> String {
@@ -14,5 +14,5 @@ pub fn render_answer(question: &str, answer: &str, confirmation: Option<&str>) -
         parts.push(escape_inline(line));
     }
     parts.push(escape_inline(answer));
-    format!("{}\n", parts.join("\n\n"))
+    neutralize_mentions(&format!("{}\n", parts.join("\n\n")))
 }

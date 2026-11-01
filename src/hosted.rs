@@ -9,7 +9,7 @@ use crate::contracts::{
 };
 use crate::error::DtError;
 use crate::identity;
-use crate::render::{escape_inline, severity_word};
+use crate::render::{escape_inline, neutralize_mentions, severity_word};
 
 pub trait HostedOps {
     fn permission(&self, actor: &str) -> Result<String, DtError>;
@@ -221,7 +221,7 @@ fn entry_body(entry: &Reconciled, panel: usize, head_sha: &str, re_raise: bool) 
         let short = head_sha.get(..7).unwrap_or(head_sha);
         lines.push(format!("Re-raised in the review of commit `{short}`."));
     }
-    lines.join("\n")
+    neutralize_mentions(&lines.join("\n"))
 }
 
 fn anchor(evidence: &[crate::contracts::Cite]) -> String {
@@ -554,6 +554,30 @@ mod tests {
             note.contains("round 4") && !note.contains("s2"),
             "the exact-line match wins over the drifted first match: {note}"
         );
+    }
+
+    #[test]
+    fn mention_shaped_titles_neutralize_in_posted_bodies() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let entry = confirmed("@dch-labs/security must rotate the key", "src/a.rs", 2);
+        let verdict = verdict(vec![entry], Vec::new(), Vec::new());
+        let plan = plan_posting(&verdict, &[], false, &diff_index());
+        let body = plan
+            .review
+            .comments
+            .first()
+            .ok_or("the inline comment is missing")?
+            .body
+            .clone();
+        assert!(
+            body.contains("@\u{2060}dch-labs/security"),
+            "posted inline bodies neutralize mention-shaped titles: {body}"
+        );
+        assert!(
+            !body.contains("@dch-labs/security"),
+            "the bare handle never reaches GitHub: {body}"
+        );
+        Ok(())
     }
 
     #[test]

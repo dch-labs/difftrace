@@ -47,6 +47,29 @@ struct FileDiff {
     hunk_end: u32,
 }
 
+enum BodyLine {
+    Line(LineKind),
+    Marker,
+}
+
+fn classify_body(raw: &str, line_number: u32) -> Result<BodyLine, String> {
+    if raw.is_empty() || raw.starts_with(' ') {
+        return Ok(BodyLine::Line(LineKind::Context));
+    }
+    if raw.starts_with('+') {
+        return Ok(BodyLine::Line(LineKind::Added));
+    }
+    if raw.starts_with('-') {
+        return Ok(BodyLine::Line(LineKind::Removed));
+    }
+    if raw.starts_with('\\') {
+        return Ok(BodyLine::Marker);
+    }
+    Err(format!(
+        "line {line_number}: a hunk body line without a +, -, or space prefix"
+    ))
+}
+
 struct HunkWindow<'a> {
     first: Option<u32>,
     last: u32,
@@ -184,6 +207,7 @@ impl DiffIndex {
         let mut new_remaining: u32 = 0;
         let mut recognized = false;
         let mut pending_pair = false;
+        let mut dashes_shaped_predecessor = false;
         let lines: Vec<&str> = diff.lines().collect();
         for (number, raw) in lines.iter().enumerate() {
             let raw = *raw;
@@ -222,6 +246,7 @@ impl DiffIndex {
                 }
                 if let Some((start, counts, end)) = hunk_header(raw) {
                     recognized = true;
+                    dashes_shaped_predecessor = false;
                     if skipping_deletion {
                         old_remaining = counts.0;
                         new_remaining = counts.1;
@@ -262,18 +287,9 @@ impl DiffIndex {
                     "line {line_number}: a new hunk starts before the previous one closed"
                 ));
             }
-            let kind = if raw.is_empty() || raw.starts_with(' ') {
-                LineKind::Context
-            } else if raw.starts_with('+') {
-                LineKind::Added
-            } else if raw.starts_with('-') {
-                LineKind::Removed
-            } else if raw.starts_with('\\') {
-                continue;
-            } else {
-                return Err(format!(
-                    "line {line_number}: a hunk body line without a +, -, or space prefix"
-                ));
+            let kind = match classify_body(raw, line_number)? {
+                BodyLine::Line(kind) => kind,
+                BodyLine::Marker => continue,
             };
             match kind {
                 LineKind::Removed => {
@@ -283,6 +299,7 @@ impl DiffIndex {
                         ));
                     }
                     old_remaining = old_remaining.saturating_sub(1);
+                    dashes_shaped_predecessor = raw.starts_with("--- ");
                 }
                 LineKind::Context | LineKind::Added => {
                     let Some((_, file)) = current.as_mut() else {
@@ -304,12 +321,14 @@ impl DiffIndex {
                     if kind == LineKind::Added
                         && old_remaining == 0
                         && new_remaining == 0
+                        && dashes_shaped_predecessor
                         && swallowed_new_file_header(raw, next)
                     {
                         return Err(format!(
                             "line {line_number}: a +++ header consumed as hunk body closes the counts exactly"
                         ));
                     }
+                    dashes_shaped_predecessor = false;
                 }
             }
         }

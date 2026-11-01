@@ -19,11 +19,6 @@ const INDENT: &str = "    ";
 pub(crate) fn escape_inline(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if c == '@' {
-            out.push('@');
-            out.push('\u{2060}');
-            continue;
-        }
         if matches!(
             c,
             '\\' | '['
@@ -44,6 +39,17 @@ pub(crate) fn escape_inline(text: &str) -> String {
             out.push('\\');
         }
         out.push(c);
+    }
+    out
+}
+
+pub(crate) fn neutralize_mentions(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        out.push(c);
+        if c == '@' {
+            out.push('\u{2060}');
+        }
     }
     out
 }
@@ -917,6 +923,11 @@ mod tests {
         assert!(
             !comment.contains("@dch-labs/security"),
             "the bare mention never ships: {comment}"
+        );
+        let console = console::render(&verdict, &RenderOptions { fix_prompts: true });
+        assert!(
+            console.contains("@dch-labs/security") && !console.contains('\u{2060}'),
+            "the console render stays byte-stable — mentions only die where GitHub reads them"
         );
         assert!(
             !comment.contains("[build log](https://evil.example)"),
