@@ -207,7 +207,7 @@ impl DiffIndex {
         let mut new_remaining: u32 = 0;
         let mut recognized = false;
         let mut pending_pair = false;
-        let mut dashes_shaped_predecessor = false;
+        let mut prev_removed_body: Option<&str> = None;
         let lines: Vec<&str> = diff.lines().collect();
         for (number, raw) in lines.iter().enumerate() {
             let raw = *raw;
@@ -246,7 +246,7 @@ impl DiffIndex {
                 }
                 if let Some((start, counts, end)) = hunk_header(raw) {
                     recognized = true;
-                    dashes_shaped_predecessor = false;
+                    prev_removed_body = None;
                     if skipping_deletion {
                         old_remaining = counts.0;
                         new_remaining = counts.1;
@@ -299,7 +299,7 @@ impl DiffIndex {
                         ));
                     }
                     old_remaining = old_remaining.saturating_sub(1);
-                    dashes_shaped_predecessor = raw.starts_with("--- ");
+                    prev_removed_body = Some(raw);
                 }
                 LineKind::Context | LineKind::Added => {
                     let Some((_, file)) = current.as_mut() else {
@@ -321,14 +321,13 @@ impl DiffIndex {
                     if kind == LineKind::Added
                         && old_remaining == 0
                         && new_remaining == 0
-                        && dashes_shaped_predecessor
-                        && swallowed_new_file_header(raw, next)
+                        && swallowed_new_file_header(prev_removed_body, raw, next)
                     {
                         return Err(format!(
                             "line {line_number}: a +++ header consumed as hunk body closes the counts exactly"
                         ));
                     }
-                    dashes_shaped_predecessor = false;
+                    prev_removed_body = None;
                 }
             }
         }
@@ -430,8 +429,17 @@ fn is_metadata_header(raw: &str) -> bool {
         || raw.starts_with("Binary files")
 }
 
-fn swallowed_new_file_header(raw: &str, next: Option<&str>) -> bool {
-    if !raw.starts_with("+++ ") {
+fn swallowed_new_file_header(prev_removed: Option<&str>, raw: &str, next: Option<&str>) -> bool {
+    let Some(left) = prev_removed else {
+        return false;
+    };
+    let header_pair = raw
+        .strip_prefix("+++ ")
+        .is_some_and(|right| right.starts_with("b/") || right == "/dev/null")
+        && left
+            .strip_prefix("--- ")
+            .is_some_and(|left| left.starts_with("a/") || left == "/dev/null");
+    if !header_pair {
         return false;
     }
     next.is_none_or(|next| {

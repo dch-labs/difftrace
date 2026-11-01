@@ -640,14 +640,28 @@ diff --git a/gone.rs b/gone.rs
     }
 
     #[test]
-    fn a_pair_shaped_closer_after_a_dashes_line_still_rejects() {
+    fn a_final_exchange_pair_with_arbitrary_content_parses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,1 +1,1 @@\n--- x\n+++ y\n";
+        let index = DiffIndex::parse(diff)?;
+        assert_eq!(
+            index.files(),
+            vec!["f"],
+            "a last-line -- x to ++ y replacement closing the counts at EOF is body data, never a swallowed header"
+        );
+        assert_eq!(index.added_lines("f"), vec![1]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_path_shaped_pair_closing_the_counts_before_a_hunk_still_rejects() {
         let diff =
-            "--- a/f\n+++ b/f\n@@ -1,2 +1,2 @@\n ctx\n--- x\n+++ y\n@@ -5,1 +5,1 @@\n tail\n";
+            "--- a/f\n+++ b/f\n@@ -1,1 +1,2 @@\n+one\n--- a/g\n+++ b/g\n@@ -1,1 +1,1 @@\n b1\n";
         let outcome = DiffIndex::parse(diff);
         assert!(
             matches!(&outcome, Err(err)
                 if err.contains("line 6") && err.contains("closes the counts exactly")),
-            "a dashes-shaped removal followed by a pluses-shaped closer is byte-identical to a swallowed header pair — it still rejects: {outcome:?}"
+            "a pair spelling the git header grammar (a/ and b/ remainders) with the next file's hunk following is a swallowed header: {outcome:?}"
         );
     }
 

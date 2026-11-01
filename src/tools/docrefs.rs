@@ -95,6 +95,9 @@ fn link_targets(line: &str) -> Vec<String> {
 }
 
 fn resolve_against(file: &str, candidate: &str) -> String {
+    if candidate.starts_with('/') {
+        return candidate.to_owned();
+    }
     let candidate = candidate.trim_start_matches("./");
     match std::path::Path::new(file).parent() {
         Some(dir) if !dir.as_os_str().is_empty() => {
@@ -316,6 +319,26 @@ mod tests {
         assert!(
             check(&[nested], &gateway).is_empty(),
             "docs/./setup.md normalizes to the tracked docs/setup.md, never a dangle"
+        );
+    }
+
+    #[test]
+    fn a_root_relative_link_in_a_nested_file_is_not_a_repo_path() {
+        let mut gateway = DocsGateway::readme("See [lib](/src/lib.rs) here.\n");
+        gateway.files.push("docs/setup.md".to_owned());
+        gateway.contents.push((
+            "docs/guide.md".to_owned(),
+            "See [lib](/src/lib.rs) here.\n".to_owned(),
+        ));
+        let nested = Region {
+            file: "docs/guide.md".to_owned(),
+            start: 1,
+            end: u32::MAX,
+            kind: RegionKind::Added,
+        };
+        assert!(
+            check(&[nested], &gateway).is_empty(),
+            "a root-relative link keeps its leading slash through the join and rejects like it does at the root"
         );
     }
 

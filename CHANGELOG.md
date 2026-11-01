@@ -155,6 +155,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A last-line `-- x` to `++ y` exchange parses at end of file** — the
+  predecessor-aware swallow guard still rejected a legitimate 1:1
+  replacement whose body lines spell `--- x` and `+++ y` when they
+  close the counts at EOF, failing the whole review. The guard now
+  also requires the pair to carry git's header grammar — an `a/` or
+  `/dev/null` remainder on the dashes side, a `b/` or `/dev/null`
+  remainder on the pluses side — so arbitrary content parses while a
+  genuinely swallowed `--- a/g`/`+++ b/g` pair (at EOF or before the
+  next file's hunk) still rejects. Pinned by
+  `a_final_exchange_pair_with_arbitrary_content_parses` and
+  `a_path_shaped_pair_closing_the_counts_before_a_hunk_still_rejects`.
+
+- **Root-relative links in nested Markdown are not repo paths** —
+  `[x](/src/lib.rs)` in `docs/guide.md` joined to
+  `docs//src/lib.rs`, which slipped past the leading-slash rule and
+  became a blocking Warning against the real tracked path.
+  `resolve_against` returns root-relative candidates untouched so the
+  rule rejects them exactly as at the root. Pinned by
+  `a_root_relative_link_in_a_nested_file_is_not_a_repo_path`.
+
+- **The moving-tag credential assertions are scoped to their step** —
+  the workflow pin searched the whole file, so another step setting
+  the variable could mask the push step losing it; the step containing
+  the authenticated `REMOTE` is now the assertion scope
+  (`the_moving_tag_push_authenticates_with_a_token_the_step_actually_sets`).
+  Trailing-space code spans across the changelog were reworded to keep
+  markdownlint's MD038 quiet (docs only).
+
 - **The moving-tag push carries real credentials** — the release step
   built its authenticated `REMOTE` from `${GITHUB_TOKEN}`, a variable no
   step ever sets (`GH_TOKEN` is the env name), so the push sent an empty
@@ -178,7 +206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   (`a_dot_slash_link_in_a_nested_file_resolves_to_the_same_target`).
 - **The SQL last-line-deletion parse pin is real** — its fixture was one
   dash short of the header shape (`-- done`, not `--- done`), so it
-  exercised nothing the deleted `--- ` check would have rejected; the
+  exercised nothing the deleted `---`-prefix check would have rejected; the
   fixture is now `--- done`
   (`a_final_removed_line_shaped_like_a_header_parses`).
 - **The release train pins what it ships** — the moving tag was derived
@@ -223,21 +251,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - **The parser accepts legitimate end-of-file diffs** — deleting a last
   `-- comment` line (SQL/Lua/Haskell/Ada) closed the declared counts
-  with a `--- `-shaped body line and failed the whole review with no
-  workaround. The `--- ` closure rejection is gone (a swallowed `--- `
-  header is still caught by the unpaired-`+++ ` rule), and a
-  `+++ `-shaped added line closing the counts rejects only when it
-  immediately follows a `--- `-shaped removed line — the swallowed
+  with a `---`-prefixed body line and failed the whole review with no
+  workaround. The `---`-prefix closure rejection is gone (a swallowed
+  `---` header is still caught by the unpaired-`+++` rule), and a
+  `+++`-prefixed added line closing the counts rejects only when it
+  immediately follows a `---`-prefixed removed line — the swallowed
   header pair is always adjacent — and the next line proves a
-  swallowed file header (EOF, `diff `/`index `, or a hunk header);
+  swallowed file header (EOF, `diff`/`index`, or a hunk header);
   legitimate closers before the next file's header pair or the same
-  file's next hunk parse. The remaining ambiguity is the genuinely
-  byte-identical pair (`- -- x` then `+ ++ y` before EOF or `@@`),
-  which still rejects. Pinned by
+  file's next hunk parse. Only a pair spelling the git header grammar
+  itself — `a/` or `/dev/null` on the `---` side, `b/` or `/dev/null`
+  on the `+++` side — still rejects, so a last-line `-- x` to `++ y`
+  exchange parses at end of file. The remaining ambiguity is a
+  legitimate final exchange whose content literally spells that
+  grammar (`a/…` to `b/…`). Pinned by
   `a_final_removed_line_shaped_like_a_header_parses`,
   `a_final_added_line_shaped_like_a_header_parses_before_the_next_file`,
   `a_final_added_line_before_a_same_file_hunk_parses`,
-  `a_pair_shaped_closer_after_a_dashes_line_still_rejects`,
+  `a_final_exchange_pair_with_arbitrary_content_parses`,
+  `a_path_shaped_pair_closing_the_counts_before_a_hunk_still_rejects`,
   and the standing `an_under_declared_hunk_cannot_swallow_the_next_file_header`.
 
 - **The check policy no longer refutes runtime claims** — a clean
@@ -394,14 +426,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   naming the claim, exactly like any other schema-violating spelling,
   so wire and schema cannot drift. Pinned by
   `a_schema_violating_adjacent_preexisting_claim_rejects`.
-- **An unpaired `--- ` line before a new file never leaks into the
+- **An unpaired `---` line before a new file never leaks into the
   previous file's window** — in a mangled diff whose `--- a/g` is
   followed by `diff --git` rather than `+++`, `region_diff` kept the
   line as a removed line of the previous file while the index consumed
-  it as metadata. The window now treats `--- ` at exhausted counts as a
-  file boundary whenever the lookahead starts a new file (`+++ `,
-  `diff `, `index `, or a hunk header), keeping the renderer and the
-  index in agreement. Pinned by
+  it as metadata. The window now treats a `---`-prefixed line at
+  exhausted counts as a file boundary whenever the lookahead starts a
+  new file (`+++`, `diff`, `index`, or a hunk header), keeping the
+  renderer and the index in agreement. Pinned by
   `an_unpaired_dashes_line_before_a_new_file_never_leaks_into_the_window`.
 - **The escalation invariant comment sits beside its function** — the
   one indented body comment left in non-test code (canon §2) is hoisted
@@ -1515,7 +1547,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     the next file's `---`/`+++` pair — and a stray `+++` outside a
     hunk without its `---` pair errors instead of minting a phantom
     file (both line-numbered, pinned). Genuine content that starts
-    `-- `/`++ ` and happens to close a hunk exactly is indistinguishable
+    `--`/`++` and happens to close a hunk exactly is indistinguishable
     from the swallow and fails closed the same way — the diff format
     itself cannot tell the two apart (pinned).
   - `example.config.toml` is the pure compiled defaults again
@@ -1601,7 +1633,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
     text and re-form the loop detector's identical-answer triple —
     exactly the stubborn-judge shape the notice absorbs (pinned by
     `repeat_notices_for_different_targets_never_share_text`).
-  - `region_diff` is count-aware: a genuine `--- `/`+++ ` body pair
+  - `region_diff` is count-aware: a genuine `---`/`+++` body pair
     inside the declared hunk counts stays in the judge's materials
     (previously every line after it was silently dropped while the
     index still anchored them), and only a pair at counts-exhaustion
