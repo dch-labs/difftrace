@@ -6,3 +6,4 @@ pub mod error;
 pub mod extract;
 pub mod metrics;
 pub mod mutations;
+pub mod report;

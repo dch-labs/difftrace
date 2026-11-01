@@ -1,34 +1,23 @@
-# The difftrace review workflow. It runs on this repository's own pull
-# requests, and consumer repositories call it as a reusable workflow
-# through the caller template in examples/difftrace-review.yml — pinned
-# to a fixed commit of this repository, so the binary version+checksum
-# pins below always travel with the workflow the consumer runs. On
-# every difftrace release, release.sh pins bumps those pins.
+# The difftrace review workflow, called by consumer repositories:
+#   uses: dch-labs/difftrace/.github/workflows/review.yml@v0.12
+# The ref is a moving tag — release.yml moves it to every v0.12.x
+# release, so callers track the release train by bumping major/minor
+# only. The workflow runs the hosted binary (review --repo --pr
+# --actor) against the caller's pull request with a least-privilege
+# app token; the binary authorizes the comment author before any
+# spend, reads the cross-round state from the standing difftrace
+# comment, and posts one review per round.
 name: difftrace review
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  workflow_dispatch:
-    inputs:
-      pr:
-        description: "Pull request number to review"
-        required: true
-      model:
-        description: "Model to review with"
-        required: false
   workflow_call:
     inputs:
       pr:
-        description: "Pull request number to review"
+        description: "Pull request number; defaults to the event's pull request or issue"
         type: string
         required: false
-      model:
-        description: "Model to review with"
+      actor:
+        description: "Login to authorize (the comment author); defaults to the event actor"
         type: string
         required: false
     secrets:
@@ -49,356 +38,75 @@ jobs:
     runs-on: ubuntu-latest
     concurrency:
       # One review lane per pull request: a push supersedes any review
-      # still in flight or queued for the same PR — the superseded run
-      # would only re-review an older head, so cancelling it saves the
-      # duplicate spend. Comment commands have their own serialized lane
-      # in the chat job and may interleave with a review.
+      # still in flight for the same PR — it would only re-review an
+      # older head.
       group: difftrace-review-${{ inputs.pr || github.event.pull_request.number || github.event.issue.number || github.run_id }}
       cancel-in-progress: true
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-      github.event.pull_request.user.login != 'dependabot[bot]' &&
-      github.event.pull_request.head.repo.fork != true)
-    steps:
-      - name: Resolve the pull request number and head
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ inputs.pr || github.event.pull_request.number }}
-        run: |
-          case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
-          echo "pr=$PR" >> "$GITHUB_OUTPUT"
-          sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
-          case "$sha" in ''|*[!0-9a-f]*) echo "invalid head sha: $sha" >&2; exit 1;; esac
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      - name: Reject fork pull requests
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR: ${{ steps.pr.outputs.pr }}
-          REPO: ${{ github.repository }}
-        run: |
-          fork=$(gh api "repos/$REPO/pulls/$PR" --jq .head.repo.fork)
-          case "$fork" in false) ;; *) echo "difftrace does not run on fork pull requests" >&2; exit 1;; esac
-
-      # The binary is pinned to the tagged v0.11.3 release; bump version and
-      # checksum together on every difftrace release.
-      - name: Install difftrace v0.11.3
-        run: |
-          curl -fsSL -o /tmp/difftrace.tar.gz \
-            https://github.com/dch-labs/difftrace/releases/download/v0.11.3/difftrace-0.11.3-x86_64-unknown-linux-gnu.tar.gz
-          echo "742dccca2d8047b322e651fc782040d0066207723662ea262c536fcd9f08e3f5  /tmp/difftrace.tar.gz" | sha256sum -c -
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf /tmp/difftrace.tar.gz -C "$HOME/.local/bin"
-
-      - name: Check the required secrets are present
-        env:
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          DIFFTRACE_APP_ID: ${{ secrets.DIFFTRACE_APP_ID }}
-          DIFFTRACE_APP_PRIVATE_KEY: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
-        run: |
-          : "${ZAI_API_KEY:?ZAI_API_KEY is not set - the review step would fail opaquely}"
-          : "${DIFFTRACE_APP_ID:?DIFFTRACE_APP_ID is not set - the review step would fail opaquely}"
-          : "${DIFFTRACE_APP_PRIVATE_KEY:?DIFFTRACE_APP_PRIVATE_KEY is not set - the review step would fail opaquely}"
-
-      - name: Mint the difftrace app token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        id: app-token
-        with:
-          app-id: ${{ secrets.DIFFTRACE_APP_ID }}
-          private-key: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
-          permission-pull-requests: write
-          permission-contents: write
-
-      - name: Restore the review memory
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.difftrace/memory
-          key: difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-${{ steps.pr.outputs.sha }}
-          restore-keys: |
-            difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-
-
-      - name: Review the pull request
-        run: |
-          set -o pipefail
-          {
-            difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md" 2>&1 \
-              | tee /dev/stderr
-          } | {
-            grep --line-buffered -E 'provider client|batch |turn |run (started|ended)|hunt|verdict|dropped|unreviewed|review posted|difftrace:|ERROR|WARN' >> "$GITHUB_STEP_SUMMARY" || true
-          }
-        env:
-          PR: ${{ steps.pr.outputs.pr }}
-          SHA: ${{ steps.pr.outputs.sha }}
-          REPO: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          DIFFTRACE_PROFILE: zai
-          DIFFTRACE_MAX_TOKENS: '131072'
-          DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
-          DIFFTRACE_BATCH_FILES: '1'
-          DIFFTRACE_MAX_PARALLEL_BATCHES: '10'
-          DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
-          RUST_LOG: info
-
-      - name: Upload trajectory
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: difftrace-trajectory-pr${{ steps.pr.outputs.pr }}
-          path: ~/.difftrace/trajectories/
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 7
-
-  gate:
-    name: Authorize a difftrace command
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    if: >-
-      (github.event_name == 'pull_request_review_comment' ||
+      github.event_name == 'workflow_call' ||
+      (github.event_name == 'pull_request') ||
       (github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request != null)) &&
-      !endsWith(github.event.comment.user.login, '[bot]')
-    outputs:
-      skip: ${{ steps.cmd.outputs.skip }}
-      verb: ${{ steps.cmd.outputs.verb }}
+       !endsWith(github.event.comment.user.login, '[bot]') &&
+       startsWith(github.event.comment.body, '/review')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+       !endsWith(github.event.comment.user.login, '[bot]') &&
+       startsWith(github.event.comment.body, '/review'))
     steps:
-      # A comment triggers difftrace only when its first line addresses
-      # the bot — quoted mentions deeper in the body never fire.
-      - name: Resolve the command
-        id: cmd
-        env:
-          BODY: ${{ github.event.comment.body }}
-          AUTHOR: ${{ github.event.comment.user.login }}
-        run: |
-          case "$AUTHOR" in *"[bot]") echo "skip=bot" >> "$GITHUB_OUTPUT"; exit 0;; esac
-          if ! printf '%s' "$BODY" | head -n 1 | grep -qiE '^(@difftrace(\[bot\])?|/difftrace)[[:space:]]'; then
-            echo "skip=mention" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          echo "skip=" >> "$GITHUB_OUTPUT"
-          if printf '%s' "$BODY" | head -n 1 | grep -qiE '^(@difftrace(\[bot\])?|/difftrace)[[:space:]]+review([[:space:]]|$)'; then
-            echo "verb=review" >> "$GITHUB_OUTPUT"
-          elif printf '%s' "$BODY" | head -n 1 | grep -qiE '^(@difftrace(\[bot\])?|/difftrace)[[:space:]]+plan([[:space:]]|$)'; then
-            echo "verb=plan" >> "$GITHUB_OUTPUT"
-          else
-            echo "verb=reply" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Authorize the command author
-        if: steps.cmd.outputs.skip == ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          AUTHOR: ${{ github.event.comment.user.login }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
-        run: |
-          case "$AUTHOR" in *[!A-Za-z0-9-]*) echo "invalid comment author login: $AUTHOR" >&2; exit 1;; esac
-          case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
-          perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission)
-          case "$perm" in admin|write) ;; *) echo "$AUTHOR ($perm) may not trigger difftrace" >&2; exit 1;; esac
-          fork=$(gh api "repos/$REPO/pulls/$PR" --jq .head.repo.fork)
-          case "$fork" in false) ;; *) echo "difftrace does not run on fork pull requests" >&2; exit 1;; esac
-
-  re-review:
-    name: Run a requested re-review
-    needs: gate
-    runs-on: ubuntu-latest
-    concurrency:
-      # A `review` command joins the review lane and, as the incoming
-      # run, cancels the in-flight review there — latest intent wins,
-      # and only the newest head gets reviewed.
-      group: difftrace-review-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
-      cancel-in-progress: true
-    if: needs.gate.outputs.skip == '' && needs.gate.outputs.verb == 'review'
-    steps:
-
-      - name: Resolve the pull request number and head
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
-        run: |
-          case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
-          echo "pr=$PR" >> "$GITHUB_OUTPUT"
-          sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
-          case "$sha" in ''|*[!0-9a-f]*) echo "invalid head sha: $sha" >&2; exit 1;; esac
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      # The binary is pinned to the tagged v0.11.3 release; bump version and
-      # checksum together on every difftrace release.
-      - name: Install difftrace v0.11.3
-        run: |
-          curl -fsSL -o /tmp/difftrace.tar.gz \
-            https://github.com/dch-labs/difftrace/releases/download/v0.11.3/difftrace-0.11.3-x86_64-unknown-linux-gnu.tar.gz
-          echo "742dccca2d8047b322e651fc782040d0066207723662ea262c536fcd9f08e3f5  /tmp/difftrace.tar.gz" | sha256sum -c -
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf /tmp/difftrace.tar.gz -C "$HOME/.local/bin"
-
-      - name: Check the required secrets are present
-        env:
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          DIFFTRACE_APP_ID: ${{ secrets.DIFFTRACE_APP_ID }}
-          DIFFTRACE_APP_PRIVATE_KEY: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
-        run: |
-          : "${ZAI_API_KEY:?ZAI_API_KEY is not set - the review step would fail opaquely}"
-          : "${DIFFTRACE_APP_ID:?DIFFTRACE_APP_ID is not set - the review step would fail opaquely}"
-          : "${DIFFTRACE_APP_PRIVATE_KEY:?DIFFTRACE_APP_PRIVATE_KEY is not set - the review step would fail opaquely}"
-
       - name: Mint the difftrace app token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        uses: actions/create-github-app-token@v2
         id: app-token
         with:
           app-id: ${{ secrets.DIFFTRACE_APP_ID }}
           private-key: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
           permission-pull-requests: write
-          permission-contents: write
+          permission-contents: read
 
-      - name: Restore the review memory
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.difftrace/memory
-          key: difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-${{ steps.pr.outputs.sha }}
-          restore-keys: |
-            difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-
-
-      - name: Review the pull request
-        run: |
-          set -o pipefail
-          {
-            difftrace review --repo "$REPO" --pr "$PR" --sha "$SHA" --memory "$HOME/.difftrace/memory/learnings.md" 2>&1 \
-              | tee /dev/stderr
-          } | {
-            grep --line-buffered -E 'provider client|batch |turn |run (started|ended)|hunt|verdict|dropped|unreviewed|review posted|difftrace:|ERROR|WARN' >> "$GITHUB_STEP_SUMMARY" || true
-          }
+      - name: Reject fork pull requests (fail closed)
         env:
-          PR: ${{ steps.pr.outputs.pr }}
-          SHA: ${{ steps.pr.outputs.sha }}
-          REPO: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          DIFFTRACE_PROFILE: zai
-          DIFFTRACE_MAX_TOKENS: '131072'
-          DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
-          DIFFTRACE_BATCH_FILES: '1'
-          DIFFTRACE_MAX_PARALLEL_BATCHES: '10'
-          DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
-          RUST_LOG: info
-
-      - name: Upload trajectory
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: difftrace-trajectory-pr${{ steps.pr.outputs.pr }}-rereview
-          path: ~/.difftrace/trajectories/
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 7
-
-  chat:
-    name: Handle a difftrace command
-    needs: gate
-    runs-on: ubuntu-latest
-    concurrency:
-      # One command lane per pull request with a deep queue: commands
-      # serialize (never racing the registry, threads, and memory) and
-      # queue: max keeps up to 100 pending commands in FIFO order — a
-      # burst of commands no longer replaces the pending one. Commands
-      # never cancel anything; reviews run in their own lane.
-      group: difftrace-chat-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
-      cancel-in-progress: false
-      queue: max
-    if: needs.gate.outputs.skip == '' && needs.gate.outputs.verb != 'review'
-    steps:
-
-      - name: Resolve the pull request number and head
-        id: pr
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          case "$PR" in ''|*[!0-9]*) echo "invalid PR number: $PR" >&2; exit 1;; esac
-          echo "pr=$PR" >> "$GITHUB_OUTPUT"
-          sha=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
-          case "$sha" in ''|*[!0-9a-f]*) echo "invalid head sha: $sha" >&2; exit 1;; esac
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-
-      # The binary is pinned to the tagged v0.11.3 release; bump version and
-      # checksum together on every difftrace release.
-      - name: Install difftrace v0.11.3
-        run: |
-          curl -fsSL -o /tmp/difftrace.tar.gz \
-            https://github.com/dch-labs/difftrace/releases/download/v0.11.3/difftrace-0.11.3-x86_64-unknown-linux-gnu.tar.gz
-          echo "742dccca2d8047b322e651fc782040d0066207723662ea262c536fcd9f08e3f5  /tmp/difftrace.tar.gz" | sha256sum -c -
-          mkdir -p "$HOME/.local/bin"
-          tar -xzf /tmp/difftrace.tar.gz -C "$HOME/.local/bin"
-
-      - name: Check the required secrets are present
-        env:
-          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          DIFFTRACE_APP_ID: ${{ secrets.DIFFTRACE_APP_ID }}
-          DIFFTRACE_APP_PRIVATE_KEY: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
-        run: |
-          : "${ZAI_API_KEY:?ZAI_API_KEY is not set - the reply step would fail opaquely}"
-          : "${DIFFTRACE_APP_ID:?DIFFTRACE_APP_ID is not set - the reply step would fail opaquely}"
-          : "${DIFFTRACE_APP_PRIVATE_KEY:?DIFFTRACE_APP_PRIVATE_KEY is not set - the reply step would fail opaquely}"
-
-      - name: Mint the difftrace app token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        id: app-token
-        with:
-          app-id: ${{ secrets.DIFFTRACE_APP_ID }}
-          private-key: ${{ secrets.DIFFTRACE_APP_PRIVATE_KEY }}
-          permission-pull-requests: write
-          permission-contents: write
-
-      - name: Restore the review memory
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-        with:
-          path: ~/.difftrace/memory
-          key: difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-${{ steps.pr.outputs.sha }}
-          restore-keys: |
-            difftrace-mem-${{ github.repository }}-pr${{ steps.pr.outputs.pr }}-
-
-      - name: Run the command
-        run: |
-          if [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "review" ]; then
-            difftrace plan --repo "$REPO" --pr "$PR" --sha "$SHA" --review-comment "$COMMENT_ID"
-          elif [ "$VERB" = "plan" ] && [ "$COMMENT_KIND" = "issue" ]; then
-            gh pr comment "$PR" --repo "$REPO" --body '`plan` plans a fix for a review-thread finding — answering as a generic reply; use `@difftrace review` for a fresh full review.'
-            difftrace reply --repo "$REPO" --pr "$PR" --sha "$SHA" --issue-comment "$COMMENT_ID"
-          elif [ "$COMMENT_KIND" = "issue" ]; then
-            difftrace reply --repo "$REPO" --pr "$PR" --sha "$SHA" --issue-comment "$COMMENT_ID"
+          PR="${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}"
+          case "$PR" in ''|*[!0-9]*) echo "invalid pull request number: $PR" >&2; exit 1;; esac
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            FORK="${{ github.event.pull_request.head.repo.fork }}"
           else
-            difftrace reply --repo "$REPO" --pr "$PR" --sha "$SHA" --review-comment "$COMMENT_ID"
+            OWNER=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRepositoryOwner --jq .headRepositoryOwner.login)
+            if [ "$OWNER" = "${{ github.repository_owner }}" ]; then FORK=false; else FORK=true; fi
           fi
+          case "$FORK" in
+            true)
+              echo "::error::fork pull requests are not reviewed: the app token must not read external code" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Check out the pull request head
+        uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ github.event.pull_request.head.sha || format('refs/pull/{0}/head', inputs.pr || github.event.pull_request.number || github.event.issue.number) }}
+          persist-credentials: false
+
+      - name: Install the difftrace binary from the moving tag
         env:
-          VERB: ${{ needs.gate.outputs.verb }}
-          COMMENT_ID: ${{ github.event.comment.id }}
-          COMMENT_KIND: ${{ github.event_name == 'issue_comment' && 'issue' || 'review' }}
-          PR: ${{ steps.pr.outputs.pr }}
-          SHA: ${{ steps.pr.outputs.sha }}
-          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          gh release download v0.12 --repo dch-labs/difftrace \
+            --pattern 'difftrace-*-x86_64-unknown-linux-gnu.tar.gz' --dir /tmp/difftrace-install
+          tar -xzf /tmp/difftrace-install/difftrace-*-x86_64-unknown-linux-gnu.tar.gz -C /tmp/difftrace-install
+          install -m 0755 /tmp/difftrace-install/difftrace ~/.local/bin/difftrace
+          sha256sum ~/.local/bin/difftrace
+
+      - name: Run the review
+        env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
-          DIFFTRACE_PROFILE: zai
-          DIFFTRACE_MAX_TOKENS: '131072'
-          DIFFTRACE_STREAM_TIMEOUT_SECS: '900'
-          DIFFTRACE_MODEL: ${{ inputs.model || vars.DIFFTRACE_MODEL || 'glm-4.7' }}
           RUST_LOG: info
-
-      - name: Upload trajectory
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: difftrace-trajectory-pr${{ steps.pr.outputs.pr }}-chat
-          path: ~/.difftrace/trajectories/
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 7
+        run: |
+          PR="${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}"
+          ACTOR="${{ inputs.actor || github.event.comment.user.login || github.actor }}"
+          difftrace review \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR" \
+            --actor "$ACTOR"

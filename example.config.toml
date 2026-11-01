@@ -1,0 +1,181 @@
+# difftrace configuration — every table and knob, with the shipped
+# defaults. This file is loadable as-is: `difftrace review --config
+# example.config.toml --dry-run` (pinned by a config test).
+#
+# Resolution order: an explicit `--config path` (must exist) replaces
+# everything below; else the first `.difftrace/config.toml` found
+# walking up from the working directory (whole-file precedence over
+# the global file); else `~/.difftrace/config.toml`; else these
+# defaults. Unknown keys in any table reject at load. Secrets never
+# live here — keys and models go in the environment or
+# `~/.difftrace/env` (see the bottom of this file).
+
+[judges]
+# The panel. `count` judges are drawn by cycling `profiles`, so count
+# may exceed the list (repeats share one provider under a `#2` id — a
+# quorum needs two distinct provider profiles). A profile is
+# `provider` or `provider:model`: zai,
+# anthropic, local. The model part wins over any env variable; a bare
+# `zai`/`anthropic` profile falls back to ZAI_MODEL/ANTHROPIC_MODEL
+# from the layered env, then the provider default.
+count = 3
+profiles = ["zai:glm-5.3", "zai:glm-5.3-flash", "local"]
+# Max completion tokens per model call. The zai and anthropic arms
+# apply it per call; local profiles do not take the knob (the
+# self-hosted endpoint owns its ceiling) and reject a non-default
+# value loudly.
+max_tokens = 32768
+# Context window in tokens anchoring loopctl's compaction thresholds
+# (auto-compaction past 80% of it, an emergency line at 95%). Set it to
+# the panel's real window — the 200000 default is loopctl's assumption,
+# not any model's — per profile under [[judges.model]] when the panel
+# mixes windows.
+context_window = 200000
+
+# Per-profile model tuning. Each entry names the exact profile string
+# from `profiles` (or `escalate_profile`) and overrides three knobs for
+# it alone; profiles without an entry inherit the globals above.
+#
+#   effort           — the reasoning ladder rung the judge runs at:
+#                      none | minimal | low | medium | high | xhigh | max
+#                      (default: the provider's own default)
+#   replay_reasoning — replay prior-turn thinking onto requests, so a
+#                      multi-turn judge keeps its own reasoning in view
+#                      (default: false)
+#   max_tokens       — per-profile output ceiling (default: the
+#                      global; rejected for local profiles)
+#   context_window   — per-profile compaction denominator (default:
+#                      the global; zero rejected — it silently disables
+#                      the compaction guard)
+#
+# [[judges.model]]
+# profile = "zai:glm-5.3"
+# effort = "high"
+# replay_reasoning = true
+# max_tokens = 65536
+# context_window = 128000
+# Per-call LLM stream timeout in seconds. The attempt budget scales
+# with the turns allowed (per-call x turns + corrective slack), so a
+# tool-using region is not doomed by a single-call ceiling.
+stream_timeout_secs = 300
+# Concurrent region tasks across the whole panel (the lane pool).
+region_concurrency = 8
+# Full-jitter backoff (seconds, base) before a failed region's retry.
+# The bound escalates 2^n with the retry ordinal, capped.
+retry_backoff_secs = 8
+# Retries per region after the first failed attempt (total attempts =
+# 1 + this). 0 = fail fast; at most 10. A region that fails by
+# exceeding the stream budget is never retried — it cannot fit the
+# same wall.
+region_retries = 3
+# Regions longer than this many lines split into fitting sub-regions
+# (>= 40; default 3000 — unrelated to the judge snapshot window, which
+# is 400 lines, 200 head + 200 tail). A full-scope region splits the
+# same way once the diff gives it a real span; files the diff never
+# touches stay whole.
+region_max_lines = 3000
+# Optional second opinion: after the panel sweep, every defect below
+# quorum is re-judged once by this profile. Its vote can confirm a
+# solo finding. Unset = off.
+# escalate_profile = "zai:glm-5.3"
+# Whether judges get the search_at_head tool at all.
+search_tool = true
+# Tool calls allowed per region per judge.
+tool_calls_per_region = 10
+# Caller/trigger sites kept per region in the flow map.
+flow_map_max_callers = 20
+
+
+[aspects]
+# Which aspects judges check, per path. The vocabulary (only these
+# ids are accepted): error-paths, lifecycle, concurrency, security,
+# api-contract, tests, fixtures, docs, canon (house canon: //! module
+# headers, no planning references, doc claims matching shipped
+# behavior).
+
+default = ["error-paths", "lifecycle", "concurrency", "security", "api-contract", "tests"]
+
+# Per-glob overrides, longest matching glob wins. `extra` adds to the
+# default set; `replace` swaps it entirely (empty list = judge nothing
+# there — generated files like Cargo.lock belong here). Both dedupe;
+# unknown ids reject.
+# An override demo (left commented so the file stays the pure defaults):
+# [aspects.paths."**/*.md"]
+# replace = ["docs", "canon"]
+# [aspects.paths."**/tests/**"]
+# extra = ["fixtures", "tests"]
+# [aspects.paths."Cargo.lock"]
+# replace = []
+
+[tools]
+# Deterministic layer, run differentially (base vs head) when the
+# working tree is clean. Built-ins: fmt, clippy, check, audit.
+enabled = ["fmt", "clippy"]
+# Shared wall budget for the whole tool layer, seconds.
+budget_secs = 120
+
+# External tools. `format` is "diag" (file:line[:col]: level: message)
+# or "cargo-json" (--message-format=json diagnostics). `run_on` is a
+# glob over changed files. `{files}` in the command expands to the
+# changed paths (joined with spaces where embedded in one token).
+# [[tools.external]]
+# name = "eslint"
+# command = "npx eslint --format unix {files}"
+# format = "diag"
+# run_on = "**/*.{js,ts}"
+# budget_secs = 60
+
+[oracle]
+# off | check (cargo check -p <crate>) | test (cargo test -p <crate>
+# [target]). Omitted = auto: check for cargo workspaces, off
+# elsewhere; an explicit value always wins.
+# policy = "off"
+budget_secs = 180
+per_round_max = 5
+
+[review]
+# diff = added lines only; deep = whole changed files; full = every
+# tracked file (local mode only).
+scope = "diff"
+# Findings below this floor are not judged: nitpick | suggestion |
+# warning | critical.
+severity = "nitpick"
+
+[ratelimit]
+# Wired into the judge pass: per-provider lanes bound concurrent
+# calls to one provider, and a rate-limited response trips a
+# per-provider cooldown every waiter respects before its retry.
+per_provider_lanes = 4
+# Total in-flight requests across ALL providers (the outer pool every
+# per-provider lane nests inside). Raise it when a single-provider panel
+# needs more than 8 concurrent — the default — requests at once.
+# global_lanes = 8
+backoff_base_secs = 5
+jitter = 0.3
+
+# ---------------------------------------------------------------------------
+# Environment layer (not this file). Overrides apply over the file in
+# flag > process env > `~/.difftrace/env` order; an empty value counts
+# as unset. Non-UTF-8 variables are skipped, never fatal.
+#
+#   DIFFTRACE_SCOPE          diff | deep | full
+#   DIFFTRACE_SEVERITY       nitpick | suggestion | warning | critical
+#   DIFFTRACE_JUDGES         panel size (number)
+#   DIFFTRACE_JUDGE          comma-separated profiles (zai:glm-5.3,local)
+#   DIFFTRACE_FOCUS          comma-separated aspect ids to judge only
+#   DIFFTRACE_PASSES         passes per profile (>= 1)
+#   DIFFTRACE_ORACLE         off | check | test
+#   DIFFTRACE_BUDGET_SECS    0 (default) = no wall ceiling; N > 0 bounds
+#                            the whole run, recording what did not fit
+#   DIFFTRACE_REGION_RETRIES retries per region (default 3; 0 = fail
+#                            fast; at most 10)
+#
+# Secrets and provider knobs (~/.difftrace/env or exported):
+#   ZAI_API_KEY / ZHIPUAI_API_KEY   zai credentials
+#   ZAI_MODEL                       model for a bare `zai` profile
+#   ANTHROPIC_API_KEY               anthropic credentials
+#   ANTHROPIC_MODEL                 model for a bare `anthropic` profile
+#   DIFFTRACE_LOCAL_BASE_URL        any OpenAI-compatible server (required
+#                                   for the `local` profile, e.g.
+#                                   http://127.0.0.1:8080/v1)
+#   DIFFTRACE_LOCAL_MODEL           its model (or use a local:<model> profile)

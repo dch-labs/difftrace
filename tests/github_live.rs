@@ -1,74 +1,80 @@
-//! Live `GitHub` API tests.
-//!
-//! Run only when explicitly requested — set `DIFFTRACE_E2E=1`,
-//! `GITHUB_TOKEN`, `DIFFTRACE_TEST_REPO` (`owner/repo`), and
-//! `DIFFTRACE_TEST_PR`. Without them every test reports success by
-//! skipping, so CI stays offline.
+//! Live read-only verification of the hosted gateway against a real
+//! pull request: viewer login, thread listing, check runs, and the
+//! marker comment scan. Skipping silently unless `DIFFTRACE_E2E=1`,
+//! `GITHUB_TOKEN`, `DIFFTRACE_TEST_REPO` (owner/name), and
+//! `DIFFTRACE_TEST_PR` are all set — CI stays offline.
 
-use difftrace::github::GitHubClient;
-use difftrace::github::PrGateway;
-use difftrace::github::RepoRef;
+use difftrace::gateway::PrGateway;
+use difftrace::gateway::github::GitHubGateway;
 
-fn live_ready() -> Option<(String, String, u64)> {
-    std::env::var("DIFFTRACE_E2E")
-        .ok()
-        .filter(|value| value == "1")?;
+fn live_env() -> Option<(String, String, u64)> {
+    if std::env::var("DIFFTRACE_E2E").ok().as_deref() != Some("1") {
+        return None;
+    }
     let token = std::env::var("GITHUB_TOKEN").ok()?;
     let repo = std::env::var("DIFFTRACE_TEST_REPO").ok()?;
     let pr = std::env::var("DIFFTRACE_TEST_PR")
-        .ok()
-        .and_then(|v| v.parse().ok())?;
-    Some((token, repo, pr))
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    let (owner, name) = repo.split_once('/')?;
+    if token.is_empty() || owner.is_empty() || name.is_empty() {
+        return None;
+    }
+    Some((token, format!("{owner}/{name}"), pr))
 }
 
-#[tokio::test]
-async fn live_pr_overview_and_diff_fetch() -> Result<(), Box<dyn std::error::Error>> {
-    let Some((token, repo, pr)) = live_ready() else {
+fn split(repo: &str) -> (&str, &str) {
+    match repo.split_once('/') {
+        Some((owner, name)) => (owner, name),
+        None => ("", ""),
+    }
+}
+
+#[test]
+fn live_gets_resolve_under_the_token() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((token, repo, pr)) = live_env() else {
         return Ok(());
     };
-    let (owner, name) = repo
-        .split_once('/')
-        .ok_or("DIFFTRACE_TEST_REPO must be owner/repo")?;
-    let client = GitHubClient::new(
-        token,
-        RepoRef {
-            owner: owner.to_owned(),
-            repo: name.to_owned(),
-        },
-        None,
-    )?;
-    let overview = client.pr_overview(pr).await?;
-    assert!(!overview.head_sha.is_empty());
-    assert!(!overview.title.is_empty() || overview.number > 0);
-    let diff = client.pr_diff(pr).await?;
-    assert!(
-        diff.contains("diff --git"),
-        "expected a unified diff, got: {}",
-        diff.chars().take(80).collect::<String>()
+    let (owner, name) = split(&repo);
+    let start = std::env::current_dir()?;
+    let gateway = GitHubGateway::open_pr(&start, &token, owner, name, pr).map_err(|err| {
+        format!(
+            "the checkout must be the pull request head for the live read: {err} — run from a checkout of {repo}#{pr}"
+        )
+    })?;
+    let login = gateway.own_login()?;
+    assert!(!login.is_empty(), "the viewer query resolves a login");
+    let threads = gateway.own_threads()?;
+    println!(
+        "live viewer={login} own open threads={} head={}",
+        threads.len(),
+        gateway.pinned_range().head_sha
     );
+    let runs = gateway.fetch_check_runs(&gateway.pinned_range().head_sha)?;
+    println!(
+        "live check runs={} annotations={}",
+        runs.len(),
+        runs.iter().map(|run| run.findings.len()).sum::<usize>()
+    );
+    let marker = gateway.marker_comment()?;
+    println!("live marker comment present={}", marker.is_some());
     Ok(())
 }
 
-#[tokio::test]
-async fn live_own_threads_lists_under_the_token() -> Result<(), Box<dyn std::error::Error>> {
-    let Some((token, repo, pr)) = live_ready() else {
+#[test]
+fn live_permission_matrix_reads() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((token, repo, _pr)) = live_env() else {
         return Ok(());
     };
-    let (owner, name) = repo
-        .split_once('/')
-        .ok_or("DIFFTRACE_TEST_REPO must be owner/repo")?;
-    let client = GitHubClient::new(
-        token,
-        RepoRef {
-            owner: owner.to_owned(),
-            repo: name.to_owned(),
-        },
-        None,
-    )?;
-    let threads = client.own_threads(pr).await?;
+    let (owner, name) = split(&repo);
+    let start = std::env::current_dir()?;
+    let gateway = GitHubGateway::open_at(&start, &token, owner, name, 0, "HEAD")?;
+    let permission = gateway.permission(&gateway.own_login()?)?;
     assert!(
-        threads.iter().all(|thread| !thread.id.is_empty()),
-        "every listed thread carries its GraphQL id"
+        !permission.is_empty(),
+        "the collaborator permission endpoint answers for the viewer"
     );
+    println!("live viewer permission={permission}");
     Ok(())
 }

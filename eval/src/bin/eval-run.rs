@@ -12,6 +12,10 @@ use difftrace_eval::mutations;
 
 struct Args {
     golden: bool,
+    parity: bool,
+    v1_metrics: Option<PathBuf>,
+    current_metrics: Option<PathBuf>,
+    runner: Runner,
     index: PathBuf,
     transcripts: PathBuf,
     manifest: PathBuf,
@@ -22,14 +26,24 @@ struct Args {
     out_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Runner {
+    V1,
+    Current,
+}
+
 fn parse_args() -> Result<Args, DtError> {
     let mut golden = false;
     let mut mutations_mode = false;
+    let mut parity = false;
+    let mut v1_metrics = None;
+    let mut current_metrics = None;
     let mut index = None;
     let mut transcripts = None;
     let mut manifest = None;
     let mut repos = Vec::new();
     let mut binary = None;
+    let mut runner = Runner::V1;
     let mut only = Vec::new();
     let mut twice = false;
     let mut out_dir = None;
@@ -44,6 +58,9 @@ fn parse_args() -> Result<Args, DtError> {
                 | "--binary"
                 | "--only"
                 | "--out-dir"
+                | "--v1"
+                | "--current"
+                | "--runner"
         );
         let value = if needs_value {
             raw.next()
@@ -53,6 +70,9 @@ fn parse_args() -> Result<Args, DtError> {
         };
         match flag.as_str() {
             "--golden" => golden = true,
+            "--parity" => parity = true,
+            "--v1" => v1_metrics = Some(PathBuf::from(value)),
+            "--current" => current_metrics = Some(PathBuf::from(value)),
             "--mutations" => mutations_mode = true,
             "--index" => index = Some(PathBuf::from(value)),
             "--transcripts" => transcripts = Some(PathBuf::from(value)),
@@ -64,6 +84,17 @@ fn parse_args() -> Result<Args, DtError> {
                 repos.push((name.to_owned(), PathBuf::from(path)));
             }
             "--binary" => binary = Some(value),
+            "--runner" => {
+                runner = match value.as_str() {
+                    "v1" => Runner::V1,
+                    "current" => Runner::Current,
+                    other => {
+                        return Err(DtError::Cli(format!(
+                            "--runner must be v1 or current, got {other:?}"
+                        )));
+                    }
+                };
+            }
             "--only" => {
                 let one_based = value
                     .parse::<usize>()
@@ -77,9 +108,15 @@ fn parse_args() -> Result<Args, DtError> {
             other => return Err(DtError::Cli(format!("unknown flag {other}"))),
         }
     }
-    if golden == mutations_mode {
+    if parity {
+        if golden || mutations_mode {
+            return Err(DtError::Cli(
+                "--parity takes no --golden/--mutations".to_owned(),
+            ));
+        }
+    } else if golden == mutations_mode {
         return Err(DtError::Cli(
-            "exactly one of --golden or --mutations is required".to_owned(),
+            "exactly one of --golden, --mutations, or --parity is required".to_owned(),
         ));
     }
     let home = std::env::var("HOME").map_err(|_| DtError::Cli("HOME is unset".to_owned()))?;
@@ -98,6 +135,10 @@ fn parse_args() -> Result<Args, DtError> {
     }
     Ok(Args {
         golden,
+        parity,
+        v1_metrics,
+        current_metrics,
+        runner,
         index,
         transcripts,
         manifest,
@@ -119,6 +160,9 @@ fn main() {
 fn run() -> Result<(), DtError> {
     let args = parse_args()?;
     std::fs::create_dir_all(&args.out_dir).map_err(DtError::Io)?;
+    if args.parity {
+        return parity_report(&args);
+    }
     if args.golden {
         golden_baseline(&args)
     } else {
@@ -141,6 +185,45 @@ struct BranchConvergence {
     branch: String,
     rounds: usize,
     m3_rounds_to_zero: Option<u32>,
+}
+
+fn parity_report(args: &Args) -> Result<(), DtError> {
+    use difftrace_eval::report::{ParityMetrics, evaluate_gates, render_parity};
+    let v1_path = args
+        .v1_metrics
+        .as_ref()
+        .ok_or_else(|| DtError::Cli("--parity needs --v1 <metrics.json>".to_owned()))?;
+    let current_path = args
+        .current_metrics
+        .as_ref()
+        .ok_or_else(|| DtError::Cli("--parity needs --current <metrics.json>".to_owned()))?;
+    let read = |path: &Path| {
+        std::fs::read_to_string(path)
+            .map_err(|err| DtError::Cli(format!("{}: {err}", path.display())))
+    };
+    let v1: ParityMetrics = serde_json::from_str(&read(v1_path)?)
+        .map_err(|err| DtError::Cli(format!("{}: {err}", v1_path.display())))?;
+    let current: ParityMetrics = serde_json::from_str(&read(current_path)?)
+        .map_err(|err| DtError::Cli(format!("{}: {err}", current_path.display())))?;
+    let text = render_parity(&v1, &current);
+    let path = args.out_dir.join("current-vs-v1.md");
+    std::fs::write(&path, &text).map_err(DtError::Io)?;
+    eprintln!("eval-run: wrote {}", path.display());
+    let misses = evaluate_gates(&v1, &current);
+    for miss in &misses {
+        eprintln!(
+            "gate miss {}: {} (owning: {})",
+            miss.metric, miss.detail, miss.owning_task
+        );
+    }
+    if misses.is_empty() {
+        Ok(())
+    } else {
+        Err(DtError::Cli(format!(
+            "{} parity gate(s) missed — the cutover waits",
+            misses.len()
+        )))
+    }
 }
 
 fn golden_baseline(args: &Args) -> Result<(), DtError> {
@@ -286,18 +369,8 @@ fn timestamp() -> String {
         .map_or_else(|err| err.to_string(), |since| since.as_secs().to_string())
 }
 
-fn v1_binary(flag: Option<&String>) -> String {
-    flag.map_or_else(
-        || {
-            let local = PathBuf::from("target").join("release").join("difftrace");
-            if local.exists() {
-                local.to_string_lossy().into_owned()
-            } else {
-                "difftrace".to_owned()
-            }
-        },
-        Clone::clone,
-    )
+fn reviewer_binary(flag: Option<&String>) -> String {
+    flag.map_or_else(|| "difftrace".to_owned(), Clone::clone)
 }
 
 fn list_reviews(dir: &Path) -> Vec<String> {
@@ -315,7 +388,7 @@ fn findings_from_new_transcripts(
 ) -> Result<Vec<Finding>, DtError> {
     let mut findings = Vec::new();
     for name in list_reviews(transcripts) {
-        if before.contains(&name) {
+        if before.contains(&name) || name.ends_with(".report.json") {
             continue;
         }
         let text = std::fs::read_to_string(transcripts.join(&name)).map_err(DtError::Io)?;
@@ -333,7 +406,7 @@ fn mutation_runs(args: &Args) -> Result<(), DtError> {
     let home = std::env::var("HOME").map_err(|_| DtError::Cli("HOME is unset".to_owned()))?;
     let work_root = PathBuf::from(&home).join(".difftrace").join("eval-work");
     let reviews = PathBuf::from(&home).join(".difftrace").join("reviews");
-    let binary = v1_binary(args.binary.as_ref());
+    let binary = reviewer_binary(args.binary.as_ref());
     let selected: Vec<usize> = if args.only.is_empty() {
         (0..cases.len()).collect()
     } else {
@@ -371,7 +444,13 @@ fn mutation_runs(args: &Args) -> Result<(), DtError> {
             if !status.success() {
                 eprintln!("eval-run: case {} exited {}", idx.saturating_add(1), status);
             }
-            run_findings.push(findings_from_new_transcripts(&reviews, &before)?);
+            let harvested = match args.runner {
+                Runner::V1 => findings_from_new_transcripts(&reviews, &before)?,
+                Runner::Current => {
+                    difftrace_eval::report::findings_from_new_reports(&reviews, &before)?
+                }
+            };
+            run_findings.push(harvested);
             ran = ran.saturating_add(1);
         }
 
@@ -454,4 +533,18 @@ fn write_mutation_report(out_dir: &Path, report: &MutationReport) -> Result<(), 
         md_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_binary_default_resolves_from_path() {
+        assert_eq!(reviewer_binary(None), "difftrace".to_owned());
+        assert_eq!(
+            reviewer_binary(Some(&"~/tools/difftrace-v1".to_owned())),
+            "~/tools/difftrace-v1".to_owned()
+        );
+    }
 }

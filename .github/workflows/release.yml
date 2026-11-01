@@ -1,0 +1,63 @@
+# The release train: every v0.12.x tag push builds the release binary,
+# publishes it as the exact-tag release, and moves the moving v0.12 tag
+# to the same commit — consumer callers pin
+# dch-labs/difftrace/.github/workflows/review.yml@v0.12 and track every
+# patch release without touching their workflows. The tag moves here,
+# in CI, never from a local tree; protect the moving tag on the GitHub
+# side so only this workflow can move it.
+name: Release
+
+on:
+  push:
+    tags: ['v0.12.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, publish, and move the moving tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@1.98.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --all-features
+
+      - name: Package
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          cd target/release
+          tar -czf "difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" difftrace
+          sha256sum "difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+
+      - name: Publish the exact-tag release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          ASSET="target/release/difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Built from the tagged commit; the moving tag moves below." "$ASSET" ||
+            gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
+
+      - name: Move the moving tag to this commit
+        run: |
+          MOVING="v$(echo "$GITHUB_REF_NAME" | cut -d. -f1,2)"
+          git config user.name "difftrace-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git tag -f "$MOVING" "$GITHUB_SHA"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$MOVING" --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report
+        run: |
+          MOVING="v$(echo "$GITHUB_REF_NAME" | cut -d. -f1,2)"
+          echo "Released $GITHUB_REF_NAME and moved the moving tag $MOVING to $GITHUB_SHA."
+          echo "Callers pinned at @$MOVING now resolve to this release."

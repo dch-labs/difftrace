@@ -1,6 +1,19 @@
-.PHONY: check test clippy fmt docs ci lint e2e eval-fmt eval-clippy eval-test eval-golden eval-mutations eval-baseline eval-run-v1
+.PHONY: build release install check test clippy fmt docs ci lint eval-fmt eval-clippy eval-test eval-golden eval-mutations eval-baseline eval-run-v1 eval-run-current eval-parity
 
 ci: fmt check clippy test docs eval-fmt eval-clippy eval-test
+
+build:
+	cargo build --all-features
+
+release:
+	cargo build --release --all-features
+
+install: release
+	@mkdir -p $(HOME)/.local/bin
+	@rm -f $(HOME)/.local/bin/difftrace
+	@cp target/release/difftrace $(HOME)/.local/bin/difftrace
+	@chmod +x $(HOME)/.local/bin/difftrace
+	@echo "✅ Installed to $(HOME)/.local/bin/difftrace"
 
 check:
 	cargo check --all-features
@@ -43,7 +56,8 @@ eval-baseline:
 eval-run-v1:
 	cargo run -q --manifest-path eval/Cargo.toml --bin eval-run -- --mutations --repo dch=../dch --repo loopctl=../loopctl
 
-e2e:
-	@test -n "$(GITHUB_TOKEN)" && test -n "$(DIFFTRACE_TEST_REPO)" && test -n "$(DIFFTRACE_TEST_PR)" || { echo "ERROR: set GITHUB_TOKEN, DIFFTRACE_TEST_REPO (owner/repo), DIFFTRACE_TEST_PR"; exit 1; }
-	DIFFTRACE_E2E=1 GITHUB_TOKEN=$(GITHUB_TOKEN) DIFFTRACE_TEST_REPO=$(DIFFTRACE_TEST_REPO) DIFFTRACE_TEST_PR=$(DIFFTRACE_TEST_PR) cargo test --test github_live
-	GITHUB_TOKEN=$(GITHUB_TOKEN) cargo run --all-features -- review --repo $(DIFFTRACE_TEST_REPO) --pr $(DIFFTRACE_TEST_PR) --dry-run
+eval-run-current:
+	cargo run -q --manifest-path eval/Cargo.toml --bin eval-run -- --mutations --runner current --binary target/release/difftrace --repo dch=../dch --repo loopctl=../loopctl
+
+eval-parity:
+	cargo run -q --manifest-path eval/Cargo.toml --bin eval-run -- --parity --v1 eval/reports/v1-metrics.json --current eval/reports/current-metrics.json
