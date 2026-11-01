@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The v2 release train, local half. The CI half lives in
+# The release train, local half. The CI half lives in
 # .github/workflows/release.yml: every v0.12.* tag push builds the
 # release, publishes the exact-tag release, and moves the moving v0.12
 # tag that consumer callers pin.
@@ -101,7 +101,7 @@ case "${1:-}" in
   git commit -m "$SUBJECT" -- $PATHS "$WORKFLOW"
   git commit -m "chore: cut $VERSION" -- Cargo.toml Cargo.lock CHANGELOG.md
   git tag "$TAG"
-  git push origin HEAD "$TAG"
+  git push --atomic origin HEAD "$TAG"
   echo "$TAG pushed. The Release workflow builds it, publishes the release, and moves $MOVING to the same commit."
   ;;
 esac

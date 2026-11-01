@@ -908,7 +908,7 @@ fn run_hosted_review_at<G: crate::hosted::HostedOps + PrGateway + 'static>(
         outcome == RunOutcome::PartialRound,
         &posting_index(gateway.as_ref()),
     );
-    hosted.submit_review(&posting.review)?;
+    crate::hosted::submit_with_fallback(hosted, &posting.review)?;
     for reply in &posting.replies {
         if let Err(err) = hosted.reply_to_thread(reply.comment_id, &reply.body) {
             tracing::warn!(
@@ -2609,6 +2609,7 @@ mod tests {
         threads: std::sync::Mutex<Vec<crate::contracts::Thread>>,
         log: std::sync::Mutex<Vec<String>>,
         next_id: std::sync::Mutex<u64>,
+        rejected_events: std::sync::Mutex<Vec<String>>,
     }
 
     impl FakeHosted {
@@ -2620,6 +2621,7 @@ mod tests {
                 threads: std::sync::Mutex::new(Vec::new()),
                 log: std::sync::Mutex::new(Vec::new()),
                 next_id: std::sync::Mutex::new(100),
+                rejected_events: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -2710,6 +2712,17 @@ mod tests {
             submission: &crate::contracts::ReviewSubmission,
         ) -> Result<(), DtError> {
             self.record(&format!("review:{}", submission.event.as_str()));
+            if self
+                .rejected_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .any(|event| event == submission.event.as_str())
+            {
+                return Err(DtError::Gateway(
+                    "GitHub rejected the review event".to_owned(),
+                ));
+            }
             let mut threads = self
                 .threads
                 .lock()
@@ -2996,6 +3009,45 @@ mod tests {
             err.to_string().contains("needs write"),
             "the refusal names the access gap: {err}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn a_rejected_review_event_falls_back_to_one_neutral_comment() -> Result<(), DtError> {
+        let dir = git_scratch("hosted-fallback")?;
+        let reads = LocalGateway::open_at(&dir, "main")?;
+        let fake = FakeHosted::new(reads, "write");
+        *fake
+            .rejected_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            vec!["APPROVE".to_owned(), "REQUEST_CHANGES".to_owned()];
+        let approve = crate::contracts::ReviewSubmission {
+            head_sha: "h".to_owned(),
+            event: crate::contracts::ReviewEvent::Approved,
+            body: "verdict".to_owned(),
+            comments: Vec::new(),
+        };
+        crate::hosted::submit_with_fallback(&fake, &approve)?;
+        let logged = fake.logged();
+        assert_eq!(
+            logged,
+            vec!["review:APPROVE".to_owned(), "review:COMMENT".to_owned()],
+            "the rejected event retries exactly once as a neutral comment"
+        );
+        fake.rejected_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push("COMMENT".to_owned());
+        let neutral = crate::contracts::ReviewSubmission {
+            event: crate::contracts::ReviewEvent::Comment,
+            ..approve
+        };
+        assert!(
+            crate::hosted::submit_with_fallback(&fake, &neutral).is_err(),
+            "a rejected COMMENT submission propagates — there is nothing left to fall back to"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 

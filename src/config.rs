@@ -480,6 +480,12 @@ impl DifftraceConfig {
                     .to_owned(),
             ));
         }
+        if self.ratelimit.global_lanes == 0 {
+            return Err(DtError::Config(
+                "ratelimit.global_lanes must be positive: a zero global pool hangs every acquire"
+                    .to_owned(),
+            ));
+        }
         if self.ratelimit.backoff_base_secs == 0 {
             return Err(DtError::Config(
                 "ratelimit.backoff_base_secs must be positive: a zero backoff recreates the lockstep storm"
@@ -804,6 +810,7 @@ effort = "low"
                 "[ratelimit]\nper_provider_lanes = 0\n",
                 "per_provider_lanes",
             ),
+            ("[ratelimit]\nglobal_lanes = 0\n", "global_lanes"),
             ("[ratelimit]\nbackoff_base_secs = 0\n", "backoff_base_secs"),
             ("[ratelimit]\njitter = -0.1\n", "jitter"),
             ("[ratelimit]\njitter = inf\n", "jitter"),

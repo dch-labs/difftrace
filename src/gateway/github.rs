@@ -636,10 +636,11 @@ fn own_threads_page(wire: ThreadsWire, own_login: &str) -> (Vec<Thread>, Option<
             if bot_normalized(&login) != own_login {
                 return None;
             }
+            let line = comment.line.or(comment.original_line)?;
             Some(Thread {
                 id: thread.id,
                 path: comment.path,
-                line: comment.line.unwrap_or(0),
+                line,
                 original_line: comment.original_line,
                 comment_id: comment.database_id,
             })
@@ -799,21 +800,33 @@ mod tests {
                           "path": "src/c.rs", "line": 2, "originalLine": null } ] } },
                     { "id": "T_4", "isResolved": true, "comments": { "nodes": [
                         { "databaseId": 14, "author": { "login": "difftrace" },
-                          "path": "src/d.rs", "line": 9, "originalLine": null } ] } }
+                          "path": "src/d.rs", "line": 9, "originalLine": null } ] } },
+                    { "id": "T_5", "isResolved": false, "comments": { "nodes": [
+                        { "databaseId": 15, "author": { "login": "difftrace" },
+                          "path": "src/e.rs", "line": null, "originalLine": 7 } ] } },
+                    { "id": "T_6", "isResolved": false, "comments": { "nodes": [
+                        { "databaseId": 16, "author": { "login": "difftrace" },
+                          "path": "src/f.rs", "line": null, "originalLine": null } ] } }
                 ], "pageInfo": { "hasNextPage": false } } } }
             }"#,
         )?;
         let (threads, next) = own_threads_page(page, "difftrace[bot]");
         assert_eq!(
             threads.len(),
-            2,
-            "own open threads survive, foreign and resolved drop"
+            3,
+            "own open threads survive, foreign and resolved drop, and an anchorless outdated thread drops too"
         );
         assert!(next.is_none());
         let first = threads.first().ok_or("first thread missing")?;
         assert_eq!(first.id, "T_1");
         assert_eq!(first.line, 10);
         assert_eq!(first.original_line, Some(8));
+        let outdated = threads.get(2).ok_or("outdated thread missing")?;
+        assert_eq!(outdated.id, "T_5");
+        assert_eq!(
+            outdated.line, 7,
+            "a null current line anchors at its original line, never at zero"
+        );
         Ok(())
     }
 

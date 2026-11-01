@@ -42,7 +42,8 @@ pub fn check(regions: &[Region], gateway: &dyn PrGateway) -> Vec<ToolFinding> {
             if number < region.start || number > region.end {
                 continue;
             }
-            for candidate in link_targets(line) {
+            for raw_candidate in link_targets(line) {
+                let candidate = resolve_against(&region.file, &raw_candidate);
                 if !looks_like_repo_path(&candidate)
                     || tracked.contains(candidate.as_str())
                     || !seen.insert(format!("{}:{number}:{candidate}", region.file))
@@ -93,6 +94,15 @@ fn link_targets(line: &str) -> Vec<String> {
     targets
 }
 
+fn resolve_against(file: &str, candidate: &str) -> String {
+    match std::path::Path::new(file).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => {
+            format!("{}/{}", dir.display(), candidate)
+        }
+        _ => candidate.to_owned(),
+    }
+}
+
 fn looks_like_repo_path(candidate: &str) -> bool {
     if candidate.is_empty()
         || candidate.contains(char::is_whitespace)
@@ -102,6 +112,7 @@ fn looks_like_repo_path(candidate: &str) -> bool {
         || candidate.starts_with('-')
         || candidate.starts_with('.')
         || candidate.contains('*')
+        || candidate.split('/').any(|segment| segment == "..")
     {
         return false;
     }
@@ -264,6 +275,35 @@ mod tests {
         assert!(
             check(&[md_region()], &gateway).is_empty(),
             "tracked targets never fire"
+        );
+    }
+
+    #[test]
+    fn a_relative_link_resolves_against_the_linking_files_directory() {
+        let mut gateway = DocsGateway::readme("See [the setup](setup.md) here.\n");
+        gateway.files.push("docs/setup.md".to_owned());
+        gateway.contents.push((
+            "docs/guide.md".to_owned(),
+            "See [the setup](setup.md) here.\n".to_owned(),
+        ));
+        let nested = Region {
+            file: "docs/guide.md".to_owned(),
+            start: 1,
+            end: u32::MAX,
+            kind: RegionKind::Added,
+        };
+        assert!(
+            check(&[nested], &gateway).is_empty(),
+            "docs/setup.md is the target of docs/guide.md's relative link, not a root-level dangle"
+        );
+    }
+
+    #[test]
+    fn a_dotdot_link_target_is_never_a_repo_path() {
+        let gateway = DocsGateway::readme("Escape via [x](sub/../escape.rs) or [y](../top.rs).\n");
+        assert!(
+            check(&[md_region()], &gateway).is_empty(),
+            "dot-dot segments are not repo paths, before or after joining the linking directory"
         );
     }
 

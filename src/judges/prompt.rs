@@ -183,6 +183,10 @@ pub fn snapshot_admits(window: SnapshotWindow, line: u32) -> bool {
     line >= 1 && line <= window.total && (line <= window.head || line > window.tail_start)
 }
 
+fn shrink_halving(count: u32) -> u32 {
+    count.div_ceil(2).min(count.saturating_sub(1))
+}
+
 #[must_use]
 pub fn snapshot_window(content: &str) -> SnapshotWindow {
     let lines: Vec<&str> = content.lines().collect();
@@ -213,11 +217,9 @@ pub fn snapshot_window(content: &str) -> SnapshotWindow {
         if head_bytes.saturating_add(tail_bytes) <= SNAPSHOT_BUDGET_BYTES {
             break;
         }
-        head = head.div_ceil(2).max(head.saturating_sub(1)).min(head);
+        head = shrink_halving(head);
         let tail_count = total.saturating_sub(tail_start);
-        let tail_count = (tail_count / 2)
-            .max(tail_count.saturating_sub(1))
-            .min(tail_count);
+        let tail_count = shrink_halving(tail_count);
         tail_start = total.saturating_sub(tail_count);
         if head == 0 && tail_count == 0 {
             break;
@@ -414,6 +416,16 @@ mod tests {
             snapshot_admits(split, 1000) && !snapshot_admits(split, 1001),
             "the file's own last line is the tail window's edge"
         );
+    }
+
+    #[test]
+    fn the_byte_shrink_halves_instead_of_stepping_one_line() {
+        assert_eq!(shrink_halving(100), 50, "100 halves to 50, not to 99");
+        assert_eq!(shrink_halving(101), 51);
+        assert_eq!(shrink_halving(3), 2);
+        assert_eq!(shrink_halving(2), 1);
+        assert_eq!(shrink_halving(1), 0);
+        assert_eq!(shrink_halving(0), 0);
     }
 
     #[test]

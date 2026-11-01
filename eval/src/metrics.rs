@@ -81,6 +81,7 @@ fn same_spot_tokens(
 const RETIRE_AFTER_CONSECUTIVE_MISSES: u32 = 2;
 
 struct Standing {
+    file: String,
     line: u64,
     tokens: BTreeSet<String>,
     misses: u32,
@@ -93,12 +94,13 @@ pub fn m3_rounds_to_zero(rounds: &[Vec<Finding>]) -> Option<u32> {
     for round in rounds {
         let refound = |issue: &Standing| {
             round.iter().any(|finding| {
-                same_spot_tokens(
-                    issue.line,
-                    &issue.tokens,
-                    finding.line,
-                    &title_tokens(&finding.title),
-                )
+                finding.file == issue.file
+                    && same_spot_tokens(
+                        issue.line,
+                        &issue.tokens,
+                        finding.line,
+                        &title_tokens(&finding.title),
+                    )
             })
         };
         for issue in &mut standing {
@@ -111,11 +113,13 @@ pub fn m3_rounds_to_zero(rounds: &[Vec<Finding>]) -> Option<u32> {
         standing.retain(|issue| issue.misses < RETIRE_AFTER_CONSECUTIVE_MISSES);
         for finding in round {
             let tokens = title_tokens(&finding.title);
-            let known = standing
-                .iter()
-                .any(|issue| same_spot_tokens(issue.line, &issue.tokens, finding.line, &tokens));
+            let known = standing.iter().any(|issue| {
+                finding.file == issue.file
+                    && same_spot_tokens(issue.line, &issue.tokens, finding.line, &tokens)
+            });
             if !known {
                 standing.push(Standing {
+                    file: finding.file.clone(),
                     line: finding.line,
                     tokens,
                     misses: 0,
@@ -169,12 +173,13 @@ pub fn m4_recall(hits: usize, cases: usize) -> Option<f64> {
 
 #[must_use]
 pub fn same_spot_finding(a: &Finding, b: &Finding) -> bool {
-    same_spot_tokens(
-        a.line,
-        &title_tokens(&a.title),
-        b.line,
-        &title_tokens(&b.title),
-    )
+    a.file == b.file
+        && same_spot_tokens(
+            a.line,
+            &title_tokens(&a.title),
+            b.line,
+            &title_tokens(&b.title),
+        )
 }
 
 #[cfg(test)]
@@ -372,6 +377,37 @@ mod tests {
             m3_rounds_to_zero(&rephrased_new),
             None,
             "a drifted rephrase with overlap is the same issue, so round two adds nothing but there is no pair yet"
+        );
+    }
+
+    #[test]
+    fn findings_in_different_files_never_share_a_standing_issue() {
+        let same_line = vec![
+            vec![
+                finding("src/a.rs", 4, "the same wording", Severity::Warning),
+                finding("src/b.rs", 4, "the same wording", Severity::Warning),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ];
+        assert_eq!(
+            m3_rounds_to_zero(&same_line),
+            None,
+            "two same-line same-worded findings in different files are two issues, never one"
+        );
+        assert!(
+            !same_spot_finding(
+                &finding("src/a.rs", 4, "the lock is dropped", Severity::Warning),
+                &finding("src/b.rs", 4, "the lock is dropped", Severity::Warning),
+            ),
+            "identity is file-scoped: a different file is a different finding"
+        );
+        assert!(
+            same_spot_finding(
+                &finding("src/a.rs", 4, "the lock is dropped", Severity::Warning),
+                &finding("src/a.rs", 6, "dropped is the lock", Severity::Warning),
+            ),
+            "same file, drifted line, same tokens stays one identity"
         );
     }
 }

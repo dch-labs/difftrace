@@ -134,11 +134,11 @@ impl CooldownGate {
             .deadlines
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let earliest = deadlines
-            .get(host)
-            .map_or(now, |existing| (*existing).max(now));
         let farthest = now.checked_add(COOLDOWN_CAP).unwrap_or(now);
-        let deadline = earliest.checked_add(duration).unwrap_or(farthest);
+        let fresh = now.checked_add(duration).unwrap_or(farthest);
+        let deadline = deadlines
+            .get(host)
+            .map_or(fresh, |existing| (*existing).max(fresh));
         let _unused = deadlines.insert(host.to_owned(), deadline);
     }
 
@@ -264,17 +264,27 @@ mod tests {
         gate.trip("zai", None);
         let third = gate.remaining("zai");
         assert!(
-            third >= Duration::from_millis(34_900),
-            "consecutive header-less trips double per streak, so a quota window can actually pass: {third:?}"
+            third >= Duration::from_millis(19_900) && third <= Duration::from_secs(21),
+            "the streak escalates to its own duration — 20s at the third trip, never the 35s a sum would give: {third:?}"
         );
-        gate.trip("zai", Some(Duration::from_secs(2)));
-        let after_hint = gate.remaining("zai");
-        gate.trip("zai", None);
-        let reset = gate.remaining("zai");
-        let added = reset.checked_sub(after_hint).unwrap_or(Duration::ZERO);
+    }
+
+    #[test]
+    fn concurrent_trips_with_the_same_directive_never_stack() {
+        let gate = CooldownGate::new(0.0, Duration::from_secs(5));
+        for _ in 0..4 {
+            gate.trip("zai", Some(Duration::from_secs(60)));
+        }
+        let stacked = gate.remaining("zai");
         assert!(
-            added >= Duration::from_millis(4900) && added <= Duration::from_secs(6),
-            "a hinted trip resets the streak, so the next header-less trip starts at one base again: {after_hint:?} -> {reset:?} (+{added:?})"
+            stacked > Duration::from_secs(59) && stacked <= Duration::from_secs(61),
+            "four overlapping 60s directives cool for one directive, not four: {stacked:?}"
+        );
+        gate.trip("zai", Some(Duration::from_secs(300)));
+        let extended = gate.remaining("zai");
+        assert!(
+            extended > Duration::from_secs(299),
+            "a longer directive still extends past the standing deadline: {extended:?}"
         );
     }
 

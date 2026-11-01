@@ -369,8 +369,14 @@ fn timestamp() -> String {
         .map_or_else(|err| err.to_string(), |since| since.as_secs().to_string())
 }
 
-fn reviewer_binary(flag: Option<&String>) -> String {
-    flag.map_or_else(|| "difftrace".to_owned(), Clone::clone)
+fn reviewer_binary(flag: Option<&String>) -> Result<String, DtError> {
+    let binary = flag.map_or_else(|| "difftrace".to_owned(), Clone::clone);
+    if !binary.contains(std::path::MAIN_SEPARATOR) {
+        return Ok(binary);
+    }
+    std::fs::canonicalize(&binary)
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|err| DtError::Cli(format!("{binary}: {err}")))
 }
 
 fn list_reviews(dir: &Path) -> Vec<String> {
@@ -406,16 +412,14 @@ fn mutation_runs(args: &Args) -> Result<(), DtError> {
     let home = std::env::var("HOME").map_err(|_| DtError::Cli("HOME is unset".to_owned()))?;
     let work_root = PathBuf::from(&home).join(".difftrace").join("eval-work");
     let reviews = PathBuf::from(&home).join(".difftrace").join("reviews");
-    let binary = reviewer_binary(args.binary.as_ref());
+    let binary = reviewer_binary(args.binary.as_ref())?;
     let selected: Vec<usize> = if args.only.is_empty() {
         (0..cases.len()).collect()
     } else {
         args.only.clone()
     };
-    let mut hits: usize = 0;
-    let mut ran: usize = 0;
     let mut wall_total: u64 = 0;
-    let mut idempotent: Option<bool> = None;
+    let mut results: Vec<CaseOutcome> = Vec::new();
     for idx in selected {
         let case = cases.get(idx).ok_or_else(|| {
             DtError::Cli(format!("case {} is out of range", idx.saturating_add(1)))
@@ -451,7 +455,6 @@ fn mutation_runs(args: &Args) -> Result<(), DtError> {
                 }
             };
             run_findings.push(harvested);
-            ran = ran.saturating_add(1);
         }
 
         let titles = run_findings
@@ -464,15 +467,7 @@ fn mutation_runs(args: &Args) -> Result<(), DtError> {
             })
             .unwrap_or_default();
         let hit = metrics::mutation_hit(&titles, &case.expect_title_tokens);
-        if hit {
-            hits = hits.saturating_add(1);
-        }
-        if runs == 2 {
-            let first = run_findings.first().cloned().unwrap_or_default();
-            let second = run_findings.get(1).cloned().unwrap_or_default();
-            idempotent =
-                Some(idempotent.unwrap_or(true) && metrics::m2_idempotent(&first, &second));
-        }
+        results.push(CaseOutcome { hit, run_findings });
         eprintln!(
             "eval-run: case {} [{}]: {} findings, hit={hit}",
             idx.saturating_add(1),
@@ -480,16 +475,37 @@ fn mutation_runs(args: &Args) -> Result<(), DtError> {
             titles.len()
         );
     }
-    let recall = metrics::m4_recall(hits, ran);
-    eprintln!("eval-run: recall {hits}/{ran} = {recall:?}");
-    let report = MutationReport {
-        cases_run: ran,
+    let report = summarize_cases(&results, wall_total);
+    eprintln!(
+        "eval-run: recall {}/{} = {:?}",
+        report.hits, report.cases_run, report.m4_recall
+    );
+    write_mutation_report(&args.out_dir, &report)
+}
+
+struct CaseOutcome {
+    hit: bool,
+    run_findings: Vec<Vec<Finding>>,
+}
+
+fn summarize_cases(results: &[CaseOutcome], wall_secs: u64) -> MutationReport {
+    let hits = results.iter().filter(|outcome| outcome.hit).count();
+    let mut idempotent: Option<bool> = None;
+    for outcome in results {
+        if outcome.run_findings.len() == 2 {
+            let first = outcome.run_findings.first().cloned().unwrap_or_default();
+            let second = outcome.run_findings.get(1).cloned().unwrap_or_default();
+            idempotent =
+                Some(idempotent.unwrap_or(true) && metrics::m2_idempotent(&first, &second));
+        }
+    }
+    MutationReport {
+        cases_run: results.len(),
         hits,
         m2_idempotent: idempotent,
-        m4_recall: recall,
-        m5_wall_secs: wall_total,
-    };
-    write_mutation_report(&args.out_dir, &report)
+        m4_recall: metrics::m4_recall(hits, results.len()),
+        m5_wall_secs: wall_secs,
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -540,11 +556,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_binary_default_resolves_from_path() {
-        assert_eq!(reviewer_binary(None), "difftrace".to_owned());
+    fn the_binary_default_resolves_from_path() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(reviewer_binary(None)?, "difftrace".to_owned());
         assert_eq!(
-            reviewer_binary(Some(&"~/tools/difftrace-v1".to_owned())),
-            "~/tools/difftrace-v1".to_owned()
+            reviewer_binary(Some(&"difftrace-nightly".to_owned()))?,
+            "difftrace-nightly".to_owned(),
+            "a bare name stays a PATH lookup"
+        );
+        let dir = std::env::temp_dir().join(format!("dt-eval-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let bin = dir.join("difftrace-fixture");
+        std::fs::write(&bin, b"#!/bin/sh\n")?;
+        let resolved = reviewer_binary(Some(&bin.to_string_lossy().into_owned()))?;
+        let canonical = std::fs::canonicalize(&bin)?.to_string_lossy().into_owned();
+        assert_eq!(
+            resolved, canonical,
+            "a path-bearing binary resolves absolute before any run changes directory"
+        );
+        assert!(
+            reviewer_binary(Some(&"no/such/difftrace".to_owned()))
+                .is_err_and(|err| err.to_string().contains("no/such/difftrace")),
+            "a missing path-bearing binary fails here, not inside the worktree"
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn twice_counts_cases_not_runs_for_recall() {
+        let case = || {
+            vec![Finding {
+                file: "src/a.rs".to_owned(),
+                line: 3,
+                title: "the lock is dropped".to_owned(),
+                severity: difftrace_eval::extract::Severity::Warning,
+            }]
+        };
+        let one_case_two_runs = vec![CaseOutcome {
+            hit: true,
+            run_findings: vec![case(), case()],
+        }];
+        let report = summarize_cases(&one_case_two_runs, 0);
+        assert_eq!(
+            report.cases_run, 1,
+            "a case counts once however many runs it took"
+        );
+        assert_eq!(report.hits, 1);
+        assert!(
+            (report.m4_recall.unwrap_or(0.0) - 1.0).abs() < 1e-9,
+            "--twice keeps recall whole instead of halving it: {:?}",
+            report.m4_recall
+        );
+        assert_eq!(report.m2_idempotent, Some(true));
+        let two_cases = vec![
+            CaseOutcome {
+                hit: true,
+                run_findings: vec![Vec::new()],
+            },
+            CaseOutcome {
+                hit: false,
+                run_findings: vec![Vec::new()],
+            },
+        ];
+        let report = summarize_cases(&two_cases, 9);
+        assert_eq!(report.cases_run, 2);
+        assert_eq!(report.m5_wall_secs, 9);
+        assert_eq!(
+            report.m2_idempotent, None,
+            "no double run leaves m2 unmeasured"
         );
     }
 }

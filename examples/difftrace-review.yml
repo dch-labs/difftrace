@@ -29,6 +29,9 @@ permissions: {}
 jobs:
   review:
     name: difftrace
+    # Plain issue comments (not on a pull request) never start a
+    # review: the issue number would ride where a PR number belongs.
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
     # Fork pull requests are rejected callee-side before any
     # checkout: pull_request events read the payload flag, and
     # comment events (which GitHub fires for fork contributors

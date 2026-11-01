@@ -24,6 +24,28 @@ pub trait HostedOps {
     fn fetch_check_runs(&self, sha: &str) -> Result<Vec<CheckRun>, DtError>;
 }
 
+pub fn submit_with_fallback(
+    hosted: &dyn HostedOps,
+    submission: &ReviewSubmission,
+) -> Result<(), DtError> {
+    if let Err(err) = hosted.submit_review(submission) {
+        if submission.event == ReviewEvent::Comment {
+            return Err(err);
+        }
+        tracing::warn!(
+            target: "difftrace::hosted",
+            cause = %err,
+            "the review event was rejected; retrying once as a neutral comment so the verdict still lands"
+        );
+        let neutral = ReviewSubmission {
+            event: ReviewEvent::Comment,
+            ..submission.clone()
+        };
+        hosted.submit_review(&neutral)?;
+    }
+    Ok(())
+}
+
 #[must_use]
 pub fn permission_allows(permission: &str) -> bool {
     matches!(permission.trim(), "admin" | "write")
@@ -150,11 +172,27 @@ fn thread_matches(thread: &Thread, file: &str, line: u32) -> bool {
 }
 
 fn resolution_note(state: &RoundState, thread: &Thread) -> Option<String> {
-    let issue = state
+    let matched: Vec<&crate::contracts::Issue> = state
         .issues
         .iter()
-        .find(|issue| thread_matches(thread, &issue.identity.file, issue.identity.line))?;
-    match &issue.status {
+        .filter(|issue| thread_matches(thread, &issue.identity.file, issue.identity.line))
+        .collect();
+    if matched
+        .iter()
+        .any(|issue| matches!(issue.status, crate::contracts::IssueStatus::Open))
+    {
+        return None;
+    }
+    let chosen = matched
+        .iter()
+        .find(|issue| issue.identity.line == thread.line)
+        .or_else(|| {
+            matched
+                .iter()
+                .find(|issue| Some(issue.identity.line) == thread.original_line)
+        })
+        .or_else(|| matched.first())?;
+    match &chosen.status {
         crate::contracts::IssueStatus::Retired { round, .. } => Some(format!(
             "difftrace: resolving — the issue retired after repeated clean rounds (round {round})."
         )),
@@ -460,6 +498,62 @@ mod tests {
         assert!(resolution.note.contains("s1"));
         assert!(resolution.note.contains("owner rejected"));
         Ok(())
+    }
+
+    #[test]
+    fn a_thread_matching_any_open_issue_never_resolves() {
+        let open = issue("src/a.rs", 12, "still standing", IssueStatus::Open);
+        let retired = issue(
+            "src/a.rs",
+            9,
+            "adjacent old thing",
+            IssueStatus::Retired {
+                round: 2,
+                sha: "s".to_owned(),
+            },
+        );
+        let existing = thread("T_7", 15, "src/a.rs", 12);
+        let mut state = verdict(Vec::new(), Vec::new(), Vec::new());
+        state.state.issues = vec![retired, open];
+        let plan = plan_posting(&state, &[existing], false, &empty_index());
+        assert!(
+            plan.resolutions.is_empty(),
+            "the retired first match must not resolve a thread whose own issue is still open"
+        );
+    }
+
+    #[test]
+    fn resolution_prefers_the_exact_line_match_among_resolved_issues() {
+        let rejected_neighbor = issue(
+            "src/a.rs",
+            9,
+            "adjacent old thing",
+            IssueStatus::Rejected {
+                id: "s2".to_owned(),
+            },
+        );
+        let retired_exact = issue(
+            "src/a.rs",
+            12,
+            "the real one",
+            IssueStatus::Retired {
+                round: 4,
+                sha: "s".to_owned(),
+            },
+        );
+        let existing = thread("T_8", 16, "src/a.rs", 12);
+        let mut state = verdict(Vec::new(), Vec::new(), Vec::new());
+        state.state.issues = vec![rejected_neighbor, retired_exact];
+        let plan = plan_posting(&state, &[existing], false, &empty_index());
+        let note = plan
+            .resolutions
+            .first()
+            .map(|resolution| resolution.note.clone())
+            .unwrap_or_default();
+        assert!(
+            note.contains("round 4") && !note.contains("s2"),
+            "the exact-line match wins over the drifted first match: {note}"
+        );
     }
 
     #[test]

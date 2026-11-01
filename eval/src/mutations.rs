@@ -250,6 +250,9 @@ pub fn apply(
     work_root: &Path,
     check: bool,
 ) -> Result<PinnedRange, DtError> {
+    let src_repo = src_repo.canonicalize().map_err(DtError::Io)?;
+    std::fs::create_dir_all(work_root).map_err(DtError::Io)?;
+    let work_root = work_root.canonicalize().map_err(DtError::Io)?;
     let work = work_root.join(format!(
         "{}-{}",
         case.repo,
@@ -258,9 +261,8 @@ pub fn apply(
     if work.exists() {
         std::fs::remove_dir_all(&work).map_err(DtError::Io)?;
     }
-    std::fs::create_dir_all(work_root).map_err(DtError::Io)?;
     git(
-        src_repo,
+        &src_repo,
         &[
             "clone",
             &src_repo.to_string_lossy(),
@@ -530,6 +532,53 @@ mod tests {
         drop_scratch(&dir);
         drop_scratch(&work);
         drop_scratch(&work_root);
+        Ok(())
+    }
+
+    #[test]
+    fn a_relative_work_root_clones_outside_the_source_repo()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("dt-eval-rel-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src"))?;
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "fn scoped() {\n    drop(guard);\n}\n",
+        )?;
+        git(&dir, &["init", "-b", "trunk"])?;
+        git(&dir, &["config", "user.email", "eval@example.com"])?;
+        git(&dir, &["config", "user.name", "dt eval"])?;
+        git(&dir, &["add", "."])?;
+        git(&dir, &["commit", "-m", "base"])?;
+        let base = git(&dir, &["rev-parse", "HEAD"])?.trim().to_owned();
+        let case = Case {
+            repo: "synthetic".to_owned(),
+            base: base.clone(),
+            recipe: Recipe::Leak,
+            file: "src/lib.rs".to_owned(),
+            anchor: "drop(guard);".to_owned(),
+            expect_title_tokens: vec!["leak".to_owned()],
+        };
+        let work_root = std::path::PathBuf::from("target")
+            .join(format!("eval-relative-work-{}", std::process::id()));
+        let range = apply(&case, &dir, &work_root, false)?;
+        let short = base.get(..7).unwrap_or(base.as_str()).to_owned();
+        let checkout = std::env::current_dir()?
+            .join(&work_root)
+            .join(format!("synthetic-{short}"));
+        assert!(
+            checkout.join("src").join("lib.rs").exists(),
+            "the checkout lands at the cwd-resolved work root"
+        );
+        assert!(
+            !dir.join(&work_root)
+                .join(format!("synthetic-{short}"))
+                .exists(),
+            "a relative work root never clones into the source repository"
+        );
+        assert_eq!(range.base, base);
+        drop_scratch(&dir);
+        drop_scratch(&checkout);
+        drop_scratch(&std::env::current_dir()?.join(&work_root));
         Ok(())
     }
 

@@ -65,20 +65,21 @@ jobs:
       - name: Reject fork pull requests (fail closed)
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_FORK: ${{ github.event.pull_request.head.repo.fork }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
-          PR="${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}"
-          case "$PR" in ''|*[!0-9]*) echo "invalid pull request number: $PR" >&2; exit 1;; esac
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            FORK="${{ github.event.pull_request.head.repo.fork }}"
+          case "$PR" in ''|*[!0-9]*) echo "::error::invalid pull request number: $PR" >&2; exit 1;; esac
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            FORK="$HEAD_FORK"
           else
             OWNER=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json headRepositoryOwner --jq .headRepositoryOwner.login)
-            if [ "$OWNER" = "${{ github.repository_owner }}" ]; then FORK=false; else FORK=true; fi
+            if [ "$OWNER" = "$REPO_OWNER" ]; then FORK=false; else FORK=true; fi
           fi
           case "$FORK" in
-            true)
-              echo "::error::fork pull requests are not reviewed: the app token must not read external code" >&2
-              exit 1
-              ;;
+            false) ;;
+            *) echo "::error::fork pull requests are not reviewed: the app token must not read external code (saw fork=$FORK)" >&2; exit 1 ;;
           esac
 
       - name: Check out the pull request head
@@ -92,20 +93,23 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
+          mkdir -p ~/.local/bin
           gh release download v0.12 --repo dch-labs/difftrace \
-            --pattern 'difftrace-*-x86_64-unknown-linux-gnu.tar.gz' --dir /tmp/difftrace-install
-          tar -xzf /tmp/difftrace-install/difftrace-*-x86_64-unknown-linux-gnu.tar.gz -C /tmp/difftrace-install
-          install -m 0755 /tmp/difftrace-install/difftrace ~/.local/bin/difftrace
-          sha256sum ~/.local/bin/difftrace
+            --pattern 'difftrace-*-x86_64-unknown-linux-gnu.tar.gz*' --dir /tmp/difftrace-install
+          cd /tmp/difftrace-install
+          sha256sum -c difftrace-*-x86_64-unknown-linux-gnu.tar.gz.sha256
+          tar -xzf difftrace-*-x86_64-unknown-linux-gnu.tar.gz
+          install -m 0755 difftrace ~/.local/bin/difftrace
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Run the review
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           RUST_LOG: info
+          PR: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
+          ACTOR: ${{ inputs.actor || github.event.comment.user.login || github.actor }}
         run: |
-          PR="${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}"
-          ACTOR="${{ inputs.actor || github.event.comment.user.login || github.actor }}"
           difftrace review \
             --repo "$GITHUB_REPOSITORY" \
             --pr "$PR" \

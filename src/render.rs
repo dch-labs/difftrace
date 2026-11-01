@@ -19,6 +19,11 @@ const INDENT: &str = "    ";
 pub(crate) fn escape_inline(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
+        if c == '@' {
+            out.push('@');
+            out.push('\u{2060}');
+            continue;
+        }
         if matches!(
             c,
             '\\' | '['
@@ -872,7 +877,7 @@ mod tests {
     fn model_controlled_text_renders_inert_everywhere() {
         let mut verdict = blocking_verdict();
         let hostile = draft_finding(
-            "[build log](https://evil.example)",
+            "[build log](https://evil.example) cc @dch-labs/security",
             "concurrency",
             "src/a.rs",
             3,
@@ -904,6 +909,14 @@ mod tests {
         assert!(
             comment.contains("\\[build log\\]\\(https://evil.example\\)"),
             "the disguised link renders as inert text: {comment}"
+        );
+        assert!(
+            comment.contains("@\u{2060}dch-labs/security"),
+            "a mention-shaped handle gains a zero-width joiner and cannot notify anyone: {comment}"
+        );
+        assert!(
+            !comment.contains("@dch-labs/security"),
+            "the bare mention never ships: {comment}"
         );
         assert!(
             !comment.contains("[build log](https://evil.example)"),

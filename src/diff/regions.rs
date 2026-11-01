@@ -606,13 +606,17 @@ diff --git a/gone.rs b/gone.rs
     }
 
     #[test]
-    fn content_shaped_like_a_header_closing_the_counts_fails_closed() {
-        let diff = "--- a/f\n+++ b/f\n@@ -1,2 +1 @@\n ctx\n--- x\n";
-        let outcome = DiffIndex::parse(diff);
-        assert!(
-            matches!(&outcome, Err(err) if err.contains("line 5")),
-            "genuine `-- ` content closing the counts is indistinguishable from a swallowed header; the parse fails closed rather than guess: {outcome:?}"
+    fn a_final_removed_line_shaped_like_a_header_parses() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let diff = "--- a/migrate.sql\n+++ b/migrate.sql\n@@ -1,2 +1 @@\n SELECT 1;\n-- done\n";
+        let index = DiffIndex::parse(diff)?;
+        assert_eq!(
+            index.files(),
+            vec!["migrate.sql"],
+            "deleting a last `--` comment line is a legitimate diff, never a parse error"
         );
+        assert!(index.added_lines("migrate.sql").is_empty());
+        Ok(())
     }
 
     #[test]

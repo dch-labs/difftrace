@@ -279,7 +279,22 @@ fn run_side(
     };
     spec.timeout_secs = share;
     let key = CacheKey::new(sha, &lock_digest(root), &spec);
-    run_cached(adapter, &spec, &key, cache_dir, executor)
+    match run_cached(adapter, &spec, &key, cache_dir, executor) {
+        ToolOutcome::Ran(findings) => ToolOutcome::Ran(relativize_findings(findings, root)),
+        outcome @ ToolOutcome::Unavailable(_) => outcome,
+    }
+}
+
+fn relativize_findings(findings: Vec<ToolFinding>, root: &Path) -> Vec<ToolFinding> {
+    findings
+        .into_iter()
+        .map(|mut finding| {
+            if let Ok(relative) = std::path::Path::new(&finding.file).strip_prefix(root) {
+                finding.file = relative.to_string_lossy().into_owned();
+            }
+            finding
+        })
+        .collect()
 }
 
 #[must_use]
@@ -707,6 +722,64 @@ mod tests {
             run_on: "**".to_owned(),
             budget_secs: 60,
         })
+    }
+
+    #[test]
+    fn absolute_tool_paths_relativize_so_both_sides_dedupe() -> Result<(), DtError> {
+        let tool = diag_tool("rustfmt").map_err(|err| DtError::Git(err.to_string()))?;
+        let dir = scratch("relativize")?;
+        std::fs::write(dir.join("Cargo.lock"), "lock\n")
+            .map_err(|err| DtError::Git(err.to_string()))?;
+        let base = commit(&dir, &[("src/a.rs", "one\n")], "base")?;
+        let head = commit(&dir, &[("src/a.rs", "one\ntwo\n")], "head")?;
+        let range = PinnedRange {
+            base_sha: base,
+            head_sha: head,
+        };
+        let head_export = dir.join("head-side");
+        let base_export = dir.join("base-side");
+        std::fs::create_dir_all(&head_export).map_err(|err| DtError::Git(err.to_string()))?;
+        std::fs::create_dir_all(&base_export).map_err(|err| DtError::Git(err.to_string()))?;
+        std::fs::write(base_export.join("Cargo.lock"), "lock\n")
+            .map_err(|err| DtError::Git(err.to_string()))?;
+        let executor = SequenceExecutor::new(vec![
+            Ok(ExecOutput {
+                text: format!(
+                    "{}:1: error: debt\n",
+                    head_export.join("src/a.rs").display()
+                ),
+                code: Some(0),
+            }),
+            Ok(ExecOutput {
+                text: format!(
+                    "{}:1: error: debt\n",
+                    base_export.join("src/a.rs").display()
+                ),
+                code: Some(0),
+            }),
+        ]);
+        let outcome = run_differential(
+            &tool,
+            &[PathBuf::from("src/a.rs")],
+            &range,
+            &head_export,
+            &base_export,
+            &dir,
+            &executor,
+        );
+        let _unused = std::fs::remove_dir_all(&dir);
+        assert!(
+            outcome.new.is_empty(),
+            "the same finding under two absolute roots is shared debt, never branch-new: {:?}",
+            outcome.new
+        );
+        assert_eq!(
+            outcome.context.first().map(|finding| finding.file.clone()),
+            Some("src/a.rs".to_owned()),
+            "findings render repo-relative instead of absolute temp paths: {:?}",
+            outcome.context
+        );
+        Ok(())
     }
 
     #[test]

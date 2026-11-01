@@ -184,7 +184,10 @@ impl DiffIndex {
         let mut new_remaining: u32 = 0;
         let mut recognized = false;
         let mut pending_pair = false;
-        for (number, raw) in diff.lines().enumerate() {
+        let lines: Vec<&str> = diff.lines().collect();
+        for (number, raw) in lines.iter().enumerate() {
+            let raw = *raw;
+            let next = lines.get(number.saturating_add(1)).copied();
             let line_number = u32::try_from(number.saturating_add(1)).unwrap_or(0);
             if old_remaining == 0 && new_remaining == 0 {
                 if let Some(header) = raw.strip_prefix("+++ ") {
@@ -280,11 +283,6 @@ impl DiffIndex {
                         ));
                     }
                     old_remaining = old_remaining.saturating_sub(1);
-                    if let Some(error) =
-                        closure_error(raw, line_number, old_remaining, new_remaining, "--- ")
-                    {
-                        return Err(error);
-                    }
                 }
                 LineKind::Context | LineKind::Added => {
                     let Some((_, file)) = current.as_mut() else {
@@ -304,16 +302,19 @@ impl DiffIndex {
                     }
                     new_remaining = new_remaining.saturating_sub(1);
                     if kind == LineKind::Added
-                        && let Some(error) =
-                            closure_error(raw, line_number, old_remaining, new_remaining, "+++ ")
+                        && old_remaining == 0
+                        && new_remaining == 0
+                        && swallowed_new_file_header(raw, next)
                     {
-                        return Err(error);
+                        return Err(format!(
+                            "line {line_number}: a +++ header consumed as hunk body closes the counts exactly"
+                        ));
                     }
                 }
             }
         }
         if old_remaining > 0 || new_remaining > 0 {
-            let last = diff.lines().count();
+            let last = lines.len();
             return Err(format!(
                 "line {last}: the diff ends before the last hunk closes"
             ));
@@ -410,17 +411,12 @@ fn is_metadata_header(raw: &str) -> bool {
         || raw.starts_with("Binary files")
 }
 
-fn closure_error(
-    raw: &str,
-    line_number: u32,
-    old_remaining: u32,
-    new_remaining: u32,
-    prefix: &str,
-) -> Option<String> {
-    (raw.starts_with(prefix) && old_remaining == 0 && new_remaining == 0).then(|| {
-        format!(
-            "line {line_number}: a {prefix}header consumed as hunk body closes the counts exactly"
-        )
+fn swallowed_new_file_header(raw: &str, next: Option<&str>) -> bool {
+    if !raw.starts_with("+++ ") {
+        return false;
+    }
+    next.is_none_or(|next| {
+        next.starts_with("diff ") || next.starts_with("index ") || hunk_header(next).is_some()
     })
 }
 
@@ -656,6 +652,24 @@ mod tests {
         assert!(
             !window.contains("--- a/g") && !window.contains("diff --git"),
             "the window renders only f's own lines: {window}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_final_added_line_shaped_like_a_header_parses_before_the_next_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let diff = "--- a/f\n+++ b/f\n@@ -1,1 +1,2 @@\n-old\n+one\n+++ two\n--- a/g\n+++ b/g\n@@ -1,1 +1,1 @@\n b1\n";
+        let index = DiffIndex::parse(diff)?;
+        assert_eq!(
+            index.files(),
+            vec!["f", "g"],
+            "an added line shaped like a header, followed by the next file's header pair, is body"
+        );
+        assert_eq!(
+            index.added_lines("f"),
+            vec![1, 2],
+            "both added lines of the first file survive the parse"
         );
         Ok(())
     }

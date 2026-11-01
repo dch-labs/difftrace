@@ -14,8 +14,8 @@ use std::time::Duration;
 #[must_use]
 pub fn derive_command(mechanism: &str) -> Option<Vec<String>> {
     let text = mechanism.to_lowercase();
-    if text.contains("untracked and unignored") || text.contains("not ignored") {
-        let path = quoted_path(mechanism, "AGENTS.md").to_owned();
+    if text.contains("untracked and unignored") {
+        let path = quoted_path(mechanism)?.to_owned();
         return Some(vec![
             "git".to_owned(),
             "check-ignore".to_owned(),
@@ -36,7 +36,7 @@ pub fn derive_command(mechanism: &str) -> Option<Vec<String>> {
     None
 }
 
-fn quoted_path<'a>(mechanism: &'a str, fallback: &'a str) -> &'a str {
+fn quoted_path(mechanism: &str) -> Option<&str> {
     mechanism
         .split(|c: char| c.is_whitespace() || c == '`' || c == '"' || c == '(' || c == ')')
         .find(|token| {
@@ -46,7 +46,6 @@ fn quoted_path<'a>(mechanism: &'a str, fallback: &'a str) -> &'a str {
                     || ext.eq_ignore_ascii_case("toml")
             })
         })
-        .unwrap_or(fallback)
 }
 
 #[must_use]
@@ -77,19 +76,19 @@ pub fn execute_claims(
         let Ok(output) = output else {
             continue;
         };
-        match output.code {
-            Some(code) if code != 0 => {
-                results.insert(finding.id.0.clone(), OracleVerdict::Confirmed);
-            }
-            Some(0) => {
-                results.insert(
-                    finding.id.0.clone(),
-                    OracleVerdict::Refuted {
-                        command: spec.argv.join(" "),
-                    },
-                );
-            }
-            _ => {}
+        let confirmed = matches!(
+            (output.code, spec.argv.first().map(String::as_str)),
+            (Some(1), Some("git")) | (Some(101), Some("cargo"))
+        );
+        if confirmed {
+            results.insert(finding.id.0.clone(), OracleVerdict::Confirmed);
+        } else if output.code == Some(0) {
+            results.insert(
+                finding.id.0.clone(),
+                OracleVerdict::Refuted {
+                    command: spec.argv.join(" "),
+                },
+            );
         }
     }
     results
@@ -180,7 +179,7 @@ mod tests {
             "2/error-paths/package-check",
         );
         let executor = ScriptedExecutor {
-            code: 1,
+            code: 101,
             ran: std::sync::Mutex::new(Vec::new()),
         };
         let results = execute_claims(
@@ -195,7 +194,70 @@ mod tests {
                 results.get("2/error-paths/package-check"),
                 Some(OracleVerdict::Confirmed)
             ),
-            "a failing package listing mechanically confirms the gate defect"
+            "cargo's canonical failure exit (101) confirms the gate defect"
+        );
+    }
+
+    #[test]
+    fn a_git_fatal_exit_never_confirms_an_ignore_claim() {
+        let finding = lead(
+            "AGENTS.md is untracked and unignored so package-check is red",
+            "3/canon/fatal",
+        );
+        let executor = ScriptedExecutor {
+            code: 128,
+            ran: std::sync::Mutex::new(Vec::new()),
+        };
+        let results = execute_claims(
+            &[&finding],
+            Path::new("/repo"),
+            Duration::from_secs(30),
+            5,
+            &executor,
+        );
+        assert!(
+            results.is_empty(),
+            "a git fatal (128) is a dead probe, not a confirmation: {results:?}"
+        );
+    }
+
+    #[test]
+    fn plain_not_ignored_prose_never_derives_a_command() {
+        let finding = lead(
+            "the error from src/a.rs is not ignored by the caller",
+            "4/canon/prose",
+        );
+        assert!(
+            derive_command(&finding.mechanism).is_none(),
+            "ordinary prose mentioning \"not ignored\" settles nothing by execution"
+        );
+        let executor = ScriptedExecutor {
+            code: 0,
+            ran: std::sync::Mutex::new(Vec::new()),
+        };
+        let results = execute_claims(
+            &[&finding],
+            Path::new("/repo"),
+            Duration::from_secs(30),
+            5,
+            &executor,
+        );
+        assert!(
+            results.is_empty()
+                && executor
+                    .ran
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty(),
+            "no command runs for prose"
+        );
+    }
+
+    #[test]
+    fn an_ignore_claim_without_a_path_token_stays_unverifiable() {
+        assert!(
+            derive_command("the checkout is untracked and unignored").is_none(),
+            "with no md/rs/toml token there is no path to check — never a hardcoded fallback"
         );
     }
 

@@ -31,14 +31,15 @@ on stderr so a typo never reads as a broken environment.
 - **Configuration** — layered: an explicit `--config` path (which must
   exist), else the first `.difftrace/config.toml` found walking up
   from the working directory (whole-file precedence over the global
-  file), else `~/.difftrace/config.toml`, else defaults. The configuration tables
-  (`[judges]`, `[aspects]`, `[tools]` incl. `[[tools.external]]`,
-  `[oracle]`, `[ratelimit]`, `[review]`); unknown keys are
-  rejected. Env overrides cover the flag-mirrored knobs
-  (`DIFFTRACE_SCOPE`, `DIFFTRACE_SEVERITY`, `DIFFTRACE_JUDGES`,
-  `DIFFTRACE_JUDGE`, `DIFFTRACE_FOCUS`, `DIFFTRACE_PASSES`,
-  `DIFFTRACE_ORACLE`, `DIFFTRACE_BUDGET_SECS`); secrets never live in
-  config files — env or `~/.difftrace/env` only.
+  file), else `~/.difftrace/config.toml`, else defaults. The
+  configuration tables (`[judges]`, `[aspects]`, `[tools]` incl.
+  `[[tools.external]]`, `[oracle]`, `[ratelimit]`, `[review]`) declare
+  every knob; unknown keys are rejected. Env overrides cover the
+  flag-mirrored knobs (`DIFFTRACE_SCOPE`, `DIFFTRACE_SEVERITY`,
+  `DIFFTRACE_JUDGES`, `DIFFTRACE_JUDGE`, `DIFFTRACE_FOCUS`,
+  `DIFFTRACE_PASSES`, `DIFFTRACE_ORACLE`, `DIFFTRACE_REGION_RETRIES`,
+  `DIFFTRACE_BUDGET_SECS`); secrets never live in config files — env
+  or `~/.difftrace/env` only.
 - **Eval** — the `eval/` package (golden set, mutation corpus, metrics
   runner) measures the v1 binary now and the rewrite later; its runner drives whatever v1
   binary you point it at (`--binary`, defaulting to PATH).

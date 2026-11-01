@@ -20,8 +20,9 @@ pub fn check(regions: &[Region], gateway: &dyn PrGateway) -> Vec<ToolFinding> {
     }
     let crates = crates_in_diff(regions, &tracked);
     let mut findings = Vec::new();
-    for (krate, manifest) in crates {
-        if crate_has_enforcing_leg(&krate, &manifest, &workflow_text) {
+    for (dir, manifest) in crates {
+        let krate = package_name(gateway, &manifest, &dir);
+        if crate_has_enforcing_leg(&krate, &workflow_text) {
             continue;
         }
         findings.push(ToolFinding {
@@ -80,21 +81,42 @@ fn crates_in_diff(regions: &[Region], tracked: &[String]) -> Vec<(String, String
         .collect()
 }
 
-fn crate_has_enforcing_leg(krate: &str, manifest: &str, workflow_text: &str) -> bool {
-    let root_workspace_gate = workflow_text
-        .lines()
-        .any(|line| is_clippy_invocation(line) && !line.contains(" -p "));
-    if root_workspace_gate {
-        return true;
+fn package_name(gateway: &dyn PrGateway, manifest: &str, dir_fallback: &str) -> String {
+    let Ok(snapshot) = gateway.read_file_at_head(manifest) else {
+        return dir_fallback.to_owned();
+    };
+    let mut in_package = false;
+    for line in snapshot.content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_package = trimmed == "[package]";
+            continue;
+        }
+        if in_package
+            && let Some(value) = trimmed
+                .strip_prefix("name")
+                .and_then(|rest| rest.trim_start().strip_prefix('='))
+        {
+            let value = value.trim().trim_matches('"');
+            if !value.is_empty() {
+                return value.to_owned();
+            }
+        }
     }
+    dir_fallback.to_owned()
+}
+
+fn crate_has_enforcing_leg(krate: &str, workflow_text: &str) -> bool {
     workflow_text.lines().any(|line| {
-        is_clippy_invocation(line) && line.contains(" -p ") && line.contains(krate)
-            || is_clippy_invocation(line) && line.contains(" -p ") && manifest.contains(krate)
-    }) || workflow_text.contains("cargo clippy")
-        && workflow_text.contains(krate)
-        && workflow_text.lines().any(|line| {
-            line.contains("clippy") && line.contains(krate) && line.contains("-D warnings")
-        })
+        is_clippy_invocation(line) && (line_targets_crate(line, krate) || !line.contains(" -p "))
+    })
+}
+
+fn line_targets_crate(line: &str, krate: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    tokens
+        .windows(2)
+        .any(|pair| pair.first().is_some_and(|flag| *flag == "-p") && pair.get(1) == Some(&krate))
 }
 
 fn is_clippy_invocation(line: &str) -> bool {
@@ -246,6 +268,60 @@ mod tests {
         assert!(
             check(&[region("src/lib.rs")], &gateway).is_empty(),
             "the root package rides the workspace gate"
+        );
+    }
+
+    #[test]
+    fn a_prefix_crate_name_never_covers_its_longer_neighbor() {
+        let gateway = CiGateway {
+            tracked: vec![
+                ".github/workflows/ci.yml".to_owned(),
+                "crates/derive/Cargo.toml".to_owned(),
+                "crates/derive/src/attr.rs".to_owned(),
+            ],
+            workflows: vec![
+                (
+                    ".github/workflows/ci.yml".to_owned(),
+                    "  - run: cargo clippy --all-targets -p loopctl -- -D warnings\n".to_owned(),
+                ),
+                (
+                    "crates/derive/Cargo.toml".to_owned(),
+                    "[package]\nname = \"loopctl-derive\"\nversion = \"0.1.0\"\n".to_owned(),
+                ),
+            ],
+        };
+        let findings = check(&[region("crates/derive/src/attr.rs")], &gateway);
+        assert_eq!(
+            findings.len(),
+            1,
+            "`-p loopctl` is a whole-token match away from loopctl-derive — substring coverage is gone: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_package_name_drives_the_leg_not_the_directory_name() {
+        let gateway = CiGateway {
+            tracked: vec![
+                ".github/workflows/ci.yml".to_owned(),
+                "crates/derive/Cargo.toml".to_owned(),
+                "crates/derive/src/attr.rs".to_owned(),
+            ],
+            workflows: vec![
+                (
+                    ".github/workflows/ci.yml".to_owned(),
+                    "  - run: cargo clippy --all-targets -p loopctl-derive -- -D warnings\n"
+                        .to_owned(),
+                ),
+                (
+                    "crates/derive/Cargo.toml".to_owned(),
+                    "[package]\nname = \"loopctl-derive\"\nversion = \"0.1.0\"\n".to_owned(),
+                ),
+            ],
+        };
+        let findings = check(&[region("crates/derive/src/attr.rs")], &gateway);
+        assert!(
+            findings.is_empty(),
+            "the leg names the package from the member manifest, not the directory: {findings:?}"
         );
     }
 }

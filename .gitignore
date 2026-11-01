@@ -9,3 +9,5 @@
 *~
 .DS_Store
 .env
+/DESIGN-*.md
+hostile-review-*.md

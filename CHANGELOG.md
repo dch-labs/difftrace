@@ -155,6 +155,148 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The release train pins what it ships** — the moving tag was derived
+  as `vv0.12` (a second `v` in front of the ref), an older patch could
+  move it backward, and consumer installs found no release object at
+  `v0.12` and verified nothing. The moving tag now derives correctly,
+  patch releases serialize through one train lane and skip the move
+  when a newer `v0.12.*` exists (`git ls-remote` newest-check), the
+  exact-tag and moving releases both publish the tarball with a
+  `.sha256` sibling, the moving release is republished at the moved
+  tag, `review.yml` verifies the download (`sha256sum -c`) before
+  install, and `release.sh` pushes branch and tag with `--atomic`.
+  Pinned by `the_release_workflow_moves_the_moving_tag_in_ci`,
+  `the_reusable_review_workflow_declares_the_rewrite_contract`, and
+  `release_sh_pushes_the_branch_and_tag_atomically`.
+
+- **The reusable review workflow fails closed and stays injectable** —
+  the fork guard passed when the payload's fork flag was empty (a
+  deleted fork), caller-supplied `pr`/`actor` values were spliced into
+  shell source, `~/.local/bin` could be missing or off `PATH`, and the
+  caller template started reviews from plain issue comments. The guard
+  accepts only `false`, every expansion reaches shell through `env:`
+  mappings read as quoted variables, the install directory is created
+  and exported through `GITHUB_PATH`, and the caller template gates
+  `issue_comment` events to pull requests. Pinned by
+  `the_reusable_review_workflow_declares_the_rewrite_contract` and
+  `the_caller_template_pins_the_moving_tag_with_the_bump_comment`.
+
+- **The eval runner measures what it ran** — a relative `--binary`
+  resolved inside the per-case worktree (every fresh clone failed the
+  run), `--twice` doubled the `ran` count and halved recall, standing
+  issues merged across files because identity ignored the file, and a
+  relative `--work` cloned the corpus into the source repository.
+  Path-bearing binaries canonicalize before any chdir (bare names stay
+  PATH lookups), cases count once however many runs they took,
+  `Standing` carries the file and both lookups require file equality,
+  and `mutations::apply` canonicalizes `src_repo` and `work_root`.
+  Pinned by `the_binary_default_resolves_from_path`,
+  `twice_counts_cases_not_runs_for_recall`,
+  `findings_in_different_files_never_share_a_standing_issue`, and
+  `a_relative_work_root_clones_outside_the_source_repo`.
+
+- **The parser accepts legitimate end-of-file diffs** — deleting a last
+  `-- comment` line (SQL/Lua/Haskell/Ada) closed the declared counts
+  with a `--- `-shaped body line and failed the whole review with no
+  workaround. The `--- ` closure rejection is gone (a swallowed `--- `
+  header is still caught by the unpaired-`+++ ` rule), and a
+  `+++ `-shaped added line closing the counts rejects only when the
+  next line proves a swallowed file header (EOF, `diff `/`index `, or a
+  hunk header) — a legitimate closer before the next file's header
+  pair parses. Pinned by
+  `a_final_removed_line_shaped_like_a_header_parses`,
+  `a_final_added_line_shaped_like_a_header_parses_before_the_next_file`,
+  and the standing `an_under_declared_hunk_cannot_swallow_the_next_file_header`.
+
+- **The check policy no longer refutes runtime claims** — a clean
+  `cargo check` refuted any failure-marked claim, including hangs,
+  panics, and deadlocks, and cached that refutation per head sha. Under
+  `check`, only compile-failure claims ("does not compile" / "won't
+  compile") verify; runtime claims are inconclusive before any command
+  runs. Pinned by
+  `a_runtime_claim_stays_inconclusive_under_check_without_a_run`; the
+  claim-cap pin now asserts the runtime claim occupies its slot without
+  spending a command.
+
+- **Doc-refs resolves relative links against the linking file** — a
+  changed `docs/guide.md` linking `[setup](setup.md)` was looked up at
+  the repository root and flagged as a dangling (blocking) reference.
+  Targets now resolve against the linking file's parent, and targets
+  with `..` segments are never repo paths. Pinned by
+  `a_relative_link_resolves_against_the_linking_files_directory` and
+  `a_dotdot_link_target_is_never_a_repo_path`.
+
+- **Outdated review threads anchor at their original line** — GraphQL
+  `line: null` became line 0, matching any finding on lines 1–5 of the
+  file into the wrong reply or resolution; a thread with neither
+  current nor original line now drops. Pinned by
+  `bot_logins_normalize_before_the_own_thread_filter`.
+
+- **`ratelimit.global_lanes = 0` rejects at load** — a zero global
+  semaphore admitted no request ever and hung every acquire. Pinned by
+  `degenerate_ratelimit_knobs_reject`.
+
+- **Resolutions follow the thread's own issue** — a first-match retired
+  issue could resolve a thread whose exact issue was still open, and a
+  drifted match could resolve with another issue's note. All matches
+  are collected: any open match leaves the thread open, and the
+  exact-line match wins otherwise. A rejected APPROVE/REQUEST_CHANGES
+  review (the app authoring the PR) now falls back to one neutral
+  COMMENT submission instead of aborting before replies, resolutions,
+  and the marker update. Pinned by
+  `a_thread_matching_any_open_issue_never_resolves`,
+  `resolution_prefers_the_exact_line_match_among_resolved_issues`, and
+  `a_rejected_review_event_falls_back_to_one_neutral_comment`.
+
+- **Mention-shaped model text cannot notify** — `escape_inline` left
+  `@` live, so a prompt-injected `@org/security-team` in judge text
+  mentioned real accounts from the hosted comment. Every `@` gains a
+  zero-width joiner. Pinned by
+  `model_controlled_text_renders_inert_everywhere`.
+
+- **Concurrent cooldowns never stack past the directive** — N regions
+  hitting the same 429 together extended the deadline additively
+  (4×60 s = 240 s). A trip now keeps `max(existing, now + duration)`:
+  overlapping identical directives cool once, longer directives still
+  extend, and the header-less streak still escalates by its own
+  duration. Pinned by
+  `concurrent_trips_with_the_same_directive_never_stack` and
+  `header_less_trips_escalate_with_the_streak`.
+
+- **CI leg-coverage matches the `-p` argument as a whole token** — the
+  member manifest path always contains the directory name (the old
+  containment check was a tautology) and crate matching was substring
+  (`-p loopctl` "covered" `loopctl-derive`). Coverage now compares the
+  package name read from the member manifest (directory name as the
+  unreadable fallback) against the whole `-p` token. Pinned by
+  `a_prefix_crate_name_never_covers_its_longer_neighbor` and
+  `the_package_name_drives_the_leg_not_the_directory_name`.
+
+- **Differential tool findings relativize to the side root** — rustfmt
+  reports `Diff in /abs/path/...`, so the `(tool, file, message)` key
+  never matched across head and base export roots and every fmt
+  finding read as new, rendered with absolute temp paths. Findings are
+  relativized after the cached run; identical findings under different
+  roots dedupe into shared debt. Pinned by
+  `absolute_tool_paths_relativize_so_both_sides_dedupe`.
+
+- **Exec-settled claims confirm only on their command's failure exit**
+  — the ignore-claim trigger fired on ordinary "not ignored" prose, a
+  missing path token fell back to a hardcoded `AGENTS.md`, and any
+  nonzero exit (git fatal 128 among them) confirmed. The trigger is
+  the exact "untracked and unignored" phrase, no path token means no
+  command, `git check-ignore` confirms only on exit 1, and
+  `cargo package --list` only on cargo's 101. Pinned by
+  `a_git_fatal_exit_never_confirms_an_ignore_claim`,
+  `plain_not_ignored_prose_never_derives_a_command`, and
+  `an_ignore_claim_without_a_path_token_stays_unverifiable`.
+
+- **The snapshot byte-shrink halves instead of stepping one line** —
+  `div_ceil(2).max(count - 1)` always picks `count - 1`, making the
+  shrink loop O(lines) with full window re-joins per region attempt
+  per judge; both arms now halve through `div_ceil(2).min(count - 1)`.
+  Pinned by `the_byte_shrink_halves_instead_of_stepping_one_line`.
+
 - **A cite into a window the judge's own tool served is grounded** — the
   45dee27 run judged 30 defect cells and surfaced zero findings: 46 of 56
   weak leads died on cite shape because judges legitimately cite head-file

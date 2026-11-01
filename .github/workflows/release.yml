@@ -1,6 +1,7 @@
 # The release train: every v0.12.x tag push builds the release binary,
-# publishes it as the exact-tag release, and moves the moving v0.12 tag
-# to the same commit — consumer callers pin
+# publishes it as the exact-tag release with a sha256 sibling, moves
+# the moving v0.12 tag to the same commit, and republishes the moving
+# release every consumer installs from — callers pin
 # dch-labs/difftrace/.github/workflows/review.yml@v0.12 and track every
 # patch release without touching their workflows. The tag moves here,
 # in CI, never from a local tree; protect the moving tag on the GitHub
@@ -13,6 +14,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-train
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -34,8 +39,9 @@ jobs:
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           cd target/release
-          tar -czf "difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz" difftrace
-          sha256sum "difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          TARBALL="difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar -czf "$TARBALL" difftrace
+          sha256sum "$TARBALL" > "${TARBALL}.sha256"
 
       - name: Publish the exact-tag release
         env:
@@ -43,21 +49,31 @@ jobs:
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           ASSET="target/release/difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Built from the tagged commit; the moving tag moves below." "$ASSET" ||
-            gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Built from the tagged commit; the moving tag moves below." "$ASSET" "$ASSET.sha256" ||
+            gh release upload "$GITHUB_REF_NAME" "$ASSET" "$ASSET.sha256" --clobber
 
-      - name: Move the moving tag to this commit
+      - name: Move the moving tag and republish its release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          MOVING="v$(echo "$GITHUB_REF_NAME" | cut -d. -f1,2)"
+          MOVING="$(echo "$GITHUB_REF_NAME" | cut -d. -f1,2)"
+          REMOTE="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          NEWEST=$(git ls-remote --refs --tags "$REMOTE" "refs/tags/${MOVING}.*" | sed 's|.*refs/tags/||' | sort -V | tail -1)
+          if [ "$NEWEST" != "$GITHUB_REF_NAME" ]; then
+            echo "skipping the move: $NEWEST is the newest ${MOVING}.* tag and owns the moving tag — an older release never rewinds the train"
+            exit 0
+          fi
           git config user.name "difftrace-release-bot"
           git config user.email "release-bot@users.noreply.github.com"
           git tag -f "$MOVING" "$GITHUB_SHA"
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "refs/tags/$MOVING" --force
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git push "$REMOTE" "refs/tags/$MOVING" --force
+          VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          ASSET="target/release/difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          gh release delete "$MOVING" --yes || true
+          gh release create "$MOVING" --title "$MOVING" --notes "The moving release consumers install from; it tracks the newest v0.12.x. The exact-tag releases carry the history." "$ASSET" "$ASSET.sha256"
 
       - name: Report
         run: |
-          MOVING="v$(echo "$GITHUB_REF_NAME" | cut -d. -f1,2)"
-          echo "Released $GITHUB_REF_NAME and moved the moving tag $MOVING to $GITHUB_SHA."
-          echo "Callers pinned at @$MOVING now resolve to this release."
+          MOVING="$(echo "$GITHUB_REF_NAME" | cut -d. -f1,2)"
+          echo "Released $GITHUB_REF_NAME; the moving tag $MOVING now points at $GITHUB_SHA (or a newer patch owns it)."
+          echo "Callers pinned at @$MOVING install from the moving release."

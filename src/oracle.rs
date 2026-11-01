@@ -19,6 +19,8 @@ const FAILURE_MARKERS: [&str; 7] = [
     "deadlock",
 ];
 
+const COMPILE_MARKERS: [&str; 2] = ["does not compile", "won't compile"];
+
 #[must_use]
 pub fn verify(
     claims: &[&Finding],
@@ -119,6 +121,10 @@ fn decide(
     if !asserts_failure(&finding.title, &finding.mechanism) {
         return OracleVerdict::Inconclusive;
     }
+    if policy == OraclePolicy::Check && !asserts_compile_failure(&finding.title, &finding.mechanism)
+    {
+        return OracleVerdict::Inconclusive;
+    }
     let Some(map) = map else {
         return OracleVerdict::Inconclusive;
     };
@@ -162,6 +168,13 @@ fn ran_a_test(text: &str) -> bool {
 fn asserts_failure(title: &str, mechanism: &str) -> bool {
     let haystack = format!("{title} {mechanism}").to_lowercase();
     FAILURE_MARKERS
+        .iter()
+        .any(|marker| haystack.contains(marker))
+}
+
+fn asserts_compile_failure(title: &str, mechanism: &str) -> bool {
+    let haystack = format!("{title} {mechanism}").to_lowercase();
+    COMPILE_MARKERS
         .iter()
         .any(|marker| haystack.contains(marker))
 }
@@ -557,14 +570,59 @@ mod tests {
         let _unused = std::fs::remove_dir_all(&root);
         let _unused = std::fs::remove_dir_all(&cache_dir);
         assert!(
-            results.verdicts.contains_key(&first.id) && results.verdicts.contains_key(&second.id),
-            "the first two claims verify in input order"
+            matches!(
+                results.verdicts.get(&first.id),
+                Some(OracleVerdict::Refuted { .. })
+            ),
+            "the compile claim inside the cap is decided"
+        );
+        assert_eq!(
+            results.verdicts.get(&second.id),
+            Some(&OracleVerdict::Inconclusive),
+            "a runtime claim under check decides nothing — it still occupies its cap slot in order"
         );
         assert!(
             !results.verdicts.contains_key(&third.id),
             "the third claim sits past the per-round cap and is unattempted"
         );
-        assert_eq!(executor.calls.get(), 2);
+        assert_eq!(
+            executor.calls.get(),
+            1,
+            "only the compile claim spends a command under check"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_runtime_claim_stays_inconclusive_under_check_without_a_run()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = workspace("runtime-claim")?;
+        let cache_dir = cache("runtime-claim-cache")?;
+        let executor = FakeExecutor::passing();
+        let finding = claim(
+            "The walk hangs on the empty iterator",
+            4,
+            ClaimType::NeedsExecution,
+        );
+        let results = drive(
+            &[&finding],
+            OraclePolicy::Check,
+            &root,
+            &cache_dir,
+            &executor,
+        );
+        let _unused = std::fs::remove_dir_all(&root);
+        let _unused = std::fs::remove_dir_all(&cache_dir);
+        assert_eq!(
+            results.verdicts.get(&finding.id),
+            Some(&OracleVerdict::Inconclusive),
+            "a clean cargo check proves nothing about a runtime hang — the claim is never refuted"
+        );
+        assert_eq!(
+            executor.calls.get(),
+            0,
+            "the compile gate fires before any command runs"
+        );
         Ok(())
     }
 

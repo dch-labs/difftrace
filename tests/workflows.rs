@@ -46,6 +46,14 @@ fn the_reusable_review_workflow_declares_the_rewrite_contract()
         "fork heads fail closed"
     );
     assert!(
+        text.contains("false) ;;"),
+        "the fork guard accepts only false"
+    );
+    assert!(
+        text.contains("*) echo \"::error::fork pull requests are not reviewed"),
+        "an empty or missing fork flag rejects instead of passing: {text}"
+    );
+    assert!(
         !text.contains("if: github.event_name == 'pull_request'"),
         "the fork guard is never scoped to pull_request events only"
     );
@@ -72,6 +80,26 @@ fn the_reusable_review_workflow_declares_the_rewrite_contract()
         text.contains("startsWith(github.event.comment.body, '/review')"),
         "only first-line /review commands trigger"
     );
+    for mapping in ["PR: ${{", "ACTOR: ${{", "EVENT_NAME: ${{", "HEAD_FORK: ${{"] {
+        assert!(
+            text.contains(mapping),
+            "caller-supplied values reach shell through env mappings, not source"
+        );
+    }
+    for inline in ["PR=\"${{", "ACTOR=\"${{", "FORK=\"${{"] {
+        assert!(
+            !text.contains(inline),
+            "no template expansion is spliced into shell source"
+        );
+    }
+    assert!(
+        text.contains("mkdir -p ~/.local/bin") && text.contains(">> \"$GITHUB_PATH\""),
+        "the install directory exists and lands on PATH"
+    );
+    assert!(
+        text.contains("sha256sum -c"),
+        "the downloaded asset is verified against its checksum before install"
+    );
     Ok(())
 }
 
@@ -91,8 +119,32 @@ fn the_release_workflow_moves_the_moving_tag_in_ci() -> Result<(), Box<dyn std::
         "the moving tag derives from the exact tag"
     );
     assert!(
-        !text.contains("checksum"),
-        "no local checksum pin surgery survives the moving tag"
+        text.contains("MOVING=\"$(echo \"$GITHUB_REF_NAME\" | cut -d. -f1,2)\""),
+        "the ref already starts with v — no second v is prepended: {text}"
+    );
+    assert!(
+        !text.contains("MOVING=\"v$("),
+        "the double-v moving tag is gone"
+    );
+    assert!(
+        text.contains("concurrency:") && text.contains("cancel-in-progress: false"),
+        "patch releases serialize through one train lane instead of racing the tag"
+    );
+    assert!(
+        text.contains("ls-remote") && text.contains("owns the moving tag"),
+        "an older release checks the newest patch before moving and never rewinds the train"
+    );
+    assert!(
+        text.contains("\"$ASSET\" \"$ASSET.sha256\""),
+        "every release carries the tarball and its sha256 sibling"
+    );
+    assert!(
+        text.contains("gh release delete") && text.contains("gh release create \"$MOVING\""),
+        "the moving tag owns a release object, republished at the moved tag"
+    );
+    assert!(
+        !has_hardcoded_digest(&text),
+        "no local checksum pin surgery — digests ship as release assets, never in-file"
     );
     let binaries = read(".github/workflows/binaries.yml")?;
     assert!(
@@ -100,6 +152,21 @@ fn the_release_workflow_moves_the_moving_tag_in_ci() -> Result<(), Box<dyn std::
         "nightly builds only — tags belong to the release train"
     );
     Ok(())
+}
+
+fn has_hardcoded_digest(text: &str) -> bool {
+    let mut run: u32 = 0;
+    for ch in text.chars() {
+        if ch.is_ascii_hexdigit() {
+            run = run.saturating_add(1);
+            if run >= 64 {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
 }
 
 #[test]
@@ -113,6 +180,20 @@ fn the_caller_template_pins_the_moving_tag_with_the_bump_comment()
     assert!(
         !text.contains("releases/download"),
         "no caller-side binary pins — the callee installs from the tag"
+    );
+    assert!(
+        text.contains("github.event.issue.pull_request != null"),
+        "plain issue comments never reach the callee as pull request numbers"
+    );
+    Ok(())
+}
+
+#[test]
+fn release_sh_pushes_the_branch_and_tag_atomically() -> Result<(), Box<dyn std::error::Error>> {
+    let text = read("release.sh")?;
+    assert!(
+        text.contains("git push --atomic origin HEAD \"$TAG\""),
+        "a rejected branch push can never leave the tag pushed alone: {text}"
     );
     Ok(())
 }
