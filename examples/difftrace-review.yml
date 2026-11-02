@@ -1,17 +1,14 @@
-# Caller template for the difftrace review workflow
-# (dch-labs/difftrace/.github/workflows/review.yml). Copy verbatim; on
-# every difftrace release, bump the ref in the uses: line below — the
-# `release.sh pins` command in the difftrace repo prints the exact
-# line to copy, a fixed commit carrying the release's binary
-# version+checksum pins.
+# Caller template for the difftrace review workflow.
+# Copy verbatim into the consumer repository. The uses: ref below pins
+# the MOVING tag v0.12 — release.yml in the difftrace repo moves it to
+# every v0.12.x release, so this file changes only on a major/minor
+# bump of difftrace. Never pin a commit sha or a patch version here.
 #
-# What the pinned callee enforces on its side — the jobs are not in this
-# file: fork and dependabot pull requests are rejected; command authors
-# must be collaborators with write; required secrets fail fast with
-# named messages; the binary is checksum-pinned; all writes go through
-# a least-privilege app token; concurrency lanes are callee-side too
-# — pushes supersede in-flight reviews and commands queue FIFO without
-# dropping (up to 100 pending; beyond that, arrivals are canceled).
+# Required repository secrets (fail fast if missing):
+#   ZAI_API_KEY               the judge provider key
+#   DIFFTRACE_APP_ID          the difftrace GitHub App id
+#   DIFFTRACE_APP_PRIVATE_KEY the difftrace GitHub App private key
+# The app needs pull-requests write + contents read on this repository.
 name: difftrace review
 
 on:
@@ -26,21 +23,24 @@ on:
       pr:
         description: "Pull request number to review"
         required: true
-      model:
-        description: "Model to review with"
-        required: false
 
-permissions:
-  pull-requests: write
-  contents: read
+permissions: {}
 
 jobs:
   review:
+    name: difftrace
+    # Plain issue comments (not on a pull request) never start a
+    # review: the issue number would ride where a PR number belongs.
     if: github.event_name != 'issue_comment' || github.event.issue.pull_request != null
-    uses: dch-labs/difftrace/.github/workflows/review.yml@a272e47e1826be342d360227c60ba598b1d4f201 # v0.11.3
+    # Fork pull requests are rejected callee-side before any
+    # checkout: pull_request events read the payload flag, and
+    # comment events (which GitHub fires for fork contributors
+    # commenting on the base repository's pull request too) resolve
+    # the pull request and compare head owner to base owner first.
+    uses: dch-labs/difftrace/.github/workflows/review.yml@v0.12 # bump major/minor only
     with:
-      pr: ${{ github.event.pull_request.number || (github.event.issue.pull_request != null && github.event.issue.number) || inputs.pr }}
-      model: ${{ inputs.model }}
+      pr: ${{ inputs.pr || github.event.pull_request.number || github.event.issue.number }}
+      actor: ${{ github.event.comment.user.login || github.actor }}
     secrets:
       ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
       DIFFTRACE_APP_ID: ${{ secrets.DIFFTRACE_APP_ID }}

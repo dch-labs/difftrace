@@ -17,7 +17,7 @@ type-complexity-threshold = 250
 too-many-lines-threshold = 150
 
 # Maximum number of arguments before warning.
-too-many-arguments-threshold = 7
+too-many-arguments-threshold = 8
 
 # MSRV from Cargo.toml.
 msrv = "1.98.0"

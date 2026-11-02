@@ -1,4 +1,9 @@
 /target
+/eval/target
+/eval/golden
+/eval/seed-false-positives.md
+/eval/mutations
+/eval/reports
 *.swp
 *.swo
 *~

@@ -3,7 +3,6 @@ name: Binaries
 on:
   push:
     branches: [master]
-    tags: ['v*']
 
 permissions:
   contents: write
@@ -36,11 +35,6 @@ jobs:
         run: |
           VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           ASSET="target/release/difftrace-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Built from the tagged commit." "$ASSET" ||
-              gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
-          else
-            gh release delete nightly --cleanup-tag --yes || true
-            gh release create nightly --title "nightly" --prerelease --notes "Rolling build from master."
-            gh release upload nightly "$ASSET"
-          fi
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly --title "nightly" --prerelease --notes "Rolling build from master."
+          gh release upload nightly "$ASSET"
